@@ -6,7 +6,7 @@ _Last verified: cargo 1.98.1 / rustc 1.98.1 on Linux._
 
 ~~~
 cargo check --workspace --all-targets   # clean (warnings only)
-cargo test --workspace                 # 206 passed, 0 failed
+cargo test --workspace                 # 223 passed, 0 failed
 ~~~
 
 Per-target tests:
@@ -16,7 +16,7 @@ Per-target tests:
 | cnc-core (unit + INI + Rules.ini) | 57 |
 | cnc-asset (parsers + converters + Ogg) | 26 |
 | cnc-asset-cli (end-to-end integration) | 8 |
-| cnc-tiberian-dawn (game logic + rules + lockstep + netcode) | 110 |
+| cnc-tiberian-dawn (game logic + rules + lockstep + netcode + sidebar/AI) | 127 |
 | cnc-renderer (camera + sprite batch) | 3 |
 | cnc-renderer (GPU smoke, ignored unless adapter present) | 2 |
 
@@ -66,8 +66,15 @@ Details:
   checksums, remote desync detection, replay reconstruction.
 - Binary packet codec (magic CNCP, version 1) with defensive limits, trailing-byte
   checks and checksum validation.
-- UdpTransport: explicit peer list, encoded multi-peer broadcast, validated receive.
-- Still TODO: replay save/load to disk, peer join/leave handshake, lockstep mesh relay.
+- UdpTransport: explicit peer list, encoded multi-peer broadcast, validated receive,
+  plus datagram dispatch that routes command and handshake frames on one socket.
+- Replay persistence: versioned CNCR file (magic/version/player count/command records)
+  with an FNV-1a trailer; `Replay::save/load` and `LockstepSession::save_replay/
+  load_replay` reject corruption, truncation and unsupported versions.
+- Peer join/leave handshake: CNCH `JoinRequest/JoinAccepted/JoinRejected/Leave`
+  frames and a `PeerHandshake` state machine that validates slot numbers, room size,
+  duplicate addresses and emits `PeerJoined/PeerLeft` events.
+- Still TODO: lockstep mesh relay (broadcast works today, forwarding does not).
 
 ### 5.2 Rules/INI registry - DONE (first pass)
 - cnc-core/src/rules.rs parses Rules.ini into typed data: GeneralRules (RULES.CPP
@@ -84,9 +91,18 @@ Details:
 - Tech tree: Prerequisite= tokens are enforced for unit and building production,
   including GDI/NOD faction tokens and PYLE/HAND, HPAD/AFLD aliases; missing
   prerequisites are exposed through missing_prerequisites() for UI use.
+- TechLevel gating: per-type build levels from Rules.ini `TechLevel=` (fallback:
+  TDATA/UDATA/BDATA values) are checked against the house build level before
+  production; houses default to level 98 (skirmish/multiplayer) and scenarios may
+  lower it.
+- Sidebar visibility: `Game::sidebar_options` / `visible_sidebar_options` expose
+  rules cost, TechLevel, affordability, producer and unmet prerequisites; the
+  launcher renders only visible rows and uses rules-derived costs.
+- AI production weighting: `AI::production_weights` scores units from the rules
+  registry (faction, TechLevel, prerequisites, cost, health-per-credit, difficulty)
+  and `choose_weighted` makes a deterministic, lockstep-safe selection; the game
+  exposes `ai_production_choice` and `ai_queue_production`.
 - Launcher accepts --rules Rules.ini and applies the overrides to the demo game.
-- Still TODO: TechLevel gating, AI production weighting, prerequisite-driven
-  sidebar visibility.
 
 ## Core Types (Phase 1) - COMPLETE
 
@@ -99,6 +115,6 @@ Details:
 - All dependencies in workspace Cargo.toml
 
 ## Next Steps
-1. Persist replays to disk and implement the peer join/leave handshake.
-2. Enforce TechLevel and drive sidebar visibility/prerequisites from Rules.ini.
-3. Phase 6: expand Tiberian Dawn game logic (houses, missions, command execution).
+1. Phase 6: expand Tiberian Dawn game logic (houses, missions, command execution).
+2. Lockstep mesh relay and host migration.
+3. Faction `Owner=` filtering for sidebar and AI production.

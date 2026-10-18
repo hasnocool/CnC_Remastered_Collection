@@ -313,31 +313,156 @@ impl WeaponType {
     /// Exact rows from CONST.CPP Weapons[].
     pub const fn stats(self) -> WeaponStats {
         match self {
-            WeaponType::Rifle => WeaponStats { bullet: BulletType::Sniper, damage: 125, rof_ticks: 40, range_leptons: 0x0580 },
-            WeaponType::ChainGun => WeaponStats { bullet: BulletType::Spreadfire, damage: 25, rof_ticks: 50, range_leptons: 0x0400 },
-            WeaponType::Pistol => WeaponStats { bullet: BulletType::Bullet, damage: 1, rof_ticks: 7, range_leptons: 0x01C0 },
-            WeaponType::M16 => WeaponStats { bullet: BulletType::Bullet, damage: 15, rof_ticks: 20, range_leptons: 0x0200 },
-            WeaponType::Dragon => WeaponStats { bullet: BulletType::Tow, damage: 30, rof_ticks: 60, range_leptons: 0x0400 },
-            WeaponType::Flamethrower => WeaponStats { bullet: BulletType::Flame, damage: 35, rof_ticks: 50, range_leptons: 0x0200 },
-            WeaponType::FlameTongue => WeaponStats { bullet: BulletType::Flame, damage: 50, rof_ticks: 50, range_leptons: 0x0200 },
-            WeaponType::ChemSpray => WeaponStats { bullet: BulletType::ChemSpray, damage: 80, rof_ticks: 70, range_leptons: 0x0200 },
-            WeaponType::Grenade => WeaponStats { bullet: BulletType::Grenade, damage: 50, rof_ticks: 60, range_leptons: 0x0340 },
-            WeaponType::Cannon75 => WeaponStats { bullet: BulletType::Apds, damage: 25, rof_ticks: 60, range_leptons: 0x0400 },
-            WeaponType::Cannon105 => WeaponStats { bullet: BulletType::Apds, damage: 30, rof_ticks: 50, range_leptons: 0x04C0 },
-            WeaponType::Cannon120 => WeaponStats { bullet: BulletType::Apds, damage: 40, rof_ticks: 80, range_leptons: 0x04C0 },
-            WeaponType::TurretGun => WeaponStats { bullet: BulletType::Apds, damage: 40, rof_ticks: 60, range_leptons: 0x0600 },
-            WeaponType::MammothTusk => WeaponStats { bullet: BulletType::Ssm, damage: 75, rof_ticks: 80, range_leptons: 0x0500 },
-            WeaponType::Mlrs => WeaponStats { bullet: BulletType::Ssm2, damage: 75, rof_ticks: 80, range_leptons: 0x0600 },
-            WeaponType::Cannon155 => WeaponStats { bullet: BulletType::He, damage: 150, rof_ticks: 65, range_leptons: 0x0600 },
-            WeaponType::M60Mg => WeaponStats { bullet: BulletType::Bullet, damage: 15, rof_ticks: 30, range_leptons: 0x0400 },
-            WeaponType::Tomahawk => WeaponStats { bullet: BulletType::Ssm, damage: 60, rof_ticks: 35, range_leptons: 0x0780 },
-            WeaponType::TowTwo => WeaponStats { bullet: BulletType::Ssm, damage: 60, rof_ticks: 40, range_leptons: 0x0680 },
-            WeaponType::Napalm => WeaponStats { bullet: BulletType::Napalm, damage: 100, rof_ticks: 20, range_leptons: 0x0480 },
-            WeaponType::ObeliskLaser => WeaponStats { bullet: BulletType::Laser, damage: 200, rof_ticks: 90, range_leptons: 0x0780 },
-            WeaponType::Nike => WeaponStats { bullet: BulletType::Sam, damage: 50, rof_ticks: 50, range_leptons: 0x0780 },
-            WeaponType::HonestJohn => WeaponStats { bullet: BulletType::HonestJohn, damage: 100, rof_ticks: 200, range_leptons: 0x0A00 },
-            WeaponType::Steg => WeaponStats { bullet: BulletType::HeadButt, damage: 100, rof_ticks: 30, range_leptons: 0x0180 },
-            WeaponType::Trex => WeaponStats { bullet: BulletType::TrexBite, damage: 155, rof_ticks: 30, range_leptons: 0x0180 },
+            WeaponType::Rifle => WeaponStats {
+                bullet: BulletType::Sniper,
+                damage: 125,
+                rof_ticks: 40,
+                range_leptons: 0x0580,
+            },
+            WeaponType::ChainGun => WeaponStats {
+                bullet: BulletType::Spreadfire,
+                damage: 25,
+                rof_ticks: 50,
+                range_leptons: 0x0400,
+            },
+            WeaponType::Pistol => WeaponStats {
+                bullet: BulletType::Bullet,
+                damage: 1,
+                rof_ticks: 7,
+                range_leptons: 0x01C0,
+            },
+            WeaponType::M16 => WeaponStats {
+                bullet: BulletType::Bullet,
+                damage: 15,
+                rof_ticks: 20,
+                range_leptons: 0x0200,
+            },
+            WeaponType::Dragon => WeaponStats {
+                bullet: BulletType::Tow,
+                damage: 30,
+                rof_ticks: 60,
+                range_leptons: 0x0400,
+            },
+            WeaponType::Flamethrower => WeaponStats {
+                bullet: BulletType::Flame,
+                damage: 35,
+                rof_ticks: 50,
+                range_leptons: 0x0200,
+            },
+            WeaponType::FlameTongue => WeaponStats {
+                bullet: BulletType::Flame,
+                damage: 50,
+                rof_ticks: 50,
+                range_leptons: 0x0200,
+            },
+            WeaponType::ChemSpray => WeaponStats {
+                bullet: BulletType::ChemSpray,
+                damage: 80,
+                rof_ticks: 70,
+                range_leptons: 0x0200,
+            },
+            WeaponType::Grenade => WeaponStats {
+                bullet: BulletType::Grenade,
+                damage: 50,
+                rof_ticks: 60,
+                range_leptons: 0x0340,
+            },
+            WeaponType::Cannon75 => WeaponStats {
+                bullet: BulletType::Apds,
+                damage: 25,
+                rof_ticks: 60,
+                range_leptons: 0x0400,
+            },
+            WeaponType::Cannon105 => WeaponStats {
+                bullet: BulletType::Apds,
+                damage: 30,
+                rof_ticks: 50,
+                range_leptons: 0x04C0,
+            },
+            WeaponType::Cannon120 => WeaponStats {
+                bullet: BulletType::Apds,
+                damage: 40,
+                rof_ticks: 80,
+                range_leptons: 0x04C0,
+            },
+            WeaponType::TurretGun => WeaponStats {
+                bullet: BulletType::Apds,
+                damage: 40,
+                rof_ticks: 60,
+                range_leptons: 0x0600,
+            },
+            WeaponType::MammothTusk => WeaponStats {
+                bullet: BulletType::Ssm,
+                damage: 75,
+                rof_ticks: 80,
+                range_leptons: 0x0500,
+            },
+            WeaponType::Mlrs => WeaponStats {
+                bullet: BulletType::Ssm2,
+                damage: 75,
+                rof_ticks: 80,
+                range_leptons: 0x0600,
+            },
+            WeaponType::Cannon155 => WeaponStats {
+                bullet: BulletType::He,
+                damage: 150,
+                rof_ticks: 65,
+                range_leptons: 0x0600,
+            },
+            WeaponType::M60Mg => WeaponStats {
+                bullet: BulletType::Bullet,
+                damage: 15,
+                rof_ticks: 30,
+                range_leptons: 0x0400,
+            },
+            WeaponType::Tomahawk => WeaponStats {
+                bullet: BulletType::Ssm,
+                damage: 60,
+                rof_ticks: 35,
+                range_leptons: 0x0780,
+            },
+            WeaponType::TowTwo => WeaponStats {
+                bullet: BulletType::Ssm,
+                damage: 60,
+                rof_ticks: 40,
+                range_leptons: 0x0680,
+            },
+            WeaponType::Napalm => WeaponStats {
+                bullet: BulletType::Napalm,
+                damage: 100,
+                rof_ticks: 20,
+                range_leptons: 0x0480,
+            },
+            WeaponType::ObeliskLaser => WeaponStats {
+                bullet: BulletType::Laser,
+                damage: 200,
+                rof_ticks: 90,
+                range_leptons: 0x0780,
+            },
+            WeaponType::Nike => WeaponStats {
+                bullet: BulletType::Sam,
+                damage: 50,
+                rof_ticks: 50,
+                range_leptons: 0x0780,
+            },
+            WeaponType::HonestJohn => WeaponStats {
+                bullet: BulletType::HonestJohn,
+                damage: 100,
+                rof_ticks: 200,
+                range_leptons: 0x0A00,
+            },
+            WeaponType::Steg => WeaponStats {
+                bullet: BulletType::HeadButt,
+                damage: 100,
+                rof_ticks: 30,
+                range_leptons: 0x0180,
+            },
+            WeaponType::Trex => WeaponStats {
+                bullet: BulletType::TrexBite,
+                damage: 155,
+                rof_ticks: 30,
+                range_leptons: 0x0180,
+            },
         }
     }
 }
@@ -489,6 +614,20 @@ pub enum UnitType {
     Apache,
 }
 
+impl UnitType {
+    /// Every modelled unit, in stable sidebar order.
+    pub const ALL: [UnitType; 8] = [
+        UnitType::InfantryE1,
+        UnitType::MediumTank,
+        UnitType::MammothTank,
+        UnitType::Harvester,
+        UnitType::Jeep,
+        UnitType::Buggy,
+        UnitType::Orca,
+        UnitType::Apache,
+    ];
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct UnitStats {
     pub strength: i32,
@@ -497,6 +636,8 @@ pub struct UnitStats {
     pub armor: ArmorType,
     pub is_infantry: bool,
     pub cost: i32,
+    /// UDATA/IDATA "Build level" (TechnoTypeClass::Level).
+    pub tech_level: u8,
     pub sight_range: i32,
     /// UDATA.CPP "Is it equipped with a combat turret?".
     pub has_turret: bool,
@@ -520,6 +661,7 @@ impl UnitType {
                 armor: ArmorType::None,
                 is_infantry: true,
                 cost: 100,
+                tech_level: 1,
                 sight_range: 1,
                 has_turret: false,
                 rot_degrees_per_tick: 0,
@@ -534,6 +676,7 @@ impl UnitType {
                 armor: ArmorType::Steel,
                 is_infantry: false,
                 cost: 800,
+                tech_level: 3,
                 sight_range: 3,
                 has_turret: true,
                 rot_degrees_per_tick: 5,
@@ -548,6 +691,7 @@ impl UnitType {
                 armor: ArmorType::Aluminum,
                 is_infantry: false,
                 cost: 1400,
+                tech_level: 2,
                 sight_range: 2,
                 has_turret: false,
                 rot_degrees_per_tick: 5,
@@ -562,6 +706,7 @@ impl UnitType {
                 armor: ArmorType::Steel,
                 is_infantry: false,
                 cost: 1500,
+                tech_level: 5,
                 sight_range: 4,
                 has_turret: true,
                 rot_degrees_per_tick: 5,
@@ -576,6 +721,7 @@ impl UnitType {
                 armor: ArmorType::Aluminum,
                 is_infantry: false,
                 cost: 400,
+                tech_level: 2,
                 sight_range: 2,
                 has_turret: true,
                 rot_degrees_per_tick: 10,
@@ -590,6 +736,7 @@ impl UnitType {
                 armor: ArmorType::Aluminum,
                 is_infantry: false,
                 cost: 300,
+                tech_level: 4,
                 sight_range: 2,
                 has_turret: true,
                 rot_degrees_per_tick: 10,
@@ -604,6 +751,7 @@ impl UnitType {
                 armor: ArmorType::Steel,
                 is_infantry: false,
                 cost: 1200,
+                tech_level: 6,
                 sight_range: 0,
                 has_turret: false,
                 rot_degrees_per_tick: 4,
@@ -618,6 +766,7 @@ impl UnitType {
                 armor: ArmorType::Steel,
                 is_infantry: false,
                 cost: 1200,
+                tech_level: 6,
                 sight_range: 0,
                 has_turret: false,
                 rot_degrees_per_tick: 4,
@@ -686,6 +835,21 @@ pub enum StructureType {
     TempleOfNod,
 }
 
+impl StructureType {
+    /// Every modelled structure, in stable sidebar order.
+    pub const ALL: [StructureType; 9] = [
+        StructureType::ConstructionYard,
+        StructureType::PowerPlant,
+        StructureType::Refinery,
+        StructureType::Silo,
+        StructureType::Barracks,
+        StructureType::WarFactory,
+        StructureType::Helipad,
+        StructureType::IonCannon,
+        StructureType::TempleOfNod,
+    ];
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProductionKind {
     Infantry,
@@ -698,6 +862,8 @@ pub enum ProductionKind {
 pub struct StructureStats {
     pub strength: i32,
     pub cost: i32,
+    /// BDATA "Build level" (BuildingTypeClass::Level).
+    pub tech_level: u8,
     pub armor: ArmorType,
     pub power: i32,
     pub drain: i32,
@@ -713,6 +879,7 @@ impl StructureType {
             StructureType::ConstructionYard => StructureStats {
                 strength: 400,
                 cost: 5000,
+                tech_level: 99,
                 armor: ArmorType::Wood,
                 power: 30,
                 drain: 15,
@@ -723,6 +890,7 @@ impl StructureType {
             StructureType::PowerPlant => StructureStats {
                 strength: 200,
                 cost: 300,
+                tech_level: 0,
                 armor: ArmorType::Wood,
                 power: 100,
                 drain: 0,
@@ -733,6 +901,7 @@ impl StructureType {
             StructureType::Refinery => StructureStats {
                 strength: 450,
                 cost: 2000,
+                tech_level: 1,
                 armor: ArmorType::Wood,
                 power: 10,
                 drain: 40,
@@ -743,6 +912,7 @@ impl StructureType {
             StructureType::Silo => StructureStats {
                 strength: 150,
                 cost: 150,
+                tech_level: 1,
                 armor: ArmorType::Wood,
                 power: 0,
                 drain: 10,
@@ -753,6 +923,7 @@ impl StructureType {
             StructureType::Barracks => StructureStats {
                 strength: 400,
                 cost: 300,
+                tech_level: 0,
                 armor: ArmorType::Wood,
                 power: 0,
                 drain: 20,
@@ -763,6 +934,7 @@ impl StructureType {
             StructureType::WarFactory => StructureStats {
                 strength: 500,
                 cost: 2000,
+                tech_level: 2,
                 armor: ArmorType::Aluminum,
                 power: 0,
                 drain: 30,
@@ -773,6 +945,7 @@ impl StructureType {
             StructureType::Helipad => StructureStats {
                 strength: 400,
                 cost: 1500,
+                tech_level: 6,
                 armor: ArmorType::Wood,
                 power: 0,
                 drain: 10,
@@ -783,6 +956,7 @@ impl StructureType {
             StructureType::IonCannon => StructureStats {
                 strength: 500,
                 cost: 2800,
+                tech_level: 7,
                 armor: ArmorType::Wood,
                 power: 0,
                 drain: 200,
@@ -793,6 +967,7 @@ impl StructureType {
             StructureType::TempleOfNod => StructureStats {
                 strength: 1000,
                 cost: 3000,
+                tech_level: 7,
                 armor: ArmorType::Aluminum,
                 power: 0,
                 drain: 150,
@@ -867,6 +1042,25 @@ pub fn structure_from_ini_name(name: &str) -> Option<StructureType> {
         "EYE" | "RADAR" => Some(StructureType::IonCannon),
         "TMPL" | "TEMPLE" => Some(StructureType::TempleOfNod),
         _ => None,
+    }
+}
+
+/// Evaluate one Rules.ini Prerequisite= token against a house's ownership.
+///
+/// GDI/NOD (and RA's GOOD/BAD) resolve to the house faction; NONE/ANY/ALL
+/// always pass; every other token names a structure the house must own.
+pub fn prerequisite_token_met(token: &str, is_gdi: bool, owned: &[StructureType]) -> bool {
+    let token = token.trim();
+    if token.is_empty() {
+        return true;
+    }
+    match token.to_ascii_uppercase().as_str() {
+        "NONE" | "ANY" | "ALL" => true,
+        "GDI" | "GOOD" => is_gdi,
+        "NOD" | "BAD" => !is_gdi,
+        upper => {
+            structure_from_ini_name(upper).map_or(false, |structure| owned.contains(&structure))
+        }
     }
 }
 
@@ -951,7 +1145,10 @@ mod tests {
         let ion = StructureType::IonCannon.stats();
         assert_eq!((ion.strength, ion.cost, ion.drain), (500, 2800, 200));
         let temple = StructureType::TempleOfNod.stats();
-        assert_eq!((temple.strength, temple.cost, temple.drain), (1000, 3000, 150));
+        assert_eq!(
+            (temple.strength, temple.cost, temple.drain),
+            (1000, 3000, 150)
+        );
     }
 
     #[test]
@@ -1009,15 +1206,40 @@ mod tests {
     #[test]
     fn structure_stats_match_bdata() {
         let yard = StructureType::ConstructionYard.stats();
-        assert_eq!((yard.strength, yard.cost, yard.power, yard.drain), (400, 5000, 30, 15));
+        assert_eq!(
+            (yard.strength, yard.cost, yard.power, yard.drain),
+            (400, 5000, 30, 15)
+        );
         let power = StructureType::PowerPlant.stats();
-        assert_eq!((power.strength, power.cost, power.power, power.drain), (200, 300, 100, 0));
+        assert_eq!(
+            (power.strength, power.cost, power.power, power.drain),
+            (200, 300, 100, 0)
+        );
         let refinery = StructureType::Refinery.stats();
-        assert_eq!((refinery.strength, refinery.cost, refinery.power, refinery.drain), (450, 2000, 10, 40));
+        assert_eq!(
+            (
+                refinery.strength,
+                refinery.cost,
+                refinery.power,
+                refinery.drain
+            ),
+            (450, 2000, 10, 40)
+        );
         let barracks = StructureType::Barracks.stats();
-        assert_eq!((barracks.strength, barracks.cost, barracks.power, barracks.drain), (400, 300, 0, 20));
+        assert_eq!(
+            (
+                barracks.strength,
+                barracks.cost,
+                barracks.power,
+                barracks.drain
+            ),
+            (400, 300, 0, 20)
+        );
         let factory = StructureType::WarFactory.stats();
-        assert_eq!((factory.strength, factory.cost, factory.power, factory.drain), (500, 2000, 0, 30));
+        assert_eq!(
+            (factory.strength, factory.cost, factory.power, factory.drain),
+            (500, 2000, 0, 30)
+        );
     }
 
     #[test]

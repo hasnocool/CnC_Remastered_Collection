@@ -8,14 +8,15 @@ use cnc_core::rules::RulesDatabase;
 use cnc_core::{ClassId, Fixed16_16, Vec2, Vec2i};
 use cnc_renderer::Renderer;
 
+use crate::ai::AI;
 use crate::building::Building;
 use crate::house::House;
-use crate::map::{Map, TILE_SIZE};
 use crate::house::ProductionItem;
+use crate::map::{Map, TILE_SIZE};
 use crate::mission::Mission;
 use crate::pathfind::find_path;
 use crate::td_rules::{
-    leptons_to_px, production_seconds, px_to_leptons, structure_from_ini_name, tiberium_stage,
+    leptons_to_px, prerequisite_token_met, production_seconds, px_to_leptons, tiberium_stage,
     unit_class_id, unit_type_for_class, ProductionKind, StructureType, UnitType, WarheadType,
     WeaponType, EXPLOSION_RANGE_LEPTONS, HARVESTER_STEP_COUNT, HARVESTER_STEP_CREDITS,
 };
@@ -85,6 +86,48 @@ pub struct GameStatus {
     pub ready_buildings: usize,
 }
 
+/// A type the player can put into a production queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Buildable {
+    Unit(UnitType),
+    Structure(StructureType),
+}
+
+impl Buildable {
+    pub const fn ini_name(self) -> &'static str {
+        match self {
+            Self::Unit(unit) => unit.ini_name(),
+            Self::Structure(structure) => structure.ini_name(),
+        }
+    }
+
+    pub const fn class_id(self) -> ClassId {
+        match self {
+            Self::Unit(unit) => unit_class_id(unit),
+            Self::Structure(structure) => structure.class_id(),
+        }
+    }
+}
+
+/// One row of the production sidebar, including why it is hidden or disabled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidebarOption {
+    pub buildable: Buildable,
+    /// Factory category (infantry, vehicle, aircraft or building).
+    pub category: ProductionKind,
+    pub cost: i32,
+    /// Rules.ini TechLevel override or TDATA/BDATA fallback.
+    pub tech_level: u8,
+    /// False when TechLevel or prerequisites keep the row out of the sidebar.
+    pub visible: bool,
+    /// True when the house currently has enough credits.
+    pub affordable: bool,
+    /// True when the matching factory (or Construction Yard) is alive.
+    pub has_producer: bool,
+    /// Unmet Prerequisite= tokens, for tooltips and diagnostics.
+    pub missing_prerequisites: Vec<String>,
+}
+
 /// The playable game session: simulation state plus rendering entry point.
 pub struct Game {
     pub map: Map,
@@ -132,7 +175,8 @@ impl Game {
         for y in 0..height {
             for x in 0..width {
                 if ((x / 3) + (y / 3) + x) % 13 == 0 {
-                    map.grid.set_tiberium(Vec2i::new(x as i32, y as i32), 160, 1);
+                    map.grid
+                        .set_tiberium(Vec2i::new(x as i32, y as i32), 160, 1);
                 }
             }
         }
@@ -164,12 +208,7 @@ impl Game {
     }
 
     /// Build a game with Rules.ini overrides applied.
-    pub fn with_rules(
-        map_name: &str,
-        width: u32,
-        height: u32,
-        rules: RulesDatabase,
-    ) -> Self {
+    pub fn with_rules(map_name: &str, width: u32, height: u32, rules: RulesDatabase) -> Self {
         let mut game = Self::new(map_name, width, height);
         game.rules = rules;
         game
@@ -248,24 +287,26 @@ impl Game {
         })
     }
 
-    fn prerequisite_satisfied(&self, owner: u8, token: &str) -> bool {
-        let token = token.trim();
-        if token.is_empty() {
-            return true;
+    /// Every distinct living structure owned by a house, for prerequisites.
+    pub fn owned_structures(&self, owner: u8) -> Vec<StructureType> {
+        let mut owned = Vec::new();
+        for building in &self.buildings {
+            if building.owner != owner || !building.is_alive() {
+                continue;
+            }
+            if let Some(structure) = building.structure_type() {
+                if !owned.contains(&structure) {
+                    owned.push(structure);
+                }
+            }
         }
-        match token.to_ascii_uppercase().as_str() {
-            "NONE" | "ANY" => true,
-            "GDI" => self
-                .houses
-                .get(owner as usize)
-                .map_or(false, |house| house.id == ClassId::HouseGDI),
-            "NOD" => self
-                .houses
-                .get(owner as usize)
-                .map_or(false, |house| house.id == ClassId::HouseNod),
-            upper => structure_from_ini_name(upper)
-                .map_or(false, |structure| self.owns_structure(owner, structure)),
-        }
+        owned
+    }
+
+    fn is_gdi(&self, owner: u8) -> bool {
+        self.houses
+            .get(owner as usize)
+            .map_or(false, |house| house.id == ClassId::HouseGDI)
     }
 
     /// Rules.ini Prerequisite= enforcement (RULES.CPP / TYPE.CPP tech tree).
@@ -276,9 +317,11 @@ impl Game {
         let Some(rule) = self.rules.type_rule(type_name) else {
             return true;
         };
+        let is_gdi = self.is_gdi(owner);
+        let owned = self.owned_structures(owner);
         rule.prerequisite
             .iter()
-            .all(|token| self.prerequisite_satisfied(owner, token))
+            .all(|token| prerequisite_token_met(token, is_gdi, &owned))
     }
 
     /// Human-readable list of unmet prerequisite tokens for UI/diagnostics.
@@ -286,11 +329,38 @@ impl Game {
         let Some(rule) = self.rules.type_rule(type_name) else {
             return Vec::new();
         };
+        let is_gdi = self.is_gdi(owner);
+        let owned = self.owned_structures(owner);
         rule.prerequisite
             .iter()
-            .filter(|token| !self.prerequisite_satisfied(owner, token))
+            .filter(|token| !prerequisite_token_met(token, is_gdi, &owned))
             .cloned()
             .collect()
+    }
+
+    /// Build level of a unit: Rules.ini TechLevel override or TDATA fallback.
+    pub fn unit_tech_level(&self, unit_type: UnitType) -> u8 {
+        self.rules
+            .type_rule(unit_type.ini_name())
+            .and_then(|rule| rule.tech_level)
+            .map(|level| level.clamp(0, u8::MAX as i32) as u8)
+            .unwrap_or(unit_type.stats().tech_level)
+    }
+
+    /// Build level of a structure: Rules.ini TechLevel or BDATA fallback.
+    pub fn building_tech_level(&self, structure: StructureType) -> u8 {
+        self.rules
+            .type_rule(structure.ini_name())
+            .and_then(|rule| rule.tech_level)
+            .map(|level| level.clamp(0, u8::MAX as i32) as u8)
+            .unwrap_or(structure.stats().tech_level)
+    }
+
+    /// HOUSE.CPP Can_Build: the house build level must cover the type level.
+    pub fn meets_tech_level(&self, owner: u8, required: u8) -> bool {
+        self.houses
+            .get(owner as usize)
+            .map_or(false, |house| required <= house.tech_level)
     }
 
     fn cell_center(cx: i32, cy: i32) -> Vec2 {
@@ -365,9 +435,7 @@ impl Game {
 
         // A dense field next to the refinery keeps the demo economy active.
         for (x, y) in [(19i32, 22i32), (20, 22), (21, 22), (20, 23), (21, 21)] {
-            self.map
-                .grid
-                .set_tiberium(Vec2i::new(x, y), 255, 1);
+            self.map.grid.set_tiberium(Vec2i::new(x, y), 255, 1);
         }
 
         // One harvester starts the GDI economy loop.
@@ -384,13 +452,13 @@ impl Game {
 
         // A small Nod patrol so attack orders have a target. The first one is
         // a grenadier so the demo shows arcing projectiles.
-        for (index, (cx, cy)) in [(33i32, 24i32), (35, 27), (32, 29)]
-            .into_iter()
-            .enumerate()
-        {
+        for (index, (cx, cy)) in [(33i32, 24i32), (35, 27), (32, 29)].into_iter().enumerate() {
             let mut unit = Unit::new(UnitType::InfantryE1, Self::cell(cx, cy), 1);
             if index == 0 {
-                unit.equip_weapon(Weapon::from_type_with_rules(WeaponType::Grenade, &self.rules));
+                unit.equip_weapon(Weapon::from_type_with_rules(
+                    WeaponType::Grenade,
+                    &self.rules,
+                ));
             }
             let id = self.units.len() as u32;
             nod.add_unit(id);
@@ -452,7 +520,8 @@ impl Game {
     }
 
     pub fn can_queue_unit(&self, owner: u8, unit_type: UnitType) -> bool {
-        self.meets_prerequisites(owner, unit_type.ini_name())
+        self.meets_tech_level(owner, self.unit_tech_level(unit_type))
+            && self.meets_prerequisites(owner, unit_type.ini_name())
             && self.has_producer(owner, Self::unit_factory_kind(unit_type))
             && self
                 .houses
@@ -461,16 +530,92 @@ impl Game {
     }
 
     pub fn can_queue_building(&self, owner: u8, structure: StructureType) -> bool {
-        self.meets_prerequisites(owner, structure.ini_name())
-            && self.buildings.iter().any(|building| {
-                building.owner == owner
-                    && building.is_alive()
-                    && building.structure_type() == Some(StructureType::ConstructionYard)
+        self.meets_tech_level(owner, self.building_tech_level(structure))
+            && self.meets_prerequisites(owner, structure.ini_name())
+            && self.owns_structure(owner, StructureType::ConstructionYard)
+            && self.houses.get(owner as usize).map_or(false, |house| {
+                house.can_afford(self.building_cost(structure))
             })
-            && self
-                .houses
-                .get(owner as usize)
-                .map_or(false, |house| house.can_afford(self.building_cost(structure)))
+    }
+
+    /// Full production sidebar for a house.
+    ///
+    /// Entries stay in this list even when hidden so callers can distinguish
+    /// "locked by TechLevel/prerequisites" (visible == false) from "shown but
+    /// unaffordable or missing a factory" (visible == true).
+    pub fn sidebar_options(&self, owner: u8) -> Vec<SidebarOption> {
+        let Some(house) = self.houses.get(owner as usize) else {
+            return Vec::new();
+        };
+
+        let mut options = Vec::new();
+        for unit_type in UnitType::ALL {
+            let category = Self::unit_factory_kind(unit_type);
+            let tech_level = self.unit_tech_level(unit_type);
+            let missing = self.missing_prerequisites(owner, unit_type.ini_name());
+            let cost = self.unit_cost(unit_type);
+            options.push(SidebarOption {
+                buildable: Buildable::Unit(unit_type),
+                category,
+                cost,
+                tech_level,
+                visible: tech_level <= house.tech_level && missing.is_empty(),
+                affordable: house.can_afford(cost),
+                has_producer: self.has_producer(owner, category),
+                missing_prerequisites: missing,
+            });
+        }
+
+        let has_yard = self.owns_structure(owner, StructureType::ConstructionYard);
+        for structure in StructureType::ALL {
+            let tech_level = self.building_tech_level(structure);
+            let missing = self.missing_prerequisites(owner, structure.ini_name());
+            let cost = self.building_cost(structure);
+            options.push(SidebarOption {
+                buildable: Buildable::Structure(structure),
+                category: ProductionKind::Building,
+                cost,
+                tech_level,
+                visible: tech_level <= house.tech_level && missing.is_empty(),
+                affordable: house.can_afford(cost),
+                has_producer: has_yard,
+                missing_prerequisites: missing,
+            });
+        }
+
+        options
+    }
+
+    /// Sidebar rows the player should actually see right now.
+    pub fn visible_sidebar_options(&self, owner: u8) -> Vec<SidebarOption> {
+        self.sidebar_options(owner)
+            .into_iter()
+            .filter(|option| option.visible)
+            .collect()
+    }
+
+    /// Deterministic AI production pick driven by the rules registry.
+    pub fn ai_production_choice(&self, owner: u8, ai: &AI, roll: u32) -> Option<UnitType> {
+        let house = self.houses.get(owner as usize)?;
+        let owned = self.owned_structures(owner);
+        let weights = ai.production_weights(
+            &self.rules,
+            house.tech_level,
+            house.id == ClassId::HouseGDI,
+            &owned,
+            house.available_money(),
+        );
+        AI::choose_weighted(&weights, roll)
+    }
+
+    /// Pick and queue an AI unit, returning the type when it was accepted.
+    pub fn ai_queue_production(&mut self, owner: u8, ai: &AI, roll: u32) -> Option<UnitType> {
+        let choice = self.ai_production_choice(owner, ai, roll)?;
+        if self.queue_unit(owner, choice) {
+            Some(choice)
+        } else {
+            None
+        }
     }
 
     /// Queue a unit at the house that owns the matching factory.
@@ -646,7 +791,8 @@ impl Game {
                 strike.progress = Fixed16_16::ONE;
             }
         }
-        self.strikes.retain(|strike| strike.progress < Fixed16_16::ONE);
+        self.strikes
+            .retain(|strike| strike.progress < Fixed16_16::ONE);
 
         for beam in &mut self.beams {
             beam.ttl = (beam.ttl - delta_time).max(Fixed16_16::ZERO);
@@ -714,8 +860,7 @@ impl Game {
                     && building.structure_type() == Some(StructureType::TempleOfNod)
             })
             .map(|building| {
-                building.position
-                    + Vec2::new(Fixed16_16::from_int(12), Fixed16_16::from_int(12))
+                building.position + Vec2::new(Fixed16_16::from_int(12), Fixed16_16::from_int(12))
             })
             .unwrap_or_else(|| Self::cell_center(cell.x, cell.y));
 
@@ -762,8 +907,7 @@ impl Game {
                     continue;
                 }
                 let cell_center = Self::cell_center(target.x, target.y);
-                let delay = flight_seconds
-                    + ((dx.abs() + dy.abs()) as f32 * 0.015).min(0.15);
+                let delay = flight_seconds + ((dx.abs() + dy.abs()) as f32 * 0.015).min(0.15);
                 self.pending_blasts.push(PendingBlast {
                     position: cell_center,
                     radius: blast_radius,
@@ -785,13 +929,7 @@ impl Game {
         true
     }
 
-    fn apply_blast(
-        &mut self,
-        center: Vec2,
-        radius: f32,
-        damage: i32,
-        warhead: WarheadType,
-    ) {
+    fn apply_blast(&mut self, center: Vec2, radius: f32, damage: i32, warhead: WarheadType) {
         let warhead = self.warhead_profile(warhead);
         for unit in &mut self.units {
             if !unit.is_alive() {
@@ -802,7 +940,11 @@ impl Game {
                 continue;
             }
             let modified = warhead
-                .damage(Fixed16_16::from_int(damage), unit.armor, px_to_leptons(distance))
+                .damage(
+                    Fixed16_16::from_int(damage),
+                    unit.armor,
+                    px_to_leptons(distance),
+                )
                 .int();
             unit.take_damage(Fixed16_16::from_int(modified));
         }
@@ -811,14 +953,18 @@ impl Game {
             if !building.is_alive() {
                 continue;
             }
-            let center_position = building.position
-                + Vec2::new(Fixed16_16::from_int(12), Fixed16_16::from_int(12));
+            let center_position =
+                building.position + Vec2::new(Fixed16_16::from_int(12), Fixed16_16::from_int(12));
             let distance = center_position.distance(center).to_f32();
             if distance > radius {
                 continue;
             }
             let modified = warhead
-                .damage(Fixed16_16::from_int(damage), building.armor, px_to_leptons(distance))
+                .damage(
+                    Fixed16_16::from_int(damage),
+                    building.armor,
+                    px_to_leptons(distance),
+                )
                 .int();
             building.health =
                 (building.health - Fixed16_16::from_int(modified)).max(Fixed16_16::ZERO);
@@ -1003,9 +1149,7 @@ impl Game {
                     if self.units[index].tiberium == 0 {
                         self.units[index].unloading = false;
                     }
-                } else if self.units[index].path.is_empty()
-                    && self.units[index].target.is_none()
-                {
+                } else if self.units[index].path.is_empty() && self.units[index].target.is_none() {
                     self.move_unit_to_cell(index, refinery_cell);
                 }
                 continue;
@@ -1313,8 +1457,9 @@ impl Game {
                         .map(|cell| (cell.x, cell.y))
                         .collect();
                     let terrain_ok = self.map.grid.in_bounds(goal_cell.x, goal_cell.y)
-                        && self.map.grid.cells
-                            [(goal_cell.y as u32 * self.map.grid.width + goal_cell.x as u32) as usize]
+                        && self.map.grid.cells[(goal_cell.y as u32 * self.map.grid.width
+                            + goal_cell.x as u32)
+                            as usize]
                             .is_passable;
                     let goal = if terrain_ok && !used.contains(&(goal_cell.x, goal_cell.y)) {
                         goal_cell
@@ -1337,7 +1482,13 @@ impl Game {
         let target_positions: Vec<Option<Vec2>> = self
             .units
             .iter()
-            .map(|unit| if unit.is_alive() { Some(unit.position) } else { None })
+            .map(|unit| {
+                if unit.is_alive() {
+                    Some(unit.position)
+                } else {
+                    None
+                }
+            })
             .collect();
 
         let mut hits: Vec<(Fixed16_16, Warhead, Vec2, usize)> = Vec::new();
@@ -1385,11 +1536,7 @@ impl Game {
         self.render_with_sprites(renderer, None);
     }
 
-    pub fn render_with_sprites(
-        &self,
-        renderer: &mut dyn Renderer,
-        atlas: Option<&SpriteAtlas>,
-    ) {
+    pub fn render_with_sprites(&self, renderer: &mut dyn Renderer, atlas: Option<&SpriteAtlas>) {
         self.map.render(renderer);
         for building in &self.buildings {
             building.render_with(renderer, atlas);
@@ -1402,13 +1549,7 @@ impl Game {
             let y = projectile.position.y.to_f32();
             let altitude = projectile.altitude.to_f32();
             renderer.draw_rect(x - 2.0, y - 2.0, 4.0, 4.0, [0.15, 0.15, 0.15, 0.6]);
-            renderer.draw_rect(
-                x - 2.0,
-                y - 2.0 - altitude,
-                4.0,
-                4.0,
-                [1.0, 0.85, 0.2, 1.0],
-            );
+            renderer.draw_rect(x - 2.0, y - 2.0 - altitude, 4.0, 4.0, [1.0, 0.85, 0.2, 1.0]);
         }
         for blast in &self.blasts {
             let ratio = (blast.ttl.to_f32() / blast.max_ttl.to_f32().max(1.0e-6)).clamp(0.0, 1.0);
@@ -1939,11 +2080,8 @@ mod tests {
         game.buildings.clear();
         game.projectiles.clear();
 
-        game.units.push(Unit::new(
-            UnitType::InfantryE1,
-            Game::cell_center(1, 8),
-            0,
-        ));
+        game.units
+            .push(Unit::new(UnitType::InfantryE1, Game::cell_center(1, 8), 0));
         game.units[0].is_selected = true;
 
         // Solid wall at x = 8 with a gap at the bottom edge.
@@ -1964,7 +2102,10 @@ mod tests {
             })
             .collect();
 
-        assert!(!path_cells.is_empty(), "a path around the wall should exist");
+        assert!(
+            !path_cells.is_empty(),
+            "a path around the wall should exist"
+        );
         assert!(
             path_cells.iter().all(|cell| cell.x != 8 || cell.y == 15),
             "path must only cross the wall at the gap"
@@ -1980,11 +2121,8 @@ mod tests {
         game.buildings.clear();
         game.projectiles.clear();
 
-        game.units.push(Unit::new(
-            UnitType::MediumTank,
-            Game::cell_center(1, 8),
-            0,
-        ));
+        game.units
+            .push(Unit::new(UnitType::MediumTank, Game::cell_center(1, 8), 0));
         game.units[0].is_selected = true;
         game.buildings.push(Building::new(
             ClassId::ConstructionYard,
@@ -2024,7 +2162,8 @@ mod tests {
         let enemy_a = Vec2::new(Fixed16_16::from_int(600), Fixed16_16::from_int(600));
         let enemy_b = Vec2::new(Fixed16_16::from_int(615), Fixed16_16::from_int(600));
 
-        game.units.push(Unit::new(UnitType::MediumTank, tank_position, 0));
+        game.units
+            .push(Unit::new(UnitType::MediumTank, tank_position, 0));
         game.units.push(Unit::new(UnitType::InfantryE1, enemy_a, 1));
         game.units.push(Unit::new(UnitType::InfantryE1, enemy_b, 1));
         game.units[0].is_selected = true;
@@ -2109,8 +2248,7 @@ mod tests {
 
         assert_eq!(game.order_move(target), 1);
         assert!(game.units[index].ordered);
-        let destination = game
-            .units[index]
+        let destination = game.units[index]
             .target
             .expect("move order should set a target");
         assert_ne!(destination, start);
@@ -2121,7 +2259,10 @@ mod tests {
 
         let dx = game.units[index].position.x.to_f32() - destination.x.to_f32();
         let dy = game.units[index].position.y.to_f32() - destination.y.to_f32();
-        assert!(dx.abs() < 5.0 && dy.abs() < 5.0, "unit should arrive, offset {dx},{dy}");
+        assert!(
+            dx.abs() < 5.0 && dy.abs() < 5.0,
+            "unit should arrive, offset {dx},{dy}"
+        );
         assert!(game.units[index].target.is_none());
     }
 
@@ -2156,9 +2297,19 @@ mod tests {
         let max = Vec2::new(center.x + offset, center.y + offset);
         let count = game.select_in_rect(min, max, false);
 
-        assert!(count >= 10, "box should select the GDI cluster, got {count}");
+        assert!(
+            count >= 10,
+            "box should select the GDI cluster, got {count}"
+        );
         assert_eq!(game.status().selected, count);
-        assert!(game.units.iter().filter(|u| u.owner == 0).filter(|u| u.is_selected).count() >= 10);
+        assert!(
+            game.units
+                .iter()
+                .filter(|u| u.owner == 0)
+                .filter(|u| u.is_selected)
+                .count()
+                >= 10
+        );
     }
 
     #[test]
@@ -2203,7 +2354,10 @@ mod tests {
 
         for i in 0..targets.len() {
             for j in (i + 1)..targets.len() {
-                assert!(targets[i] != targets[j], "formation targets must be distinct");
+                assert!(
+                    targets[i] != targets[j],
+                    "formation targets must be distinct"
+                );
             }
         }
     }
@@ -2259,16 +2413,10 @@ mod tests {
         game.buildings.clear();
         game.projectiles.clear();
 
-        game.units.push(Unit::new(
-            UnitType::MediumTank,
-            Game::cell_center(8, 12),
-            0,
-        ));
-        game.units.push(Unit::new(
-            UnitType::InfantryE1,
-            Game::cell_center(8, 4),
-            1,
-        ));
+        game.units
+            .push(Unit::new(UnitType::MediumTank, Game::cell_center(8, 12), 0));
+        game.units
+            .push(Unit::new(UnitType::InfantryE1, Game::cell_center(8, 4), 1));
         game.units[0].is_selected = true;
         assert_eq!(game.order_attack(1), 1);
         assert_eq!(game.units[0].turret_facing, 0.0);
@@ -2356,24 +2504,12 @@ mod tests {
             cell.has_tiberium = false;
             cell.tiberium_amount = 0;
         }
-        game.map
-            .grid
-            .set_tiberium(Vec2i::new(2, 2), 200, 1);
+        game.map.grid.set_tiberium(Vec2i::new(2, 2), 200, 1);
 
-        let before = game
-            .map
-            .grid
-            .get(Vec2i::new(2, 2))
-            .unwrap()
-            .tiberium_amount;
+        let before = game.map.grid.get(Vec2i::new(2, 2)).unwrap().tiberium_amount;
         game.map.grid.tiberium_cycle();
 
-        let grown = game
-            .map
-            .grid
-            .get(Vec2i::new(2, 2))
-            .unwrap()
-            .tiberium_amount;
+        let grown = game.map.grid.get(Vec2i::new(2, 2)).unwrap().tiberium_amount;
         assert!(grown > before, "existing tiberium should grow");
         assert!(
             game.map.grid.get(Vec2i::new(3, 2)).unwrap().has_tiberium,
@@ -2398,12 +2534,7 @@ mod tests {
         harvester.ordered = true;
         game.units.push(harvester);
 
-        let before = game
-            .map
-            .grid
-            .get(Vec2i::new(5, 5))
-            .unwrap()
-            .tiberium_amount;
+        let before = game.map.grid.get(Vec2i::new(5, 5)).unwrap().tiberium_amount;
         for _ in 0..50 {
             game.update(Fixed16_16::from_f32(0.1));
             if game.units[0].tiberium > 0 {
@@ -2411,13 +2542,11 @@ mod tests {
             }
         }
 
-        assert!(game.units[0].tiberium > 0, "harvester should pick up tiberium");
-        let after = game
-            .map
-            .grid
-            .get(Vec2i::new(5, 5))
-            .unwrap()
-            .tiberium_amount;
+        assert!(
+            game.units[0].tiberium > 0,
+            "harvester should pick up tiberium"
+        );
+        let after = game.map.grid.get(Vec2i::new(5, 5)).unwrap().tiberium_amount;
         assert!(after < before, "the tiberium cell should be reduced");
     }
 
@@ -2429,7 +2558,8 @@ mod tests {
         game.buildings.clear();
         game.projectiles.clear();
 
-        game.houses.push(House::new(ClassId::HouseGDI, "GDI".to_string()));
+        game.houses
+            .push(House::new(ClassId::HouseGDI, "GDI".to_string()));
         game.buildings.push(Building::from_type(
             StructureType::Refinery,
             Game::cell_center(4, 4),
@@ -2455,7 +2585,10 @@ mod tests {
             HARVESTER_STEP_COUNT as i32 * HARVESTER_STEP_CREDITS,
             "each step should add 25 credits of stored tiberium"
         );
-        assert_eq!(game.houses[0].credits, 0, "initial cash should be untouched");
+        assert_eq!(
+            game.houses[0].credits, 0,
+            "initial cash should be untouched"
+        );
     }
 
     #[test]
@@ -2600,7 +2733,8 @@ mod tests {
             Fixed16_16::from_f32(position.x.to_f32() + range),
             position.y,
         );
-        game.units.push(Unit::new(UnitType::MammothTank, position, 0));
+        game.units
+            .push(Unit::new(UnitType::MammothTank, position, 0));
         game.units.push(Unit::new(UnitType::InfantryE1, target, 1));
         game.units[0].is_selected = true;
         assert_eq!(game.order_attack(1), 1);
@@ -2633,13 +2767,11 @@ mod tests {
         game.buildings.clear();
         game.projectiles.clear();
 
-        game.houses.push(House::new(ClassId::HouseGDI, "GDI".to_string()));
+        game.houses
+            .push(House::new(ClassId::HouseGDI, "GDI".to_string()));
         let target = Vec2i::new(8, 8);
-        game.units.push(Unit::new(
-            UnitType::InfantryE1,
-            Game::cell_center(8, 8),
-            1,
-        ));
+        game.units
+            .push(Unit::new(UnitType::InfantryE1, Game::cell_center(8, 8), 1));
 
         assert!(!game.fire_ion_cannon(0, target), "no ion cannon building");
 
@@ -2675,8 +2807,10 @@ mod tests {
         game.buildings.clear();
         game.projectiles.clear();
 
-        game.houses.push(House::new(ClassId::HouseGDI, "GDI".to_string()));
-        game.houses.push(House::new(ClassId::HouseNod, "Nod".to_string()));
+        game.houses
+            .push(House::new(ClassId::HouseGDI, "GDI".to_string()));
+        game.houses
+            .push(House::new(ClassId::HouseNod, "Nod".to_string()));
         game.buildings.push(Building::from_type(
             StructureType::TempleOfNod,
             Game::cell_center(2, 2),
@@ -2684,26 +2818,17 @@ mod tests {
         ));
         game.houses[1].nuke_charge = Fixed16_16::ONE;
 
-        game.units.push(Unit::new(
-            UnitType::InfantryE1,
-            Game::cell_center(8, 8),
-            0,
-        ));
-        game.units.push(Unit::new(
-            UnitType::InfantryE1,
-            Game::cell_center(10, 8),
-            0,
-        ));
+        game.units
+            .push(Unit::new(UnitType::InfantryE1, Game::cell_center(8, 8), 0));
+        game.units
+            .push(Unit::new(UnitType::InfantryE1, Game::cell_center(10, 8), 0));
         game.buildings.push(Building::from_type(
             StructureType::Barracks,
             Game::cell_center(9, 8),
             0,
         ));
-        game.units.push(Unit::new(
-            UnitType::InfantryE1,
-            Game::cell_center(14, 8),
-            0,
-        ));
+        game.units
+            .push(Unit::new(UnitType::InfantryE1, Game::cell_center(14, 8), 0));
         for unit in &mut game.units {
             // Hold position instead of drifting on the idle patrol ring.
             unit.ordered = true;
@@ -2753,7 +2878,8 @@ mod tests {
         game.buildings.clear();
         game.projectiles.clear();
 
-        game.houses.push(House::new(ClassId::HouseGDI, "GDI".to_string()));
+        game.houses
+            .push(House::new(ClassId::HouseGDI, "GDI".to_string()));
         game.buildings.push(Building::from_type(
             StructureType::IonCannon,
             Game::cell_center(4, 4),
@@ -2774,16 +2900,10 @@ mod tests {
         game.buildings.clear();
         game.projectiles.clear();
 
-        game.units.push(Unit::new(
-            UnitType::InfantryE1,
-            Game::cell_center(2, 8),
-            0,
-        ));
-        game.units.push(Unit::new(
-            UnitType::InfantryE1,
-            Game::cell_center(4, 8),
-            0,
-        ));
+        game.units
+            .push(Unit::new(UnitType::InfantryE1, Game::cell_center(2, 8), 0));
+        game.units
+            .push(Unit::new(UnitType::InfantryE1, Game::cell_center(4, 8), 0));
         game.select_all_owned(0);
 
         assert_eq!(game.order_move(Game::cell_center(10, 8)), 2);
@@ -2851,11 +2971,8 @@ mod tests {
 
         game.units
             .push(Unit::new(UnitType::Orca, Game::cell_center(8, 8), 0));
-        game.units.push(Unit::new(
-            UnitType::InfantryE1,
-            Game::cell_center(8, 10),
-            1,
-        ));
+        game.units
+            .push(Unit::new(UnitType::InfantryE1, Game::cell_center(8, 10), 1));
         game.units[0].is_selected = true;
         assert_eq!(game.order_attack(1), 1);
 
@@ -2887,7 +3004,10 @@ mod tests {
         }
 
         assert_eq!(game.order_move(Game::cell_center(15, 8)), 1);
-        assert!(game.units[0].path.is_empty(), "aircraft ignore ground paths");
+        assert!(
+            game.units[0].path.is_empty(),
+            "aircraft ignore ground paths"
+        );
 
         for _ in 0..400 {
             game.update(Fixed16_16::from_f32(0.05));
@@ -2910,11 +3030,8 @@ mod tests {
 
         game.units
             .push(Unit::new(UnitType::Orca, Game::cell_center(2, 2), 0));
-        game.units.push(Unit::new(
-            UnitType::MediumTank,
-            Game::cell_center(2, 6),
-            0,
-        ));
+        game.units
+            .push(Unit::new(UnitType::MediumTank, Game::cell_center(2, 6), 0));
         game.select_all_owned(0);
         assert_eq!(game.order_move(Game::cell_center(8, 2)), 2);
 
@@ -3140,7 +3257,10 @@ mod weapon_rules_tests {
 
         assert_eq!(weapon.damage, Fixed16_16::from_int(25));
         assert_eq!(weapon.range, Fixed16_16::from_f32(leptons_to_px(1280)));
-        assert_eq!(weapon.rate_of_fire, Fixed16_16::from_f32(ticks_to_seconds(13)));
+        assert_eq!(
+            weapon.rate_of_fire,
+            Fixed16_16::from_f32(ticks_to_seconds(13))
+        );
         // The static M16 row stays untouched for games without a rules file.
         let plain = Weapon::from_type(WeaponType::M16);
         assert_eq!(plain.damage, Fixed16_16::from_int(15));
@@ -3149,9 +3269,7 @@ mod weapon_rules_tests {
 
     #[test]
     fn weapon_warhead_override_selects_rules_warhead() {
-        let rules = rules(
-            "[Grenade]\nWarhead=AP\n[AP]\nSpread=0\nVerses=10,20,30,40,50\n",
-        );
+        let rules = rules("[Grenade]\nWarhead=AP\n[AP]\nSpread=0\nVerses=10,20,30,40,50\n");
         let game = Game::with_rules("test", 32, 32, rules);
         let weapon = game.make_weapon(WeaponType::Grenade);
 
@@ -3223,13 +3341,17 @@ mod weapon_rules_tests {
             }
         }
         let unit = game.units.first().expect("produced infantry");
-        assert_eq!(unit.weapon.as_ref().unwrap().damage, Fixed16_16::from_int(42));
+        assert_eq!(
+            unit.weapon.as_ref().unwrap().damage,
+            Fixed16_16::from_int(42)
+        );
     }
 }
 
 #[cfg(test)]
 mod prerequisite_tests {
     use super::*;
+    use crate::ai::AIDifficulty;
     use cnc_core::rules::RulesDatabase;
 
     fn rules(source: &str) -> RulesDatabase {
@@ -3277,31 +3399,18 @@ mod prerequisite_tests {
 
     #[test]
     fn none_and_faction_tokens_are_supported() {
-        let game = Game::with_rules(
-            "test",
-            32,
-            32,
-            rules("[E1]\nCost=100\nPrerequisite=NONE\n"),
-        );
+        let game = Game::with_rules("test", 32, 32, rules("[E1]\nCost=100\nPrerequisite=NONE\n"));
         assert!(game.meets_prerequisites(0, "E1"));
 
-        let mut game = Game::with_rules(
-            "test",
-            32,
-            32,
-            rules("[E1]\nCost=100\nPrerequisite=GDI\n"),
-        );
+        let mut game =
+            Game::with_rules("test", 32, 32, rules("[E1]\nCost=100\nPrerequisite=GDI\n"));
         game.setup_demo();
         assert!(game.meets_prerequisites(0, "E1"));
         assert!(!game.meets_prerequisites(1, "E1"));
         assert_eq!(game.missing_prerequisites(1, "E1"), vec!["GDI"]);
 
-        let mut game = Game::with_rules(
-            "test",
-            32,
-            32,
-            rules("[E1]\nCost=100\nPrerequisite=NOD\n"),
-        );
+        let mut game =
+            Game::with_rules("test", 32, 32, rules("[E1]\nCost=100\nPrerequisite=NOD\n"));
         game.setup_demo();
         assert!(game.meets_prerequisites(1, "E1"));
         assert!(!game.meets_prerequisites(0, "E1"));
@@ -3309,12 +3418,8 @@ mod prerequisite_tests {
 
     #[test]
     fn gdi_and_nod_barracks_aliases_are_equivalent() {
-        let mut game = Game::with_rules(
-            "test",
-            32,
-            32,
-            rules("[E1]\nCost=100\nPrerequisite=PYLE\n"),
-        );
+        let mut game =
+            Game::with_rules("test", 32, 32, rules("[E1]\nCost=100\nPrerequisite=PYLE\n"));
         game.setup_demo();
         assert!(game.meets_prerequisites(0, "E1"));
 
@@ -3356,5 +3461,122 @@ mod prerequisite_tests {
     fn prerequisite_only_sections_are_registered_as_types() {
         let rules = rules("[E1]\nPrerequisite=WEAP\n");
         assert_eq!(rules.type_rule("E1").unwrap().prerequisite, vec!["WEAP"]);
+    }
+
+    #[test]
+    fn tech_level_gates_unit_and_structure_production() {
+        let mut game = Game::new("tech", 32, 32);
+        game.setup_demo();
+
+        assert_eq!(game.unit_tech_level(UnitType::MammothTank), 5);
+        assert_eq!(game.unit_tech_level(UnitType::InfantryE1), 1);
+        assert_eq!(game.building_tech_level(StructureType::Helipad), 6);
+        assert_eq!(game.building_tech_level(StructureType::PowerPlant), 0);
+
+        game.houses[0].tech_level = 1;
+        assert!(game.can_queue_unit(0, UnitType::InfantryE1));
+        assert!(!game.can_queue_unit(0, UnitType::MammothTank));
+        assert!(!game.can_queue_building(0, StructureType::Helipad));
+
+        game.houses[0].tech_level = 6;
+        assert!(game.can_queue_unit(0, UnitType::MammothTank));
+        assert!(game.can_queue_building(0, StructureType::Helipad));
+    }
+
+    #[test]
+    fn rules_tech_level_override_replaces_the_fallback() {
+        let mut game = Game::with_rules(
+            "tech-override",
+            32,
+            32,
+            rules("[MTNK]\nTechLevel=7\n[HPAD]\nTechLevel=9\n"),
+        );
+        game.setup_demo();
+        assert_eq!(game.unit_tech_level(UnitType::MediumTank), 7);
+        assert_eq!(game.building_tech_level(StructureType::Helipad), 9);
+
+        game.houses[0].tech_level = 6;
+        assert!(!game.can_queue_unit(0, UnitType::MediumTank));
+        game.houses[0].tech_level = 7;
+        assert!(game.can_queue_unit(0, UnitType::MediumTank));
+    }
+
+    #[test]
+    fn sidebar_hides_tech_and_prerequisite_locked_rows() {
+        let mut game = Game::with_rules("sidebar", 32, 32, rules("[MTNK]\nPrerequisite=TMPL\n"));
+        game.setup_demo();
+
+        let visible = game.visible_sidebar_options(0);
+        assert!(visible
+            .iter()
+            .any(|option| option.buildable == Buildable::Unit(UnitType::InfantryE1)));
+        assert!(!visible
+            .iter()
+            .any(|option| option.buildable == Buildable::Unit(UnitType::MediumTank)));
+
+        let all = game.sidebar_options(0);
+        let mtnk = all
+            .iter()
+            .find(|option| option.buildable == Buildable::Unit(UnitType::MediumTank))
+            .expect("medium tank row exists");
+        assert!(!mtnk.visible);
+        assert_eq!(mtnk.missing_prerequisites, vec!["TMPL"]);
+
+        // TechLevel 1 still shows cheap units but hides the high-tier rows.
+        game.houses[0].tech_level = 1;
+        let visible = game.visible_sidebar_options(0);
+        assert!(visible
+            .iter()
+            .any(|option| option.buildable == Buildable::Unit(UnitType::InfantryE1)));
+        assert!(!visible
+            .iter()
+            .any(|option| option.buildable == Buildable::Unit(UnitType::MammothTank)));
+        assert!(!visible
+            .iter()
+            .any(|option| { option.buildable == Buildable::Structure(StructureType::Helipad) }));
+    }
+
+    #[test]
+    fn sidebar_keeps_rows_visible_when_unaffordable() {
+        let mut game = Game::new("sidebar-cost", 32, 32);
+        game.setup_demo();
+        game.houses[0].credits = 0;
+        game.houses[0].tiberium = 0;
+
+        let e1 = game
+            .sidebar_options(0)
+            .into_iter()
+            .find(|option| option.buildable == Buildable::Unit(UnitType::InfantryE1))
+            .expect("infantry row exists");
+        assert!(e1.visible);
+        assert!(!e1.affordable);
+        assert!(e1.has_producer);
+    }
+
+    #[test]
+    fn ai_production_uses_rules_cost_and_tech_level() {
+        let ai = AI::new(0, AIDifficulty::Normal);
+        let mut game = Game::with_rules(
+            "ai-production",
+            32,
+            32,
+            rules("[MTNK]\nCost=800\nTechLevel=3\n[HTNK]\nCost=10\nTechLevel=7\n"),
+        );
+        game.setup_demo();
+
+        game.houses[0].tech_level = 6;
+        assert_ne!(
+            game.ai_production_choice(0, &ai, 3000),
+            Some(UnitType::MammothTank),
+            "rules TechLevel 7 must stay locked at build level 6"
+        );
+
+        // At full tech the 10-credit Mammoth dominates the weighted table.
+        game.houses[0].tech_level = 7;
+        assert_eq!(
+            game.ai_production_choice(0, &ai, 3000),
+            Some(UnitType::MammothTank)
+        );
+        assert!(game.ai_queue_production(0, &ai, 0).is_some());
     }
 }

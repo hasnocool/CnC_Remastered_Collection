@@ -16,7 +16,7 @@ use cnc_audio::AudioMixer;
 use cnc_core::rules::RulesDatabase;
 use cnc_core::{Fixed16_16, Vec2, Vec2i};
 use cnc_renderer::{Camera, Renderer, SoftwareRenderer, WgpuRenderer};
-use cnc_tiberian_dawn::{Game, StructureType, UnitType};
+use cnc_tiberian_dawn::{Buildable, Game, StructureType, UnitType};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -108,7 +108,29 @@ enum SidebarHit {
 
 const SIDEBAR_WIDTH: f32 = 210.0;
 const SIDEBAR_ROW_HEIGHT: f32 = 20.0;
-const SIDEBAR_PANEL_HEIGHT: f32 = 274.0;
+
+/// Human-readable sidebar label for a buildable type.
+fn build_label(buildable: Buildable) -> &'static str {
+    match buildable {
+        Buildable::Unit(UnitType::InfantryE1) => "Infantry",
+        Buildable::Unit(UnitType::MediumTank) => "Med Tank",
+        Buildable::Unit(UnitType::MammothTank) => "Mammoth",
+        Buildable::Unit(UnitType::Harvester) => "Harvester",
+        Buildable::Unit(UnitType::Jeep) => "Humvee",
+        Buildable::Unit(UnitType::Buggy) => "Buggy",
+        Buildable::Unit(UnitType::Orca) => "Orca",
+        Buildable::Unit(UnitType::Apache) => "Apache",
+        Buildable::Structure(StructureType::ConstructionYard) => "Con Yard",
+        Buildable::Structure(StructureType::PowerPlant) => "Power Plant",
+        Buildable::Structure(StructureType::Refinery) => "Refinery",
+        Buildable::Structure(StructureType::Silo) => "Silo",
+        Buildable::Structure(StructureType::Barracks) => "Barracks",
+        Buildable::Structure(StructureType::WarFactory) => "War Factory",
+        Buildable::Structure(StructureType::Helipad) => "Helipad",
+        Buildable::Structure(StructureType::IonCannon) => "Ion Cannon",
+        Buildable::Structure(StructureType::TempleOfNod) => "Temple",
+    }
+}
 
 struct LauncherApp {
     kind: RendererKind,
@@ -211,48 +233,44 @@ impl LauncherApp {
         let x = left + 2.0 * half_w - SIDEBAR_WIDTH - 8.0;
         let y = top + 8.0;
         let units_header_y = y + 36.0;
-        let structures_header_y = y + 152.0;
 
+        // Only rows whose TechLevel and prerequisites are satisfied appear;
+        // rules-derived costs are shown so a Rules.ini override is visible.
+        let options = self.game.visible_sidebar_options(0);
         let mut entries = Vec::new();
-        let mut row_y = y + 48.0;
-        const UNITS: [(&str, UnitType); 5] = [
-            ("Infantry", UnitType::InfantryE1),
-            ("Med Tank", UnitType::MediumTank),
-            ("Mammoth", UnitType::MammothTank),
-            ("Harvester", UnitType::Harvester),
-            ("Orca", UnitType::Orca),
-        ];
-        for (label, unit) in UNITS {
+        let mut row_y = units_header_y + 12.0;
+
+        for option in &options {
+            let Buildable::Unit(unit) = option.buildable else {
+                continue;
+            };
             entries.push(SidebarEntry {
                 x,
                 y: row_y,
                 w: SIDEBAR_WIDTH,
                 h: 18.0,
                 action: BuildAction::Unit(unit),
-                label,
-                cost: unit.stats().cost,
+                label: build_label(option.buildable),
+                cost: option.cost,
                 enabled: self.game.can_queue_unit(0, unit),
             });
             row_y += SIDEBAR_ROW_HEIGHT;
         }
 
-        row_y = structures_header_y + 16.0;
-        const STRUCTURES: [(&str, StructureType); 5] = [
-            ("Power Plant", StructureType::PowerPlant),
-            ("Refinery", StructureType::Refinery),
-            ("Barracks", StructureType::Barracks),
-            ("War Factory", StructureType::WarFactory),
-            ("Silo", StructureType::Silo),
-        ];
-        for (label, structure) in STRUCTURES {
+        let structures_header_y = row_y + 8.0;
+        row_y = structures_header_y + 12.0;
+        for option in &options {
+            let Buildable::Structure(structure) = option.buildable else {
+                continue;
+            };
             entries.push(SidebarEntry {
                 x,
                 y: row_y,
                 w: SIDEBAR_WIDTH,
                 h: 18.0,
                 action: BuildAction::Structure(structure),
-                label,
-                cost: structure.stats().cost,
+                label: build_label(option.buildable),
+                cost: option.cost,
                 enabled: self.game.can_queue_building(0, structure),
             });
             row_y += SIDEBAR_ROW_HEIGHT;
@@ -262,7 +280,7 @@ impl LauncherApp {
             x,
             y,
             w: SIDEBAR_WIDTH,
-            h: SIDEBAR_PANEL_HEIGHT,
+            h: (row_y - y) + 8.0,
             units_header_y,
             structures_header_y,
             entries,
@@ -273,7 +291,8 @@ impl LauncherApp {
         let sidebar = self.sidebar();
         let x = world.x.to_f32();
         let y = world.y.to_f32();
-        if x < sidebar.x || x > sidebar.x + sidebar.w || y < sidebar.y || y > sidebar.y + sidebar.h {
+        if x < sidebar.x || x > sidebar.x + sidebar.w || y < sidebar.y || y > sidebar.y + sidebar.h
+        {
             return SidebarHit::Outside;
         }
         for entry in &sidebar.entries {
@@ -312,7 +331,12 @@ impl LauncherApp {
                 let min_y = a.y.to_f32().min(b.y.to_f32());
                 let max_x = a.x.to_f32().max(b.x.to_f32());
                 let max_y = a.y.to_f32().max(b.y.to_f32());
-                Some((min_x, min_y, (max_x - min_x).max(1.0), (max_y - min_y).max(1.0)))
+                Some((
+                    min_x,
+                    min_y,
+                    (max_x - min_x).max(1.0),
+                    (max_y - min_y).max(1.0),
+                ))
             }
             _ => None,
         };
@@ -328,18 +352,12 @@ impl LauncherApp {
 
         if self.game.units_produced != self.last_produced {
             self.last_produced = self.game.units_produced;
-            tracing::info!(
-                total = self.last_produced,
-                "unit production complete"
-            );
+            tracing::info!(total = self.last_produced, "unit production complete");
         }
 
         if self.game.harvested_credits != self.last_harvested {
             self.last_harvested = self.game.harvested_credits;
-            tracing::info!(
-                credits = self.last_harvested,
-                "harvester unloaded"
-            );
+            tracing::info!(credits = self.last_harvested, "harvester unloaded");
         }
 
         if self.game.aircraft_shots != self.last_aircraft_shots {
@@ -357,10 +375,7 @@ impl LauncherApp {
 
         if self.game.secondary_shots != self.last_secondary_shots {
             self.last_secondary_shots = self.game.secondary_shots;
-            tracing::info!(
-                shots = self.last_secondary_shots,
-                "secondary weapon fired"
-            );
+            tracing::info!(shots = self.last_secondary_shots, "secondary weapon fired");
         }
 
         renderer.begin_frame();
@@ -431,8 +446,20 @@ impl LauncherApp {
         );
 
         // Sidebar build menu (drawn in world space, anchored to the camera).
-        renderer.draw_rect(sidebar.x, sidebar.y, sidebar.w, sidebar.h, [0.04, 0.05, 0.08, 0.92]);
-        renderer.draw_rect(sidebar.x, sidebar.y, sidebar.w, 1.5, [0.25, 0.45, 0.75, 1.0]);
+        renderer.draw_rect(
+            sidebar.x,
+            sidebar.y,
+            sidebar.w,
+            sidebar.h,
+            [0.04, 0.05, 0.08, 0.92],
+        );
+        renderer.draw_rect(
+            sidebar.x,
+            sidebar.y,
+            sidebar.w,
+            1.5,
+            [0.25, 0.45, 0.75, 1.0],
+        );
         renderer.draw_text(
             "BUILD MENU",
             sidebar.x + 8.0,
@@ -496,7 +523,9 @@ impl LauncherApp {
         self.frame_index = self.frame_index.wrapping_add(1);
 
         if self.kind == RendererKind::Software && !self.software_warning_emitted {
-            tracing::warn!("software renderer draws offscreen only; use --renderer wgpu to present frames");
+            tracing::warn!(
+                "software renderer draws offscreen only; use --renderer wgpu to present frames"
+            );
             self.software_warning_emitted = true;
         }
     }
@@ -534,8 +563,7 @@ impl ApplicationHandler for LauncherApp {
             renderer.set_camera(&self.camera);
         }
 
-        let assets_dir =
-            std::env::var("CNC_ASSETS").unwrap_or_else(|_| "assets".to_string());
+        let assets_dir = std::env::var("CNC_ASSETS").unwrap_or_else(|_| "assets".to_string());
         let atlas = SpriteAtlas::load_or_generate(Path::new(&assets_dir), AtlasStyle::Neon);
         if let Some(renderer) = self.renderer.as_mut() {
             if renderer.uses_sprites() {
@@ -605,8 +633,7 @@ impl ApplicationHandler for LauncherApp {
                     if let (Some(start), Some(end)) = (start, end) {
                         let world = self.screen_to_world(end);
                         let start_world = self.screen_to_world(start);
-                        let over_sidebar =
-                            !matches!(self.sidebar_hit(world), SidebarHit::Outside);
+                        let over_sidebar = !matches!(self.sidebar_hit(world), SidebarHit::Outside);
                         let started_in_sidebar =
                             !matches!(self.sidebar_hit(start_world), SidebarHit::Outside);
 
@@ -626,11 +653,17 @@ impl ApplicationHandler for LauncherApp {
                             let dx = end.x - start.x;
                             let dy = end.y - start.y;
                             if dx * dx + dy * dy > 36.0 {
-                                let count = self.game.select_in_rect(start_world, world, self.shift_down);
+                                let count =
+                                    self.game
+                                        .select_in_rect(start_world, world, self.shift_down);
                                 tracing::debug!(count, additive = self.shift_down, "box selection");
                             } else {
                                 let selected = self.game.select_at_additive(world, self.shift_down);
-                                tracing::debug!(?selected, additive = self.shift_down, "click selection");
+                                tracing::debug!(
+                                    ?selected,
+                                    additive = self.shift_down,
+                                    "click selection"
+                                );
                             }
                         }
                     }
@@ -649,7 +682,7 @@ impl ApplicationHandler for LauncherApp {
                     }
                 }
                 _ => {}
-            }
+            },
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed {
                     match &event.logical_key {
@@ -773,5 +806,7 @@ fn main() -> Result<()> {
 
     let event_loop = EventLoop::new().context("failed to create the winit event loop")?;
     event_loop.set_control_flow(ControlFlow::Wait);
-    event_loop.run_app(&mut app).context("event loop terminated with an error")
+    event_loop
+        .run_app(&mut app)
+        .context("event loop terminated with an error")
 }
