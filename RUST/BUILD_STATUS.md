@@ -4,19 +4,19 @@ _Last verified: cargo 1.98.1 / rustc 1.98.1 on Linux._
 
 ## Verification
 
-```
+~~~
 cargo check --workspace --all-targets   # clean (warnings only)
-cargo test --workspace                 # 170 passed, 0 failed
-```
+cargo test --workspace                 # 206 passed, 0 failed
+~~~
 
 Per-target tests:
 
 | Target | Tests |
 |---|---|
-| cnc-core (unit + INI + Rules.ini) | 54 |
-| cnc-asset (parsers + converters) | 18 |
-| cnc-asset-cli (end-to-end integration) | 7 |
-| cnc-tiberian-dawn (game logic + rules integration + lockstep) | 86 |
+| cnc-core (unit + INI + Rules.ini) | 57 |
+| cnc-asset (parsers + converters + Ogg) | 26 |
+| cnc-asset-cli (end-to-end integration) | 8 |
+| cnc-tiberian-dawn (game logic + rules + lockstep + netcode) | 110 |
 | cnc-renderer (camera + sprite batch) | 3 |
 | cnc-renderer (GPU smoke, ignored unless adapter present) | 2 |
 
@@ -24,84 +24,81 @@ Per-target tests:
 
 ### Implemented Parsers
 - **archive.rs**: MIX v1/v2 (.mix) - Zlib decompression, name tables, extract/extract_all
-  - Fixed payload offset calculation (data starts after the name table) and
-    compressed-entry lengths; both layouts covered by tests.
+  - Payload offsets start after the name table; compressed-entry lengths are honoured.
 - **shape.rs**: SHP (.shp) - Frame headers, RLE decoding, bounds, palette-to-RGBA
-- **audio.rs**: VOC (.voc) - Creative Voice blocks 0x00-0x0A, AUD (.aud) - Westwood Audio, WAV export via hound
+- **audio.rs**: VOC (.voc) - Creative Voice blocks 0x00-0x0A, AUD (.aud) - Westwood Audio
 - **palette.rs**: PAL (.pal) - 768-byte RGB, gamma correction, grayscale, round-trip test
 
 ## Phase 3: Rendering - COMPLETE
 
-### Implemented Components
-- **sprite_batch.rs**: Instanced sprite batching (10K capacity), z-order + texture sorting, vertex/index buffers
-- **shaders/sprite_batch.wgsl**: Palette remapping (256 colors), alpha blending, nearest-neighbor
-- **camera.rs**: Orthographic camera, view/projection matrices, world↔screen, zoom/pan
+- **sprite_batch.rs**: Instanced sprite batching (10K capacity), z-order + texture sorting
+- **shaders/sprite_batch.wgsl**: Palette remapping (256 colors), alpha blending
+- **camera.rs**: Orthographic camera, world<->screen transforms, zoom/pan
 - **renderer.rs**: Renderer trait, WgpuRenderer (async), SoftwareRenderer fallback
 
 ## Phase 4: Asset Converter CLI - COMPLETE
 
-`cnc-asset/src/convert.rs` is the shared library behind the
-`cnc-asset-cli` binary; `cnc-asset/tests/cli.rs` exercises the binary itself.
+convert.rs is the shared library behind the cnc-asset-cli binary; tests/cli.rs
+exercises the binary itself.
 
 | Command | Behaviour |
 |---|---|
-| `mix -i X.MIX -o DIR [--list]` | List or extract every MIX entry |
-| `shp -i X.SHP -o OUT [-p PAL] [--sprite-sheet] [--opaque]` | Per-frame PNGs, or one horizontal sheet + JSON manifest |
-| `voc -i X.voc|X.aud -o X.wav` | VOC/AUD to PCM WAV |
-| `pal -i X.PAL -o DIR [--format json|png|css]` | Palette export |
-| `batch -i SRCDIR -o OUTDIR -g td|ra [-p PAL] [--sprite-sheet]` | Recursive conversion mirroring the source tree, with per-kind counts |
-| `generate-atlas -o DIR [--style classic|neon]` | Placeholder sprite atlas |
+| mix -i X.MIX -o DIR [--list] | List or extract every MIX entry |
+| shp -i X.SHP -o OUT [-p PAL] [--sprite-sheet] [--opaque] | Per-frame PNGs, or one sheet + JSON manifest |
+| voc -i X.voc|X.aud -o OUT [--format wav|ogg] [--loop-start N --loop-end N] [-q Q] | WAV or Ogg Vorbis with loop points |
+| pal -i X.PAL -o DIR [--format json|png|css] | Palette export |
+| batch -i SRC -o OUT -g td|ra [-p PAL] [--sprite-sheet] [--audio-format wav|ogg] | Recursive conversion mirroring the tree |
+| generate-atlas -o DIR [--style classic|neon] | Placeholder sprite atlas |
 
 Details:
-- SHP frames honour palette index 0 as transparent (disable with `--opaque`).
-- Sprite sheets are packed horizontally and described by a JSON manifest
-  (frame index, x, y, w, h), ready for GPU upload.
-- Batch conversion records failures per file and returns a non-zero exit status
-  when any asset fails, without aborting the remaining files.
-- OGG/Vorbis encoding with loop points is not implemented; audio is exported as WAV.
+- SHP frames honour palette index 0 as transparent (disable with --opaque).
+- Sprite sheets are packed horizontally and described by a JSON manifest.
+- VOC loop blocks (0x09/0x0A) are preserved by default; CLI flags can override them.
+- Ogg Vorbis (pure Rust binding to libvorbis) writes LOOPSTART/LOOPEND/LOOPLENGTH
+  Vorbis comments; WAV output gets a RIFF smpl chunk with a forward loop.
+- Batch conversion records per-file failures and exits non-zero if any asset fails.
 
 ## Phase 5: Game Logic - Shared Foundation (IN PROGRESS)
 
-### 5.1 Command queue & lockstep - STARTED
-- `network.rs` now orders commands deterministically by (frame, player, hash)
-  regardless of UDP arrival order.
-- `LockstepSession`: validated scheduling, per-frame gating, ordered replay log,
-  per-frame checksums, remote desync detection, and replay reconstruction.
-- `NetPacket` checksums cover sequence, frame and command payloads.
-- Still TODO: packet serialization over UDP, multi-peer broadcast, save/load of replays.
+### 5.1 Command queue & lockstep - DONE for local/LAN transport
+- Deterministic command ordering by (frame, player, hash), independent of UDP arrival.
+- LockstepSession: validated scheduling, frame gating, ordered replay log, per-frame
+  checksums, remote desync detection, replay reconstruction.
+- Binary packet codec (magic CNCP, version 1) with defensive limits, trailing-byte
+  checks and checksum validation.
+- UdpTransport: explicit peer list, encoded multi-peer broadcast, validated receive.
+- Still TODO: replay save/load to disk, peer join/leave handshake, lockstep mesh relay.
 
 ### 5.2 Rules/INI registry - DONE (first pass)
-- `cnc-core/src/rules.rs` parses Rules.ini into typed data:
-  `GeneralRules` (RULES.CPP defaults), `DifficultyRule` (Easy/Normal/Hard),
-  `WeaponRule`, `WarheadRule`, `TypeRule` (units/buildings/aircraft),
-  `HouseRule` and the `[Infantry]/[Units]/[Aircraft]/[Buildings]` categories.
-- Missing referenced sections are reported as warnings instead of failing.
-- INI parser fixes: decimal and 0x-hex integers, numeric/boolean disambiguation,
-  case-insensitive key lookup, multi-level inheritance, cycle detection.
-- Game integration: `Game::with_rules`/`set_rules`/`load_rules` plus
-  `unit_cost`, `building_cost`, `unit_strength`, `building_strength`
-  overrides used by production, spawning and building placement.
-- INI names follow BDATA/UDATA/IDATA/AADATA: E1, MTNK, HTNK, HARV, JEEP, BGGY,
-  ORCA, HELI; FACT, NUKE, PROC, SILO, PYLE, WEAP, HPAD, EYE, TMPL.
-- Launcher accepts `--rules Rules.ini` and applies the overrides to the demo game.
-- Still TODO: weapon/warhead overrides wired into combat, tech tree/prerequisites,
-  and per-faction house sections.
+- cnc-core/src/rules.rs parses Rules.ini into typed data: GeneralRules (RULES.CPP
+  defaults), DifficultyRule, WeaponRule, WarheadRule, TypeRule, HouseRule and the
+  Infantry/Units/Aircraft/Buildings categories.
+- Unlisted sections are classified by their keys (Damage/ROF/Range/Warhead ->
+  weapon, Verses/Spread -> warhead, Cost/Strength/Prerequisite -> type).
+- INI fixes: decimal + 0x-hex integers, numeric/boolean disambiguation,
+  case-insensitive lookup, multi-level inheritance, cycle detection.
+- Costs, strength and production times use rules overrides.
+- Weapons: Damage, ROF and Range overrides replace CONST.CPP values; Warhead=
+  selects a warhead and Verses/Spread replace the armor-modifier table for both
+  projectiles and explosion damage.
+- Tech tree: Prerequisite= tokens are enforced for unit and building production,
+  including GDI/NOD faction tokens and PYLE/HAND, HPAD/AFLD aliases; missing
+  prerequisites are exposed through missing_prerequisites() for UI use.
+- Launcher accepts --rules Rules.ini and applies the overrides to the demo game.
+- Still TODO: TechLevel gating, AI production weighting, prerequisite-driven
+  sidebar visibility.
 
 ## Core Types (Phase 1) - COMPLETE
 
-- Fixed16_16 (16.16 fixed-point with deterministic trig)
-- FloatBias (TD's biased float comparison)
-- ClassId (300+ variant RTTI replacement)
-- CodePointers/DecodePointers (save/load fixup)
-- CCPtr/CCWeak/NoInit (smart pointers)
-- ObjectPool (hot allocation)
-- INI parser with inheritance and typed Rules registry
+- Fixed16_16, FloatBias, ClassId, CodePointers/DecodePointers, CCPtr/CCWeak/NoInit,
+  ObjectPool, INI parser with inheritance and the typed Rules registry
 
 ## Workspace Structure
-- 8 crates: cnc-core, cnc-renderer, cnc-audio, cnc-asset, cnc-tiberian-dawn, cnc-red-alert, cnc-map-editor, cnc-launcher
+- 8 crates: cnc-core, cnc-renderer, cnc-audio, cnc-asset, cnc-tiberian-dawn,
+  cnc-red-alert, cnc-map-editor, cnc-launcher
 - All dependencies in workspace Cargo.toml
 
 ## Next Steps
-1. Complete Phase 5.1: UDP packet serialization, peer broadcast and replay save/load.
-2. Complete Phase 5.2: wire weapon/warhead rules into combat and tech-tree prerequisites.
-3. Phase 6: expand Tiberian Dawn game logic (houses, missions, network command execution).
+1. Persist replays to disk and implement the peer join/leave handshake.
+2. Enforce TechLevel and drive sidebar visibility/prerequisites from Rules.ini.
+3. Phase 6: expand Tiberian Dawn game logic (houses, missions, command execution).
