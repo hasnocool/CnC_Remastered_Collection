@@ -2,6 +2,8 @@
 
 use cnc_core::{ClassId, Vec2};
 use std::collections::VecDeque;
+use std::net::SocketAddr;
+use tokio::net::UdpSocket;
 
 /// Command types for lockstep networking
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -332,7 +334,7 @@ impl LockstepSession {
 }
 
 /// Network packet for UDP transmission
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetPacket {
     pub sequence: u32,
     pub frame: u32,
@@ -367,6 +369,390 @@ impl NetPacket {
         self.checksum == self.calculate_checksum()
     }
 }
+
+/// Wire magic for lockstep datagrams ("CNCP").
+pub const PACKET_MAGIC: [u8; 4] = *b"CNCP";
+/// Wire protocol version.
+pub const PACKET_VERSION: u8 = 1;
+/// Header: magic(4) + version(1) + reserved(1) + sequence(4) + frame(4) + checksum(4) + count(2).
+const PACKET_HEADER_LEN: usize = 20;
+/// Defensive cap so a malformed datagram cannot force a huge allocation.
+const MAX_COMMANDS_PER_PACKET: usize = 4_096;
+
+/// Errors produced while encoding or decoding lockstep datagrams.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PacketError {
+    #[error("packet is too short (need at least {PACKET_HEADER_LEN} bytes)")]
+    TooShort,
+    #[error("invalid packet magic (expected CNCP)")]
+    InvalidMagic,
+    #[error("unsupported protocol version {0}")]
+    UnsupportedVersion(u8),
+    #[error("invalid command tag {0}")]
+    InvalidTag(u8),
+    #[error("command count {0} exceeds the {MAX_COMMANDS_PER_PACKET} command limit")]
+    TooManyCommands(usize),
+    #[error("truncated command payload")]
+    Truncated,
+    #[error("trailing bytes after command payload")]
+    TrailingBytes,
+    #[error("packet checksum mismatch")]
+    ChecksumMismatch,
+    #[error("invalid command payload: {0}")]
+    InvalidPayload(&'static str),
+}
+
+struct PayloadReader<'a> {
+    bytes: &'a [u8],
+    position: usize,
+}
+
+impl<'a> PayloadReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, position: 0 }
+    }
+
+    fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.position)
+    }
+
+    fn take(&mut self, count: usize) -> Result<&'a [u8], PacketError> {
+        let end = self.position.checked_add(count).ok_or(PacketError::Truncated)?;
+        if end > self.bytes.len() {
+            return Err(PacketError::Truncated);
+        }
+        let slice = &self.bytes[self.position..end];
+        self.position = end;
+        Ok(slice)
+    }
+
+    fn u8(&mut self) -> Result<u8, PacketError> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u16(&mut self) -> Result<u16, PacketError> {
+        Ok(u16::from_le_bytes(self.take(2)?.try_into().map_err(|_| PacketError::Truncated)?))
+    }
+
+    fn u32(&mut self) -> Result<u32, PacketError> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().map_err(|_| PacketError::Truncated)?))
+    }
+
+    fn i32(&mut self) -> Result<i32, PacketError> {
+        Ok(i32::from_le_bytes(self.take(4)?.try_into().map_err(|_| PacketError::Truncated)?))
+    }
+
+    fn unit_ids(&mut self) -> Result<Vec<u32>, PacketError> {
+        let count = usize::from(self.u16()?);
+        if count > MAX_COMMANDS_PER_PACKET {
+            return Err(PacketError::TooManyCommands(count));
+        }
+        let mut units = Vec::with_capacity(count);
+        for _ in 0..count {
+            units.push(self.u32()?);
+        }
+        Ok(units)
+    }
+
+    fn vec2(&mut self) -> Result<Vec2, PacketError> {
+        let x = self.i32()?;
+        let y = self.i32()?;
+        // Wire values are raw 16.16 bits, so rebuild the fixed-point fields directly.
+        Ok(Vec2::new(cnc_core::Fixed16_16(x), cnc_core::Fixed16_16(y)))
+    }
+
+    fn ensure_consumed(&self) -> Result<(), PacketError> {
+        if self.remaining() == 0 {
+            Ok(())
+        } else {
+            Err(PacketError::TrailingBytes)
+        }
+    }
+}
+
+fn push_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_i32(out: &mut Vec<u8>, value: i32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_units(out: &mut Vec<u8>, units: &[u32]) -> Result<(), PacketError> {
+    let count = u16::try_from(units.len()).map_err(|_| PacketError::TooManyCommands(units.len()))?;
+    push_u16(out, count);
+    for unit in units {
+        push_u32(out, *unit);
+    }
+    Ok(())
+}
+
+fn push_vec2(out: &mut Vec<u8>, vector: &Vec2) {
+    push_i32(out, vector.x.0);
+    push_i32(out, vector.y.0);
+}
+
+impl Command {
+    /// Encode only the command payload; the tag is written by NetPacket::encode.
+    pub fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), PacketError> {
+        match self {
+            Command::Move { units, target } => {
+                push_units(out, units)?;
+                push_vec2(out, target);
+            }
+            Command::Attack { units, target } => {
+                push_units(out, units)?;
+                push_u32(out, *target);
+            }
+            Command::Stop { units } => push_units(out, units)?,
+            Command::Guard { units, target } => {
+                push_units(out, units)?;
+                push_u32(out, *target);
+            }
+            Command::Build { building, location } => {
+                push_u32(out, building.as_u32());
+                push_vec2(out, location);
+            }
+            Command::Sell { building } => push_u32(out, *building),
+            Command::Repair { unit, target } => {
+                push_u32(out, *unit);
+                push_u32(out, *target);
+            }
+            Command::Power { building, on } => {
+                push_u32(out, *building);
+                out.push(u8::from(*on));
+            }
+            Command::Produce { factory, unit_type } => {
+                push_u32(out, *factory);
+                push_u32(out, unit_type.as_u32());
+            }
+            Command::Deploy { unit } => push_u32(out, *unit),
+            Command::Undeploy { unit } => push_u32(out, *unit),
+            Command::Sabotage { unit, target } => {
+                push_u32(out, *unit);
+                push_u32(out, *target);
+            }
+        }
+        Ok(())
+    }
+
+    /// Decode a payload previously written by encode_payload.
+    pub fn decode_payload(tag: u8, bytes: &[u8]) -> Result<Self, PacketError> {
+        let mut reader = PayloadReader::new(bytes);
+        let command = match tag {
+            1 => Command::Move {
+                units: reader.unit_ids()?,
+                target: reader.vec2()?,
+            },
+            2 => Command::Attack {
+                units: reader.unit_ids()?,
+                target: reader.u32()?,
+            },
+            3 => Command::Stop {
+                units: reader.unit_ids()?,
+            },
+            4 => Command::Guard {
+                units: reader.unit_ids()?,
+                target: reader.u32()?,
+            },
+            5 => Command::Build {
+                building: ClassId::from_u32(reader.u32()?),
+                location: reader.vec2()?,
+            },
+            6 => Command::Sell {
+                building: reader.u32()?,
+            },
+            7 => Command::Repair {
+                unit: reader.u32()?,
+                target: reader.u32()?,
+            },
+            8 => Command::Power {
+                building: reader.u32()?,
+                on: match reader.u8()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(PacketError::InvalidPayload("Power.on must be 0 or 1")),
+                },
+            },
+            9 => Command::Produce {
+                factory: reader.u32()?,
+                unit_type: ClassId::from_u32(reader.u32()?),
+            },
+            10 => Command::Deploy {
+                unit: reader.u32()?,
+            },
+            11 => Command::Undeploy {
+                unit: reader.u32()?,
+            },
+            12 => Command::Sabotage {
+                unit: reader.u32()?,
+                target: reader.u32()?,
+            },
+            other => return Err(PacketError::InvalidTag(other)),
+        };
+        reader.ensure_consumed()?;
+        Ok(command)
+    }
+}
+
+impl NetPacket {
+    /// Encode this packet into a self-contained UDP datagram.
+    pub fn encode(&self) -> Result<Vec<u8>, PacketError> {
+        if self.commands.len() > MAX_COMMANDS_PER_PACKET {
+            return Err(PacketError::TooManyCommands(self.commands.len()));
+        }
+        let mut out = Vec::with_capacity(PACKET_HEADER_LEN + self.commands.len() * 16);
+        out.extend_from_slice(&PACKET_MAGIC);
+        out.push(PACKET_VERSION);
+        out.push(0); // reserved
+        push_u32(&mut out, self.sequence);
+        push_u32(&mut out, self.frame);
+        push_u32(&mut out, self.calculate_checksum());
+        push_u16(&mut out, self.commands.len() as u16);
+        for command in &self.commands {
+            let mut payload = Vec::new();
+            command.command.encode_payload(&mut payload)?;
+            push_u32(&mut out, command.frame);
+            out.push(command.player);
+            out.push(command.command.tag());
+            push_u16(&mut out, payload.len() as u16);
+            out.extend_from_slice(&payload);
+        }
+        Ok(out)
+    }
+
+    /// Decode and validate a datagram produced by NetPacket::encode.
+    pub fn decode(bytes: &[u8]) -> Result<Self, PacketError> {
+        if bytes.len() < PACKET_HEADER_LEN {
+            return Err(PacketError::TooShort);
+        }
+        if bytes[0..4] != PACKET_MAGIC {
+            return Err(PacketError::InvalidMagic);
+        }
+        if bytes[4] != PACKET_VERSION {
+            return Err(PacketError::UnsupportedVersion(bytes[4]));
+        }
+        let mut reader = PayloadReader::new(&bytes[5..]);
+        let _reserved = reader.u8()?;
+        let sequence = reader.u32()?;
+        let frame = reader.u32()?;
+        let checksum = reader.u32()?;
+        let count = usize::from(reader.u16()?);
+        if count > MAX_COMMANDS_PER_PACKET {
+            return Err(PacketError::TooManyCommands(count));
+        }
+
+        let mut commands = Vec::with_capacity(count);
+        for _ in 0..count {
+            let command_frame = reader.u32()?;
+            let player = reader.u8()?;
+            let tag = reader.u8()?;
+            let payload_len = usize::from(reader.u16()?);
+            let payload = reader.take(payload_len)?;
+            let command = Command::decode_payload(tag, payload)?;
+            commands.push(NetCommand::new(command_frame, player, command));
+        }
+        if reader.remaining() != 0 {
+            return Err(PacketError::TrailingBytes);
+        }
+
+        let packet = Self {
+            sequence,
+            frame,
+            commands,
+            checksum,
+        };
+        if !packet.verify() {
+            return Err(PacketError::ChecksumMismatch);
+        }
+        Ok(packet)
+    }
+}
+
+/// UDP transport with an explicit peer list and encoded broadcast.
+#[derive(Debug)]
+pub struct UdpTransport {
+    socket: UdpSocket,
+    peers: Vec<SocketAddr>,
+}
+
+impl UdpTransport {
+    /// Bind a UDP socket (use port 0 for an ephemeral test port).
+    pub async fn bind(address: &str) -> std::io::Result<Self> {
+        Ok(Self {
+            socket: UdpSocket::bind(address).await?,
+            peers: Vec::new(),
+        })
+    }
+
+    /// Add one peer; returns false when it was already registered.
+    pub fn add_peer(&mut self, peer: SocketAddr) -> bool {
+        if self.peers.contains(&peer) {
+            false
+        } else {
+            self.peers.push(peer);
+            true
+        }
+    }
+
+    /// Remove a peer; returns whether it was registered.
+    pub fn remove_peer(&mut self, peer: &SocketAddr) -> bool {
+        match self.peers.iter().position(|candidate| candidate == peer) {
+            Some(index) => {
+                self.peers.remove(index);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn peers(&self) -> &[SocketAddr] {
+        &self.peers
+    }
+
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.socket.local_addr()
+    }
+
+    /// Encode once and send to every registered peer. Returns the delivery count.
+    pub async fn broadcast(&self, packet: &NetPacket) -> std::io::Result<usize> {
+        let bytes = packet
+            .encode()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        let mut delivered = 0;
+        let mut first_error = None;
+        for peer in &self.peers {
+            match self.socket.send_to(&bytes, peer).await {
+                Ok(_) => delivered += 1,
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        if delivered == 0 {
+            if let Some(error) = first_error {
+                return Err(error);
+            }
+        }
+        Ok(delivered)
+    }
+
+    /// Receive and decode one datagram.
+    pub async fn recv(&self) -> std::io::Result<(NetPacket, SocketAddr)> {
+        let mut buffer = [0u8; 65_507];
+        let (length, from) = self.socket.recv_from(&mut buffer).await?;
+        let packet = NetPacket::decode(&buffer[..length])
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        Ok((packet, from))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,5 +952,147 @@ mod tests {
 
         let same = NetPacket::new(42, 0, commands);
         assert_eq!(packet.checksum, same.checksum);
+    }
+}
+
+#[cfg(test)]
+mod netcode_tests {
+    use super::*;
+    use cnc_core::Fixed16_16;
+    use std::time::Duration;
+
+    fn point(x: i32, y: i32) -> Vec2 {
+        Vec2::new(Fixed16_16::from_int(x), Fixed16_16::from_int(y))
+    }
+
+    fn sample_commands() -> Vec<NetCommand> {
+        vec![
+            NetCommand::new(1, 0, Command::Move { units: vec![1, 2, 3], target: point(-4, 9) }),
+            NetCommand::new(1, 1, Command::Attack { units: vec![4], target: 9 }),
+            NetCommand::new(2, 0, Command::Stop { units: vec![] }),
+            NetCommand::new(2, 1, Command::Guard { units: vec![7, 8], target: 3 }),
+            NetCommand::new(3, 0, Command::Build { building: ClassId::PowerPlant, location: point(12, 15) }),
+            NetCommand::new(3, 1, Command::Sell { building: 42 }),
+            NetCommand::new(4, 0, Command::Repair { unit: 1, target: 2 }),
+            NetCommand::new(4, 1, Command::Power { building: 5, on: true }),
+            NetCommand::new(5, 0, Command::Produce { factory: 6, unit_type: ClassId::VehicleE2 }),
+            NetCommand::new(5, 1, Command::Deploy { unit: 11 }),
+            NetCommand::new(6, 0, Command::Undeploy { unit: 12 }),
+            NetCommand::new(6, 1, Command::Sabotage { unit: 13, target: 14 }),
+        ]
+    }
+
+    #[test]
+    fn all_command_variants_round_trip() {
+        let packet = NetPacket::new(77, 6, sample_commands());
+        let bytes = packet.encode().unwrap();
+        let decoded = NetPacket::decode(&bytes).unwrap();
+        assert_eq!(decoded, packet);
+        assert_eq!(decoded.commands.len(), 12);
+    }
+
+    #[test]
+    fn codec_rejects_bad_magic_version_and_truncation() {
+        let packet = NetPacket::new(1, 0, sample_commands());
+        let bytes = packet.encode().unwrap();
+
+        let mut bad_magic = bytes.clone();
+        bad_magic[0] = b'X';
+        assert_eq!(NetPacket::decode(&bad_magic), Err(PacketError::InvalidMagic));
+
+        let mut bad_version = bytes.clone();
+        bad_version[4] = 9;
+        assert_eq!(NetPacket::decode(&bad_version), Err(PacketError::UnsupportedVersion(9)));
+
+        assert_eq!(NetPacket::decode(&bytes[..10]), Err(PacketError::TooShort));
+
+        let mut truncated = bytes.clone();
+        truncated.pop();
+        assert_eq!(NetPacket::decode(&truncated), Err(PacketError::Truncated));
+
+        let mut trailing = bytes;
+        trailing.push(0xAB);
+        assert_eq!(NetPacket::decode(&trailing), Err(PacketError::TrailingBytes));
+    }
+
+    #[test]
+    fn codec_detects_corrupted_payload() {
+        let packet = NetPacket::new(3, 1, vec![NetCommand::new(1, 0, Command::Deploy { unit: 5 })]);
+        let mut bytes = packet.encode().unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xFF;
+        assert_eq!(NetPacket::decode(&bytes), Err(PacketError::ChecksumMismatch));
+    }
+
+    #[test]
+    fn codec_rejects_oversized_command_lists() {
+        let commands = vec![NetCommand::new(0, 0, Command::Stop { units: vec![] }); MAX_COMMANDS_PER_PACKET + 1];
+        let packet = NetPacket::new(0, 0, commands);
+        assert!(packet.encode().is_err());
+    }
+
+    #[test]
+    fn command_order_is_preserved_on_the_wire() {
+        let commands = sample_commands();
+        let packet = NetPacket::new(1, 6, commands.clone());
+        let decoded = NetPacket::decode(&packet.encode().unwrap()).unwrap();
+        assert_eq!(decoded.commands, commands);
+    }
+
+    #[tokio::test]
+    async fn udp_broadcast_reaches_every_peer() {
+        let mut sender = UdpTransport::bind("127.0.0.1:0").await.unwrap();
+        let receiver_a = UdpTransport::bind("127.0.0.1:0").await.unwrap();
+        let receiver_b = UdpTransport::bind("127.0.0.1:0").await.unwrap();
+        assert!(sender.add_peer(receiver_a.local_addr().unwrap()));
+        assert!(sender.add_peer(receiver_b.local_addr().unwrap()));
+        assert!(!sender.add_peer(receiver_a.local_addr().unwrap()));
+        assert_eq!(sender.peers().len(), 2);
+
+        let packet = NetPacket::new(15, 3, sample_commands());
+        assert_eq!(sender.broadcast(&packet).await.unwrap(), 2);
+
+        for receiver in [&receiver_a, &receiver_b] {
+            let (received, from) =
+                tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+                    .await
+                    .expect("broadcast timed out")
+                    .unwrap();
+            assert_eq!(received, packet);
+            assert_eq!(from, sender.local_addr().unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn udp_broadcast_without_peers_is_a_noop() {
+        let sender = UdpTransport::bind("127.0.0.1:0").await.unwrap();
+        let packet = NetPacket::new(1, 0, vec![]);
+        assert_eq!(sender.broadcast(&packet).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn udp_rejects_invalid_datagrams() {
+        let receiver = UdpTransport::bind("127.0.0.1:0").await.unwrap();
+        let raw = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        raw.send_to(b"not a lockstep packet", receiver.local_addr().unwrap())
+            .await
+            .unwrap();
+
+        let error = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("recv timed out")
+            .expect_err("garbage must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn removed_peers_stop_receiving() {
+        let mut sender = UdpTransport::bind("127.0.0.1:0").await.unwrap();
+        let receiver = UdpTransport::bind("127.0.0.1:0").await.unwrap();
+        let address = receiver.local_addr().unwrap();
+        assert!(sender.add_peer(address));
+        assert!(sender.remove_peer(&address));
+        assert!(!sender.remove_peer(&address));
+        assert_eq!(sender.broadcast(&NetPacket::new(1, 0, vec![])).await.unwrap(), 0);
     }
 }
