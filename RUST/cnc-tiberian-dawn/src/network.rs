@@ -1,57 +1,26 @@
 //! Network/Command queue for Tiberian Dawn
 
 use cnc_core::{ClassId, Vec2};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
+use std::path::Path;
 use tokio::net::UdpSocket;
 
 /// Command types for lockstep networking
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    Move {
-        units: Vec<u32>,
-        target: Vec2,
-    },
-    Attack {
-        units: Vec<u32>,
-        target: u32,
-    },
-    Stop {
-        units: Vec<u32>,
-    },
-    Guard {
-        units: Vec<u32>,
-        target: u32,
-    },
-    Build {
-        building: ClassId,
-        location: Vec2,
-    },
-    Sell {
-        building: u32,
-    },
-    Repair {
-        unit: u32,
-        target: u32,
-    },
-    Power {
-        building: u32,
-        on: bool,
-    },
-    Produce {
-        factory: u32,
-        unit_type: ClassId,
-    },
-    Deploy {
-        unit: u32,
-    },
-    Undeploy {
-        unit: u32,
-    },
-    Sabotage {
-        unit: u32,
-        target: u32,
-    },
+    Move { units: Vec<u32>, target: Vec2 },
+    Attack { units: Vec<u32>, target: u32 },
+    Stop { units: Vec<u32> },
+    Guard { units: Vec<u32>, target: u32 },
+    Build { building: ClassId, location: Vec2 },
+    Sell { building: u32 },
+    Repair { unit: u32, target: u32 },
+    Power { building: u32, on: bool },
+    Produce { factory: u32, unit_type: ClassId },
+    Deploy { unit: u32 },
+    Undeploy { unit: u32 },
+    Sabotage { unit: u32, target: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,7 +32,11 @@ pub struct NetCommand {
 
 impl NetCommand {
     pub fn new(frame: u32, player: u8, command: Command) -> Self {
-        Self { frame, player, command }
+        Self {
+            frame,
+            player,
+            command,
+        }
     }
 
     /// Stable hash of the whole command record, used for desync detection.
@@ -202,8 +175,18 @@ impl CommandQueue {
     }
 
     fn ordering(left: &NetCommand, right: &NetCommand) -> std::cmp::Ordering {
-        (left.frame, left.player, left.command.hash(), left.command.tag())
-            .cmp(&(right.frame, right.player, right.command.hash(), right.command.tag()))
+        (
+            left.frame,
+            left.player,
+            left.command.hash(),
+            left.command.tag(),
+        )
+            .cmp(&(
+                right.frame,
+                right.player,
+                right.command.hash(),
+                right.command.tag(),
+            ))
     }
 
     /// Remove and return every command scheduled at or before the given frame.
@@ -417,7 +400,10 @@ impl<'a> PayloadReader<'a> {
     }
 
     fn take(&mut self, count: usize) -> Result<&'a [u8], PacketError> {
-        let end = self.position.checked_add(count).ok_or(PacketError::Truncated)?;
+        let end = self
+            .position
+            .checked_add(count)
+            .ok_or(PacketError::Truncated)?;
         if end > self.bytes.len() {
             return Err(PacketError::Truncated);
         }
@@ -431,15 +417,27 @@ impl<'a> PayloadReader<'a> {
     }
 
     fn u16(&mut self) -> Result<u16, PacketError> {
-        Ok(u16::from_le_bytes(self.take(2)?.try_into().map_err(|_| PacketError::Truncated)?))
+        Ok(u16::from_le_bytes(
+            self.take(2)?
+                .try_into()
+                .map_err(|_| PacketError::Truncated)?,
+        ))
     }
 
     fn u32(&mut self) -> Result<u32, PacketError> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().map_err(|_| PacketError::Truncated)?))
+        Ok(u32::from_le_bytes(
+            self.take(4)?
+                .try_into()
+                .map_err(|_| PacketError::Truncated)?,
+        ))
     }
 
     fn i32(&mut self) -> Result<i32, PacketError> {
-        Ok(i32::from_le_bytes(self.take(4)?.try_into().map_err(|_| PacketError::Truncated)?))
+        Ok(i32::from_le_bytes(
+            self.take(4)?
+                .try_into()
+                .map_err(|_| PacketError::Truncated)?,
+        ))
     }
 
     fn unit_ids(&mut self) -> Result<Vec<u32>, PacketError> {
@@ -483,7 +481,8 @@ fn push_i32(out: &mut Vec<u8>, value: i32) {
 }
 
 fn push_units(out: &mut Vec<u8>, units: &[u32]) -> Result<(), PacketError> {
-    let count = u16::try_from(units.len()).map_err(|_| PacketError::TooManyCommands(units.len()))?;
+    let count =
+        u16::try_from(units.len()).map_err(|_| PacketError::TooManyCommands(units.len()))?;
     push_u16(out, count);
     for unit in units {
         push_u32(out, *unit);
@@ -743,13 +742,616 @@ impl UdpTransport {
         Ok(delivered)
     }
 
-    /// Receive and decode one datagram.
+    /// Send one raw datagram to a specific peer.
+    pub async fn send_to(&self, peer: SocketAddr, bytes: &[u8]) -> std::io::Result<()> {
+        self.socket.send_to(bytes, peer).await.map(|_| ())
+    }
+
+    /// Send a handshake message to a specific peer.
+    pub async fn send_handshake(
+        &self,
+        peer: SocketAddr,
+        message: &HandshakeMessage,
+    ) -> std::io::Result<()> {
+        self.send_to(peer, &message.encode()).await
+    }
+
+    /// Receive one command packet, skipping handshake traffic on the same socket.
     pub async fn recv(&self) -> std::io::Result<(NetPacket, SocketAddr)> {
+        loop {
+            match self.recv_datagram().await? {
+                (Datagram::Command(packet), from) => return Ok((packet, from)),
+                (Datagram::Handshake(_), _) => continue,
+            }
+        }
+    }
+
+    /// Receive either a lockstep command packet or a handshake message.
+    pub async fn recv_datagram(&self) -> std::io::Result<(Datagram, SocketAddr)> {
         let mut buffer = [0u8; 65_507];
         let (length, from) = self.socket.recv_from(&mut buffer).await?;
-        let packet = NetPacket::decode(&buffer[..length])
+        let datagram = Datagram::decode(&buffer[..length])
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        Ok((packet, from))
+        Ok((datagram, from))
+    }
+}
+
+/// A decoded UDP payload: either lockstep traffic or a join/leave control message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Datagram {
+    Command(NetPacket),
+    Handshake(HandshakeMessage),
+}
+
+impl Datagram {
+    /// Dispatch on the packet magic used by command and handshake frames.
+    pub fn decode(bytes: &[u8]) -> std::io::Result<Self> {
+        if bytes.starts_with(&PACKET_MAGIC) {
+            NetPacket::decode(bytes)
+                .map(Datagram::Command)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        } else if bytes.starts_with(&HANDSHAKE_MAGIC) {
+            HandshakeMessage::decode(bytes)
+                .map(Datagram::Handshake)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "datagram is neither CNCP nor CNCH",
+            ))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Replay persistence
+// ---------------------------------------------------------------------------
+
+/// Magic for an on-disk replay ("CNCR").
+pub const REPLAY_MAGIC: [u8; 4] = *b"CNCR";
+/// Replay file format version.
+pub const REPLAY_VERSION: u8 = 1;
+/// Defensive cap on commands loaded from a replay file.
+const MAX_REPLAY_COMMANDS: u32 = 1_000_000;
+
+/// Errors produced while saving or loading replay files.
+#[derive(Debug, thiserror::Error)]
+pub enum ReplayError {
+    #[error("replay I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("replay file is too short")]
+    TooShort,
+    #[error("invalid replay magic (expected CNCR)")]
+    InvalidMagic,
+    #[error("unsupported replay version {0}")]
+    UnsupportedVersion(u8),
+    #[error("replay command count {0} exceeds the {MAX_REPLAY_COMMANDS} limit")]
+    TooManyCommands(u32),
+    #[error("replay is truncated")]
+    Truncated,
+    #[error("replay command {index} is invalid: {source}")]
+    InvalidCommand { index: usize, source: PacketError },
+    #[error("replay checksum mismatch")]
+    ChecksumMismatch,
+    #[error("trailing bytes after replay checksum")]
+    TrailingBytes,
+}
+
+/// A recorded lockstep match: the player count and every executed command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replay {
+    pub players: u8,
+    pub commands: Vec<NetCommand>,
+}
+
+impl Replay {
+    pub fn new(players: u8, commands: Vec<NetCommand>) -> Self {
+        Self {
+            players: players.max(1),
+            commands,
+        }
+    }
+
+    /// Snapshot the ordered replay log of a live session.
+    pub fn from_session(session: &LockstepSession) -> Self {
+        Self::new(session.players, session.replay.clone())
+    }
+
+    /// Serialize to the versioned CNCR binary format.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(10 + self.commands.len() * 10 + 8);
+        out.extend_from_slice(&REPLAY_MAGIC);
+        out.push(REPLAY_VERSION);
+        out.push(self.players.max(1));
+        out.extend_from_slice(&(self.commands.len() as u32).to_le_bytes());
+        for command in &self.commands {
+            let mut payload = Vec::new();
+            command
+                .command
+                .encode_payload(&mut payload)
+                .expect("executed commands always encode");
+            out.extend_from_slice(&command.frame.to_le_bytes());
+            out.push(command.player);
+            out.push(command.command.tag());
+            out.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+            out.extend_from_slice(&payload);
+        }
+        let checksum = fnv_bytes(&out);
+        out.extend_from_slice(&checksum.to_le_bytes());
+        out
+    }
+
+    /// Parse and verify a CNCR replay.
+    ///
+    /// The trailing FNV-1a checksum covers the header and every command record,
+    /// so a truncated or bit-flipped replay is rejected rather than replayed.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ReplayError> {
+        if bytes.len() < 10 + 8 {
+            return Err(ReplayError::TooShort);
+        }
+        if bytes[0..4] != REPLAY_MAGIC {
+            return Err(ReplayError::InvalidMagic);
+        }
+        if bytes[4] != REPLAY_VERSION {
+            return Err(ReplayError::UnsupportedVersion(bytes[4]));
+        }
+        let players = bytes[5].max(1);
+        let count = u32::from_le_bytes(bytes[6..10].try_into().expect("four header bytes"));
+        if count > MAX_REPLAY_COMMANDS {
+            return Err(ReplayError::TooManyCommands(count));
+        }
+
+        let payload_end = bytes.len() - 8;
+        let expected =
+            u64::from_le_bytes(bytes[payload_end..].try_into().expect("checksum is u64"));
+        if fnv_bytes(&bytes[..payload_end]) != expected {
+            return Err(ReplayError::ChecksumMismatch);
+        }
+
+        let mut reader = PayloadReader::new(&bytes[10..payload_end]);
+        let mut commands = Vec::with_capacity(count as usize);
+        for index in 0..count as usize {
+            let frame = reader.u32().map_err(|_| ReplayError::Truncated)?;
+            let player = reader.u8().map_err(|_| ReplayError::Truncated)?;
+            let tag = reader.u8().map_err(|_| ReplayError::Truncated)?;
+            let length = usize::from(reader.u16().map_err(|_| ReplayError::Truncated)?);
+            let payload = reader.take(length).map_err(|_| ReplayError::Truncated)?;
+            let command = Command::decode_payload(tag, payload)
+                .map_err(|source| ReplayError::InvalidCommand { index, source })?;
+            commands.push(NetCommand::new(frame, player, command));
+        }
+        if reader.remaining() != 0 {
+            return Err(ReplayError::TrailingBytes);
+        }
+        Ok(Self { players, commands })
+    }
+
+    /// Write the replay to disk.
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<(), ReplayError> {
+        std::fs::write(path, self.encode())?;
+        Ok(())
+    }
+
+    /// Read and verify a replay from disk.
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, ReplayError> {
+        let bytes = std::fs::read(path)?;
+        Self::decode(&bytes)
+    }
+}
+
+fn fnv_bytes(bytes: &[u8]) -> u64 {
+    let mut hash = FNV_OFFSET;
+    for byte in bytes {
+        mix(&mut hash, u64::from(*byte));
+    }
+    hash
+}
+
+impl LockstepSession {
+    /// Capture the current replay log for persistence or sharing.
+    pub fn to_replay(&self) -> Replay {
+        Replay::from_session(self)
+    }
+
+    /// Persist the replay log to a CNCR file.
+    pub fn save_replay(&self, path: impl AsRef<Path>) -> Result<(), ReplayError> {
+        self.to_replay().save(path)
+    }
+
+    /// Rebuild a session whose command queue holds every recorded command.
+    pub fn load_replay(path: impl AsRef<Path>) -> Result<Self, ReplayError> {
+        let replay = Replay::load(path)?;
+        Ok(Self::from_replay(replay.players, replay.commands))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Peer join/leave handshake
+// ---------------------------------------------------------------------------
+
+/// Magic for handshake datagrams ("CNCH").
+pub const HANDSHAKE_MAGIC: [u8; 4] = *b"CNCH";
+/// Handshake protocol version.
+pub const HANDSHAKE_VERSION: u8 = 1;
+/// Encoded handshake length: magic(4) + version(1) + kind(1) + player(1) + value(1).
+const HANDSHAKE_LEN: usize = 8;
+
+/// Why a host refused a join request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinReject {
+    RoomFull,
+    InvalidPlayer,
+    AlreadyJoined,
+    RoomClosed,
+    VersionMismatch,
+}
+
+impl JoinReject {
+    const fn code(self) -> u8 {
+        match self {
+            Self::RoomFull => 1,
+            Self::InvalidPlayer => 2,
+            Self::AlreadyJoined => 3,
+            Self::RoomClosed => 4,
+            Self::VersionMismatch => 5,
+        }
+    }
+
+    fn from_code(code: u8) -> Result<Self, HandshakeError> {
+        match code {
+            1 => Ok(Self::RoomFull),
+            2 => Ok(Self::InvalidPlayer),
+            3 => Ok(Self::AlreadyJoined),
+            4 => Ok(Self::RoomClosed),
+            5 => Ok(Self::VersionMismatch),
+            other => Err(HandshakeError::UnknownReason(other)),
+        }
+    }
+}
+
+/// Join/leave control frames exchanged before lockstep traffic starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandshakeMessage {
+    /// A client asks to occupy a player slot in a fixed-size room.
+    JoinRequest { player: u8, players: u8 },
+    /// The host admits a player; host is the host's own slot index.
+    JoinAccepted { player: u8, host: u8 },
+    /// The host refused a player.
+    JoinRejected { player: u8, reason: JoinReject },
+    /// A peer leaves the room.
+    Leave { player: u8 },
+}
+
+impl HandshakeMessage {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(HANDSHAKE_LEN);
+        out.extend_from_slice(&HANDSHAKE_MAGIC);
+        out.push(HANDSHAKE_VERSION);
+        match *self {
+            Self::JoinRequest { player, players } => {
+                out.push(1);
+                out.push(player);
+                out.push(players);
+            }
+            Self::JoinAccepted { player, host } => {
+                out.push(2);
+                out.push(player);
+                out.push(host);
+            }
+            Self::JoinRejected { player, reason } => {
+                out.push(3);
+                out.push(player);
+                out.push(reason.code());
+            }
+            Self::Leave { player } => {
+                out.push(4);
+                out.push(player);
+                out.push(0);
+            }
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, HandshakeError> {
+        if bytes.len() < HANDSHAKE_LEN {
+            return Err(HandshakeError::TooShort);
+        }
+        if bytes[0..4] != HANDSHAKE_MAGIC {
+            return Err(HandshakeError::InvalidMagic);
+        }
+        if bytes[4] != HANDSHAKE_VERSION {
+            return Err(HandshakeError::UnsupportedVersion(bytes[4]));
+        }
+        if bytes.len() != HANDSHAKE_LEN {
+            return Err(HandshakeError::TrailingBytes);
+        }
+        let kind = bytes[5];
+        let player = bytes[6];
+        let value = bytes[7];
+        match kind {
+            1 => Ok(Self::JoinRequest {
+                player,
+                players: value.max(1),
+            }),
+            2 => Ok(Self::JoinAccepted {
+                player,
+                host: value,
+            }),
+            3 => Ok(Self::JoinRejected {
+                player,
+                reason: JoinReject::from_code(value)?,
+            }),
+            4 => Ok(Self::Leave { player }),
+            other => Err(HandshakeError::UnknownKind(other)),
+        }
+    }
+}
+
+/// Errors from decoding or applying handshake messages.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum HandshakeError {
+    #[error("handshake packet is too short")]
+    TooShort,
+    #[error("invalid handshake magic (expected CNCH)")]
+    InvalidMagic,
+    #[error("unsupported handshake version {0}")]
+    UnsupportedVersion(u8),
+    #[error("unknown handshake message kind {0}")]
+    UnknownKind(u8),
+    #[error("unknown join rejection reason {0}")]
+    UnknownReason(u8),
+    #[error("trailing bytes after handshake message")]
+    TrailingBytes,
+    #[error("invalid room configuration: player {player} in a {players}-slot room")]
+    InvalidConfiguration { player: u8, players: u8 },
+    #[error("player {player} is not valid for a {players}-slot room")]
+    InvalidPlayer { player: u8, players: u8 },
+    #[error("player {player} already joined from another address")]
+    AlreadyJoined { player: u8 },
+    #[error("join acceptance came from an unexpected host")]
+    UnexpectedHost,
+    #[error("message is not valid in the current handshake state")]
+    InvalidState,
+}
+
+/// Local side of a matchmaking handshake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerState {
+    Idle,
+    Joining,
+    Joined,
+    Closed,
+}
+
+/// Observable facts emitted by the handshake state machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerEvent {
+    JoinAccepted { host_player: u8, host: SocketAddr },
+    JoinRejected { reason: JoinReject },
+    PeerJoined { player: u8, address: SocketAddr },
+    PeerLeft { player: u8, address: SocketAddr },
+}
+
+/// Result of feeding one message into the handshake state machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandshakeStep {
+    /// Message the caller should send back to the sender, if any.
+    pub reply: Option<HandshakeMessage>,
+    /// Local state change or peer event, if any.
+    pub event: Option<PeerEvent>,
+}
+
+impl HandshakeStep {
+    fn empty() -> Self {
+        Self {
+            reply: None,
+            event: None,
+        }
+    }
+
+    fn reply(message: HandshakeMessage) -> Self {
+        Self {
+            reply: Some(message),
+            event: None,
+        }
+    }
+
+    fn event(event: PeerEvent) -> Self {
+        Self {
+            reply: None,
+            event: Some(event),
+        }
+    }
+}
+
+/// Per-peer join/leave state shared by host and client.
+///
+/// The host opens the room with PeerHandshake::host_room; a client calls
+/// PeerHandshake::begin_join and sends the returned request. The host
+/// validates slot numbers and duplicate addresses, then answers with
+/// JoinAccepted or JoinRejected. Both sides track the same player/address
+/// map so PeerEvent::PeerJoined and PeerEvent::PeerLeft drive the lockstep
+/// player set.
+#[derive(Debug, Clone)]
+pub struct PeerHandshake {
+    pub local_player: u8,
+    pub players: u8,
+    pub state: PeerState,
+    host: Option<SocketAddr>,
+    host_player: Option<u8>,
+    peers: BTreeMap<u8, SocketAddr>,
+}
+
+impl PeerHandshake {
+    /// Create an idle peer (client before joining, or host before opening).
+    pub fn new(local_player: u8, players: u8) -> Result<Self, HandshakeError> {
+        if players == 0 || local_player >= players {
+            return Err(HandshakeError::InvalidConfiguration {
+                player: local_player,
+                players,
+            });
+        }
+        Ok(Self {
+            local_player,
+            players,
+            state: PeerState::Idle,
+            host: None,
+            host_player: None,
+            peers: BTreeMap::new(),
+        })
+    }
+
+    /// Create a host already accepting join requests.
+    pub fn host_room(local_player: u8, players: u8) -> Result<Self, HandshakeError> {
+        let mut handshake = Self::new(local_player, players)?;
+        handshake.state = PeerState::Joined;
+        Ok(handshake)
+    }
+
+    /// Open a previously idle/closed room for joins.
+    pub fn open_room(&mut self) -> Result<(), HandshakeError> {
+        if self.state == PeerState::Joining {
+            return Err(HandshakeError::InvalidState);
+        }
+        self.state = PeerState::Joined;
+        Ok(())
+    }
+
+    /// Start a client join and produce the request to send to the host.
+    pub fn begin_join(&mut self, host: SocketAddr) -> Result<HandshakeMessage, HandshakeError> {
+        if self.state == PeerState::Joined {
+            return Err(HandshakeError::InvalidState);
+        }
+        self.state = PeerState::Joining;
+        self.host = Some(host);
+        Ok(HandshakeMessage::JoinRequest {
+            player: self.local_player,
+            players: self.players,
+        })
+    }
+
+    /// Announce that this peer is leaving the room.
+    pub fn leave(&mut self) -> HandshakeMessage {
+        self.state = PeerState::Closed;
+        HandshakeMessage::Leave {
+            player: self.local_player,
+        }
+    }
+
+    /// Apply one received message. Returns an optional reply plus any event.
+    pub fn handle(
+        &mut self,
+        from: SocketAddr,
+        message: HandshakeMessage,
+    ) -> Result<HandshakeStep, HandshakeError> {
+        match message {
+            HandshakeMessage::JoinRequest {
+                player,
+                players: requested_players,
+            } => {
+                if self.state != PeerState::Joined {
+                    return Ok(HandshakeStep::reply(HandshakeMessage::JoinRejected {
+                        player,
+                        reason: JoinReject::RoomClosed,
+                    }));
+                }
+                if requested_players != self.players {
+                    return Ok(HandshakeStep::reply(HandshakeMessage::JoinRejected {
+                        player,
+                        reason: JoinReject::VersionMismatch,
+                    }));
+                }
+                if player >= self.players {
+                    return Ok(HandshakeStep::reply(HandshakeMessage::JoinRejected {
+                        player,
+                        reason: JoinReject::InvalidPlayer,
+                    }));
+                }
+                if let Some(existing) = self.peers.get(&player) {
+                    if existing == &from {
+                        // Retransmitted request: acknowledge idempotently.
+                        return Ok(HandshakeStep::reply(HandshakeMessage::JoinAccepted {
+                            player,
+                            host: self.local_player,
+                        }));
+                    }
+                    return Ok(HandshakeStep::reply(HandshakeMessage::JoinRejected {
+                        player,
+                        reason: JoinReject::AlreadyJoined,
+                    }));
+                }
+                self.peers.insert(player, from);
+                Ok(HandshakeStep {
+                    reply: Some(HandshakeMessage::JoinAccepted {
+                        player,
+                        host: self.local_player,
+                    }),
+                    event: Some(PeerEvent::PeerJoined {
+                        player,
+                        address: from,
+                    }),
+                })
+            }
+            HandshakeMessage::JoinAccepted { player, host } => {
+                if self.state != PeerState::Joining
+                    || player != self.local_player
+                    || self.host != Some(from)
+                    || host == player
+                    || host >= self.players
+                {
+                    return Err(HandshakeError::InvalidState);
+                }
+                self.state = PeerState::Joined;
+                self.host_player = Some(host);
+                self.peers.insert(host, from);
+                Ok(HandshakeStep::event(PeerEvent::JoinAccepted {
+                    host_player: host,
+                    host: from,
+                }))
+            }
+            HandshakeMessage::JoinRejected { player, reason } => {
+                if player != self.local_player || self.state != PeerState::Joining {
+                    return Err(HandshakeError::InvalidState);
+                }
+                self.state = PeerState::Closed;
+                self.host_player = None;
+                Ok(HandshakeStep::event(PeerEvent::JoinRejected { reason }))
+            }
+            HandshakeMessage::Leave { player } => {
+                if let Some(address) = self.peers.remove(&player) {
+                    if self.host_player == Some(player) {
+                        self.state = PeerState::Closed;
+                    }
+                    Ok(HandshakeStep::event(PeerEvent::PeerLeft {
+                        player,
+                        address,
+                    }))
+                } else {
+                    Ok(HandshakeStep::empty())
+                }
+            }
+        }
+    }
+
+    pub fn peers(&self) -> &BTreeMap<u8, SocketAddr> {
+        &self.peers
+    }
+
+    pub fn peer(&self, player: u8) -> Option<SocketAddr> {
+        self.peers.get(&player).copied()
+    }
+
+    /// Address of the room host while this peer is a client.
+    pub fn host_address(&self) -> Option<SocketAddr> {
+        self.host
+    }
+
+    pub fn host_player(&self) -> Option<u8> {
+        self.host_player
+    }
+
+    pub fn is_joined(&self) -> bool {
+        self.state == PeerState::Joined
     }
 }
 
@@ -965,20 +1567,80 @@ mod netcode_tests {
         Vec2::new(Fixed16_16::from_int(x), Fixed16_16::from_int(y))
     }
 
+    fn move_command(frame: u32, player: u8, unit: u32) -> NetCommand {
+        NetCommand::new(
+            frame,
+            player,
+            Command::Move {
+                units: vec![unit],
+                target: point(4, 7),
+            },
+        )
+    }
+
     fn sample_commands() -> Vec<NetCommand> {
         vec![
-            NetCommand::new(1, 0, Command::Move { units: vec![1, 2, 3], target: point(-4, 9) }),
-            NetCommand::new(1, 1, Command::Attack { units: vec![4], target: 9 }),
+            NetCommand::new(
+                1,
+                0,
+                Command::Move {
+                    units: vec![1, 2, 3],
+                    target: point(-4, 9),
+                },
+            ),
+            NetCommand::new(
+                1,
+                1,
+                Command::Attack {
+                    units: vec![4],
+                    target: 9,
+                },
+            ),
             NetCommand::new(2, 0, Command::Stop { units: vec![] }),
-            NetCommand::new(2, 1, Command::Guard { units: vec![7, 8], target: 3 }),
-            NetCommand::new(3, 0, Command::Build { building: ClassId::PowerPlant, location: point(12, 15) }),
+            NetCommand::new(
+                2,
+                1,
+                Command::Guard {
+                    units: vec![7, 8],
+                    target: 3,
+                },
+            ),
+            NetCommand::new(
+                3,
+                0,
+                Command::Build {
+                    building: ClassId::PowerPlant,
+                    location: point(12, 15),
+                },
+            ),
             NetCommand::new(3, 1, Command::Sell { building: 42 }),
             NetCommand::new(4, 0, Command::Repair { unit: 1, target: 2 }),
-            NetCommand::new(4, 1, Command::Power { building: 5, on: true }),
-            NetCommand::new(5, 0, Command::Produce { factory: 6, unit_type: ClassId::VehicleE2 }),
+            NetCommand::new(
+                4,
+                1,
+                Command::Power {
+                    building: 5,
+                    on: true,
+                },
+            ),
+            NetCommand::new(
+                5,
+                0,
+                Command::Produce {
+                    factory: 6,
+                    unit_type: ClassId::VehicleE2,
+                },
+            ),
             NetCommand::new(5, 1, Command::Deploy { unit: 11 }),
             NetCommand::new(6, 0, Command::Undeploy { unit: 12 }),
-            NetCommand::new(6, 1, Command::Sabotage { unit: 13, target: 14 }),
+            NetCommand::new(
+                6,
+                1,
+                Command::Sabotage {
+                    unit: 13,
+                    target: 14,
+                },
+            ),
         ]
     }
 
@@ -998,11 +1660,17 @@ mod netcode_tests {
 
         let mut bad_magic = bytes.clone();
         bad_magic[0] = b'X';
-        assert_eq!(NetPacket::decode(&bad_magic), Err(PacketError::InvalidMagic));
+        assert_eq!(
+            NetPacket::decode(&bad_magic),
+            Err(PacketError::InvalidMagic)
+        );
 
         let mut bad_version = bytes.clone();
         bad_version[4] = 9;
-        assert_eq!(NetPacket::decode(&bad_version), Err(PacketError::UnsupportedVersion(9)));
+        assert_eq!(
+            NetPacket::decode(&bad_version),
+            Err(PacketError::UnsupportedVersion(9))
+        );
 
         assert_eq!(NetPacket::decode(&bytes[..10]), Err(PacketError::TooShort));
 
@@ -1012,21 +1680,34 @@ mod netcode_tests {
 
         let mut trailing = bytes;
         trailing.push(0xAB);
-        assert_eq!(NetPacket::decode(&trailing), Err(PacketError::TrailingBytes));
+        assert_eq!(
+            NetPacket::decode(&trailing),
+            Err(PacketError::TrailingBytes)
+        );
     }
 
     #[test]
     fn codec_detects_corrupted_payload() {
-        let packet = NetPacket::new(3, 1, vec![NetCommand::new(1, 0, Command::Deploy { unit: 5 })]);
+        let packet = NetPacket::new(
+            3,
+            1,
+            vec![NetCommand::new(1, 0, Command::Deploy { unit: 5 })],
+        );
         let mut bytes = packet.encode().unwrap();
         let last = bytes.len() - 1;
         bytes[last] ^= 0xFF;
-        assert_eq!(NetPacket::decode(&bytes), Err(PacketError::ChecksumMismatch));
+        assert_eq!(
+            NetPacket::decode(&bytes),
+            Err(PacketError::ChecksumMismatch)
+        );
     }
 
     #[test]
     fn codec_rejects_oversized_command_lists() {
-        let commands = vec![NetCommand::new(0, 0, Command::Stop { units: vec![] }); MAX_COMMANDS_PER_PACKET + 1];
+        let commands = vec![
+            NetCommand::new(0, 0, Command::Stop { units: vec![] });
+            MAX_COMMANDS_PER_PACKET + 1
+        ];
         let packet = NetPacket::new(0, 0, commands);
         assert!(packet.encode().is_err());
     }
@@ -1053,11 +1734,10 @@ mod netcode_tests {
         assert_eq!(sender.broadcast(&packet).await.unwrap(), 2);
 
         for receiver in [&receiver_a, &receiver_b] {
-            let (received, from) =
-                tokio::time::timeout(Duration::from_secs(2), receiver.recv())
-                    .await
-                    .expect("broadcast timed out")
-                    .unwrap();
+            let (received, from) = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+                .await
+                .expect("broadcast timed out")
+                .unwrap();
             assert_eq!(received, packet);
             assert_eq!(from, sender.local_addr().unwrap());
         }
@@ -1093,6 +1773,349 @@ mod netcode_tests {
         assert!(sender.add_peer(address));
         assert!(sender.remove_peer(&address));
         assert!(!sender.remove_peer(&address));
-        assert_eq!(sender.broadcast(&NetPacket::new(1, 0, vec![])).await.unwrap(), 0);
+        assert_eq!(
+            sender
+                .broadcast(&NetPacket::new(1, 0, vec![]))
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    fn temp_replay_path(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock before epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "cnc-replay-{tag}-{}-{nanos}.bin",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn replay_round_trips_through_disk() {
+        let mut session = LockstepSession::new(2);
+        session.schedule(move_command(0, 0, 1)).unwrap();
+        session.schedule(move_command(0, 1, 2)).unwrap();
+        session.advance();
+        session
+            .schedule(NetCommand::new(2, 0, Command::Stop { units: vec![3] }))
+            .unwrap();
+        session.advance_to(2);
+
+        let path = temp_replay_path("roundtrip");
+        session.save_replay(&path).unwrap();
+
+        let replay = Replay::load(&path).unwrap();
+        assert_eq!(replay.players, 2);
+        assert_eq!(replay.commands, session.replay);
+
+        let mut restored = LockstepSession::load_replay(&path).unwrap();
+        restored.queue.current_frame = 0;
+        let executed = restored.advance_to(2);
+        assert_eq!(executed, session.replay);
+        assert_eq!(restored.checksums, session.checksums);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn replay_rejects_corruption_and_bad_headers() {
+        let replay = Replay::new(2, vec![move_command(0, 0, 1), move_command(1, 1, 2)]);
+        let encoded = replay.encode();
+        assert_eq!(Replay::decode(&encoded).unwrap(), replay);
+
+        let mut corrupted = encoded.clone();
+        corrupted[12] ^= 0xff;
+        assert!(matches!(
+            Replay::decode(&corrupted),
+            Err(ReplayError::ChecksumMismatch)
+        ));
+
+        let mut bad_magic = encoded.clone();
+        bad_magic[0] = b'X';
+        assert!(matches!(
+            Replay::decode(&bad_magic),
+            Err(ReplayError::InvalidMagic)
+        ));
+
+        let mut bad_version = encoded.clone();
+        bad_version[4] = 99;
+        assert!(matches!(
+            Replay::decode(&bad_version),
+            Err(ReplayError::UnsupportedVersion(99))
+        ));
+
+        assert!(matches!(
+            Replay::decode(&encoded[..8]),
+            Err(ReplayError::TooShort)
+        ));
+    }
+
+    #[test]
+    fn replay_load_reports_missing_files() {
+        let path = temp_replay_path("missing");
+        assert!(matches!(Replay::load(&path), Err(ReplayError::Io(_))));
+    }
+
+    #[test]
+    fn handshake_messages_round_trip() {
+        let messages = [
+            HandshakeMessage::JoinRequest {
+                player: 1,
+                players: 4,
+            },
+            HandshakeMessage::JoinAccepted { player: 1, host: 0 },
+            HandshakeMessage::JoinRejected {
+                player: 2,
+                reason: JoinReject::RoomFull,
+            },
+            HandshakeMessage::Leave { player: 3 },
+        ];
+        for message in messages {
+            let encoded = message.encode();
+            assert_eq!(encoded.len(), HANDSHAKE_LEN);
+            assert_eq!(HandshakeMessage::decode(&encoded).unwrap(), message);
+        }
+
+        assert!(matches!(
+            HandshakeMessage::decode(b"CNCH"),
+            Err(HandshakeError::TooShort)
+        ));
+        let mut bad = HandshakeMessage::Leave { player: 0 }.encode();
+        bad[5] = 9;
+        assert!(matches!(
+            HandshakeMessage::decode(&bad),
+            Err(HandshakeError::UnknownKind(9))
+        ));
+    }
+
+    #[test]
+    fn datagram_dispatch_routes_command_and_handshake_frames() {
+        let command = Datagram::Command(NetPacket::new(1, 0, vec![move_command(0, 0, 1)]));
+        let encoded = match &command {
+            Datagram::Command(packet) => packet.encode().unwrap(),
+            Datagram::Handshake(_) => unreachable!(),
+        };
+        assert_eq!(Datagram::decode(&encoded).unwrap(), command);
+
+        let handshake = Datagram::Handshake(HandshakeMessage::Leave { player: 1 });
+        let encoded = match &handshake {
+            Datagram::Handshake(message) => message.encode(),
+            Datagram::Command(_) => unreachable!(),
+        };
+        assert_eq!(Datagram::decode(&encoded).unwrap(), handshake);
+
+        let error = Datagram::decode(b"NOPE").expect_err("unknown magic is rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn handshake_host_validates_slots_and_duplicates() {
+        let mut host = PeerHandshake::host_room(0, 3).unwrap();
+        let first = "127.0.0.1:9101".parse().unwrap();
+        let second = "127.0.0.1:9102".parse().unwrap();
+
+        let request = HandshakeMessage::JoinRequest {
+            player: 1,
+            players: 3,
+        };
+        let step = host.handle(first, request).unwrap();
+        assert_eq!(
+            step.event,
+            Some(PeerEvent::PeerJoined {
+                player: 1,
+                address: first
+            })
+        );
+        assert_eq!(
+            step.reply,
+            Some(HandshakeMessage::JoinAccepted { player: 1, host: 0 })
+        );
+
+        // Retransmission from the same address is acknowledged, not duplicated.
+        let step = host.handle(first, request).unwrap();
+        assert!(step.event.is_none());
+        assert_eq!(
+            step.reply,
+            Some(HandshakeMessage::JoinAccepted { player: 1, host: 0 })
+        );
+
+        // A second address cannot steal the slot.
+        let step = host.handle(second, request).unwrap();
+        assert_eq!(
+            step.reply,
+            Some(HandshakeMessage::JoinRejected {
+                player: 1,
+                reason: JoinReject::AlreadyJoined
+            })
+        );
+
+        // Out-of-range and mismatched-room requests are refused.
+        let step = host
+            .handle(
+                second,
+                HandshakeMessage::JoinRequest {
+                    player: 3,
+                    players: 3,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            step.reply,
+            Some(HandshakeMessage::JoinRejected {
+                player: 3,
+                reason: JoinReject::InvalidPlayer
+            })
+        );
+        let step = host
+            .handle(
+                second,
+                HandshakeMessage::JoinRequest {
+                    player: 2,
+                    players: 4,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            step.reply,
+            Some(HandshakeMessage::JoinRejected {
+                player: 2,
+                reason: JoinReject::VersionMismatch
+            })
+        );
+
+        let leave = HandshakeMessage::Leave { player: 1 };
+        let step = host.handle(first, leave).unwrap();
+        assert_eq!(
+            step.event,
+            Some(PeerEvent::PeerLeft {
+                player: 1,
+                address: first
+            })
+        );
+        assert!(host.peer(1).is_none());
+    }
+
+    #[test]
+    fn handshake_rejects_closed_rooms() {
+        let mut idle = PeerHandshake::new(1, 2).unwrap();
+        let address = "127.0.0.1:9200".parse().unwrap();
+        let step = idle
+            .handle(
+                address,
+                HandshakeMessage::JoinRequest {
+                    player: 0,
+                    players: 2,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            step.reply,
+            Some(HandshakeMessage::JoinRejected {
+                player: 0,
+                reason: JoinReject::RoomClosed
+            })
+        );
+
+        let request = idle.begin_join(address).unwrap();
+        assert_eq!(
+            request,
+            HandshakeMessage::JoinRequest {
+                player: 1,
+                players: 2
+            }
+        );
+        // Retrying while a join is already in flight is allowed; the host is
+        // the one that resolves duplicates.
+        assert_eq!(idle.begin_join(address).unwrap(), request);
+
+        // A peer that is already in a room cannot begin a second join.
+        let mut joined = PeerHandshake::host_room(0, 2).unwrap();
+        assert!(matches!(
+            joined.begin_join(address),
+            Err(HandshakeError::InvalidState)
+        ));
+    }
+
+    #[tokio::test]
+    async fn handshake_join_and_leave_over_loopback() {
+        let host_socket = UdpTransport::bind("127.0.0.1:0").await.unwrap();
+        let client_socket = UdpTransport::bind("127.0.0.1:0").await.unwrap();
+        let host_addr = host_socket.local_addr().unwrap();
+        let client_addr = client_socket.local_addr().unwrap();
+
+        let mut host = PeerHandshake::host_room(0, 4).unwrap();
+        let mut client = PeerHandshake::new(1, 4).unwrap();
+
+        let request = client.begin_join(host_addr).unwrap();
+        client_socket
+            .send_handshake(host_addr, &request)
+            .await
+            .unwrap();
+
+        let (datagram, from) =
+            tokio::time::timeout(Duration::from_secs(2), host_socket.recv_datagram())
+                .await
+                .expect("join request timed out")
+                .unwrap();
+        assert_eq!(from, client_addr);
+        let Datagram::Handshake(message) = datagram else {
+            panic!("expected a handshake datagram");
+        };
+        let step = host.handle(from, message).unwrap();
+        assert!(step.event.is_some());
+        let reply = step.reply.expect("host answers the join");
+        host_socket.send_handshake(from, &reply).await.unwrap();
+
+        let (datagram, from) =
+            tokio::time::timeout(Duration::from_secs(2), client_socket.recv_datagram())
+                .await
+                .expect("join answer timed out")
+                .unwrap();
+        assert_eq!(from, host_addr);
+        let Datagram::Handshake(message) = datagram else {
+            panic!("expected a handshake datagram");
+        };
+        let step = client.handle(from, message).unwrap();
+        assert_eq!(
+            step.event,
+            Some(PeerEvent::JoinAccepted {
+                host_player: 0,
+                host: host_addr
+            })
+        );
+
+        assert!(host.is_joined());
+        assert!(client.is_joined());
+        assert_eq!(host.peer(1), Some(client_addr));
+        assert_eq!(client.peer(0), Some(host_addr));
+        assert_eq!(client.host_player(), Some(0));
+
+        let leave = client.leave();
+        assert_eq!(client.state, PeerState::Closed);
+        client_socket
+            .send_handshake(host_addr, &leave)
+            .await
+            .unwrap();
+
+        let (datagram, from) =
+            tokio::time::timeout(Duration::from_secs(2), host_socket.recv_datagram())
+                .await
+                .expect("leave timed out")
+                .unwrap();
+        let Datagram::Handshake(message) = datagram else {
+            panic!("expected a handshake datagram");
+        };
+        let step = host.handle(from, message).unwrap();
+        assert_eq!(
+            step.event,
+            Some(PeerEvent::PeerLeft {
+                player: 1,
+                address: client_addr
+            })
+        );
+        assert!(host.peer(1).is_none());
     }
 }
