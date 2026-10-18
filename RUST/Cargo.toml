@@ -1,0 +1,64 @@
+[workspace]
+resolver = "2"
+members = [
+    "cnc-core",
+    "cnc-tiberian-dawn",
+    "cnc-red-alert",
+    "cnc-renderer",
+    "cnc-audio",
+    "cnc-asset",
+    "cnc-map-editor",
+    "cnc-launcher",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["CnC Rust Clone Team"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/example/cnc-rust-clone"
+
+[workspace.dependencies]
+anyhow = "1.0"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bytemuck = { version = "1.14", features = ["derive"] }
+bitflags = "2.4"
+wgpu = "22.0"
+rodio = "0.19"
+tokio = { version = "1.38", features = ["full"] }
+parking_lot = "0.12"
+once_cell = "1.19"
+clap = { version = "4.5", features = ["derive"] }
+config = "0.14"
+dotenv = "0.15"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+eyre = "0.6"
+num-traits = "0.2"
+num-derive = "0.4"
+num-integer = "0.1"
+num-rational = "0.4"
+num-complex = "0.4"
+ahash = "0.8"
+fasteval = "0.1"
+inalt = "0.10"
+winit = "0.30"
+pixels = "0.17"
+egui = "0.29"
+egui-wgpu = "0.29"
+egui-winit = "0.29"
+image = "0.25"
+audio = "0.2"
+hound = "3.5"
+symphonia = { version = "0.5", features = ["vorbis", "ogg"] }
+bytes = "1.6"
+bincode = "1.3"
+flate2 = "1.0"
+lzw = "0.10"
+byteorder = "1.5"
+nom = "7.1"
+chrono = "0.4"
+uuid = { version = "1.7", features = ["v4", "serde"] }
+serde-big-array = "0.4"

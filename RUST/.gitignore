@@ -1,0 +1,5 @@
+/target
+/assets
+
+# Python bytecode from scripts/
+__pycache__/

@@ -1,0 +1,27 @@
+[package]
+name = "cnc-renderer"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+
+[dependencies]
+cnc-core = { path = "../cnc-core" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+bytemuck = { workspace = true }
+bitflags = { workspace = true }
+wgpu = { workspace = true }
+winit = { workspace = true }
+pixels = { workspace = true }
+image = { workspace = true }
+ahash = { workspace = true }
+parking_lot = { workspace = true }
+once_cell = { workspace = true }
+font8x8 = "0.3"
+
+[dev-dependencies]
+criterion = "0.5"
+naga = { version = "22.1", features = ["wgsl-in"] }
+pollster = "0.4"

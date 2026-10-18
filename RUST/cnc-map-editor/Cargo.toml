@@ -1,0 +1,25 @@
+[package]
+name = "cnc-map-editor"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+
+[dependencies]
+cnc-core = { path = "../cnc-core" }
+cnc-renderer = { path = "../cnc-renderer" }
+cnc-asset = { path = "../cnc-asset" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+wgpu = { workspace = true }
+winit = { workspace = true }
+egui = "0.29"
+egui-wgpu = "0.29"
+egui-winit = "0.29"
+parking_lot = { workspace = true }
+once_cell = { workspace = true }
+
+[dev-dependencies]
+criterion = "0.5"

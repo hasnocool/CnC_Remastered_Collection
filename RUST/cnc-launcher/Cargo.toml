@@ -1,0 +1,35 @@
+[package]
+name = "cnc-launcher"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+
+[[bin]]
+name = "cnc-launcher"
+path = "src/main.rs"
+
+[dependencies]
+cnc-core = { path = "../cnc-core" }
+cnc-tiberian-dawn = { path = "../cnc-tiberian-dawn" }
+cnc-red-alert = { path = "../cnc-red-alert" }
+cnc-renderer = { path = "../cnc-renderer" }
+cnc-audio = { path = "../cnc-audio" }
+cnc-asset = { path = "../cnc-asset" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+clap = { workspace = true }
+config = { workspace = true }
+dotenv = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+wgpu = { workspace = true }
+winit = { workspace = true }
+pollster = "0.4"
+tokio = { workspace = true }
+parking_lot = { workspace = true }
+once_cell = { workspace = true }
+
+[dev-dependencies]
+criterion = "0.5"
