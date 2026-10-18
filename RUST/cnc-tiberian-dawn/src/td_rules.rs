@@ -59,6 +59,45 @@ pub enum WarheadType {
 }
 
 impl WarheadType {
+    /// Rules.ini warhead section name.
+    pub const fn ini_name(self) -> &'static str {
+        match self {
+            WarheadType::Sa => "SA",
+            WarheadType::He => "HE",
+            WarheadType::Ap => "AP",
+            WarheadType::Fire => "Fire",
+            WarheadType::Laser => "Laser",
+            WarheadType::Pb => "PB",
+            WarheadType::Fist => "Fist",
+            WarheadType::Foot => "Foot",
+            WarheadType::HollowPoint => "HollowPoint",
+            WarheadType::Spore => "Spore",
+            WarheadType::HeadButt => "HeadButt",
+            WarheadType::FeedMe => "FeedMe",
+        }
+    }
+
+    /// Case-insensitive reverse of ini_name, for Rules.ini Warhead= overrides.
+    pub fn from_ini_name(name: &str) -> Option<Self> {
+        let wanted = name.trim();
+        [
+            WarheadType::Sa,
+            WarheadType::He,
+            WarheadType::Ap,
+            WarheadType::Fire,
+            WarheadType::Laser,
+            WarheadType::Pb,
+            WarheadType::Fist,
+            WarheadType::Foot,
+            WarheadType::HollowPoint,
+            WarheadType::Spore,
+            WarheadType::HeadButt,
+            WarheadType::FeedMe,
+        ]
+        .into_iter()
+        .find(|warhead| warhead.ini_name().eq_ignore_ascii_case(wanted))
+    }
+
     /// Spread factor from CONST.CPP Warheads[].
     pub const fn spread_factor(self) -> i32 {
         match self {
@@ -299,6 +338,39 @@ impl WeaponType {
             WeaponType::HonestJohn => WeaponStats { bullet: BulletType::HonestJohn, damage: 100, rof_ticks: 200, range_leptons: 0x0A00 },
             WeaponType::Steg => WeaponStats { bullet: BulletType::HeadButt, damage: 100, rof_ticks: 30, range_leptons: 0x0180 },
             WeaponType::Trex => WeaponStats { bullet: BulletType::TrexBite, damage: 155, rof_ticks: 30, range_leptons: 0x0180 },
+        }
+    }
+}
+
+impl WeaponType {
+    /// Rules.ini weapon section name used by the original table.
+    pub const fn ini_name(self) -> &'static str {
+        match self {
+            WeaponType::Rifle => "Gun",
+            WeaponType::ChainGun => "ChainGun",
+            WeaponType::Pistol => "Pistol",
+            WeaponType::M16 => "M16",
+            WeaponType::Dragon => "Dragon",
+            WeaponType::Flamethrower => "FlameThrower",
+            WeaponType::FlameTongue => "FlameTongue",
+            WeaponType::ChemSpray => "ChemSpray",
+            WeaponType::Grenade => "Grenade",
+            WeaponType::Cannon75 => "75mm",
+            WeaponType::Cannon105 => "105mm",
+            WeaponType::Cannon120 => "120mm",
+            WeaponType::TurretGun => "TurretGun",
+            WeaponType::MammothTusk => "MammothTusk",
+            WeaponType::Mlrs => "MLRS",
+            WeaponType::Cannon155 => "155mm",
+            WeaponType::M60Mg => "M60MG",
+            WeaponType::Tomahawk => "Tomahawk",
+            WeaponType::TowTwo => "TowTwo",
+            WeaponType::Napalm => "Napalm",
+            WeaponType::ObeliskLaser => "ObeliskLaser",
+            WeaponType::Nike => "Nike",
+            WeaponType::HonestJohn => "HonestJohn",
+            WeaponType::Steg => "Steg",
+            WeaponType::Trex => "Trex",
         }
     }
 }
@@ -776,6 +848,25 @@ impl StructureType {
             ClassId::MissileSilo => Some(StructureType::TempleOfNod),
             _ => None,
         }
+    }
+}
+
+/// Resolve a Rules.ini prerequisite token to a structure the game models.
+///
+/// Includes TD's GDI/Nod spellings (PYLE/HAND, HPAD/AFLD) and a few RA aliases
+/// so shared rules files keep working.
+pub fn structure_from_ini_name(name: &str) -> Option<StructureType> {
+    match name.trim().to_ascii_uppercase().as_str() {
+        "FACT" => Some(StructureType::ConstructionYard),
+        "NUKE" | "POWR" => Some(StructureType::PowerPlant),
+        "PROC" => Some(StructureType::Refinery),
+        "SILO" => Some(StructureType::Silo),
+        "PYLE" | "HAND" | "BARRACKS" => Some(StructureType::Barracks),
+        "WEAP" => Some(StructureType::WarFactory),
+        "HPAD" | "AFLD" | "HELIPAD" => Some(StructureType::Helipad),
+        "EYE" | "RADAR" => Some(StructureType::IonCannon),
+        "TMPL" | "TEMPLE" => Some(StructureType::TempleOfNod),
+        _ => None,
     }
 }
 

@@ -15,7 +15,7 @@ use crate::house::ProductionItem;
 use crate::mission::Mission;
 use crate::pathfind::find_path;
 use crate::td_rules::{
-    leptons_to_px, modify_damage, production_seconds, px_to_leptons, tiberium_stage,
+    leptons_to_px, production_seconds, px_to_leptons, structure_from_ini_name, tiberium_stage,
     unit_class_id, unit_type_for_class, ProductionKind, StructureType, UnitType, WarheadType,
     WeaponType, EXPLOSION_RANGE_LEPTONS, HARVESTER_STEP_COUNT, HARVESTER_STEP_CREDITS,
 };
@@ -176,15 +176,17 @@ impl Game {
     }
 
     /// Replace the active rules database (for hot-reload or mission setup).
+    /// Existing units immediately pick up the new weapon/warhead values.
     pub fn set_rules(&mut self, rules: RulesDatabase) {
         self.rules = rules;
+        self.refresh_weapon_rules();
     }
 
     /// Load Rules.ini from disk and apply it to this game.
     pub fn load_rules(&mut self, path: &std::path::Path) -> anyhow::Result<usize> {
         let rules = RulesDatabase::load(path)?;
         let count = rules.type_count();
-        self.rules = rules;
+        self.set_rules(rules);
         Ok(count)
     }
 
@@ -214,6 +216,81 @@ impl Game {
         self.rules
             .type_strength(structure.ini_name())
             .unwrap_or_else(|| structure.stats().strength)
+    }
+
+    /// Build a weapon with the current Rules.ini Damage/ROF/Range/Warhead data.
+    pub fn make_weapon(&self, weapon_type: WeaponType) -> Weapon {
+        Weapon::from_type_with_rules(weapon_type, &self.rules)
+    }
+
+    /// Warhead profile for explosions, honouring Rules.ini Verses/Spread.
+    pub fn warhead_profile(&self, warhead: WarheadType) -> Warhead {
+        match self.rules.warhead(warhead.ini_name()) {
+            Some(rule) => Warhead::from_rule(warhead, rule),
+            None => Warhead::from_type(warhead),
+        }
+    }
+
+    /// Rebuild every unit's weapons from the current rules database.
+    pub fn refresh_weapon_rules(&mut self) {
+        let rules = self.rules.clone();
+        for unit in &mut self.units {
+            unit.apply_weapon_rules(&rules);
+        }
+    }
+
+    /// Does the house own a living structure of this type?
+    pub fn owns_structure(&self, owner: u8, structure: StructureType) -> bool {
+        self.buildings.iter().any(|building| {
+            building.owner == owner
+                && building.is_alive()
+                && building.structure_type() == Some(structure)
+        })
+    }
+
+    fn prerequisite_satisfied(&self, owner: u8, token: &str) -> bool {
+        let token = token.trim();
+        if token.is_empty() {
+            return true;
+        }
+        match token.to_ascii_uppercase().as_str() {
+            "NONE" | "ANY" => true,
+            "GDI" => self
+                .houses
+                .get(owner as usize)
+                .map_or(false, |house| house.id == ClassId::HouseGDI),
+            "NOD" => self
+                .houses
+                .get(owner as usize)
+                .map_or(false, |house| house.id == ClassId::HouseNod),
+            upper => structure_from_ini_name(upper)
+                .map_or(false, |structure| self.owns_structure(owner, structure)),
+        }
+    }
+
+    /// Rules.ini Prerequisite= enforcement (RULES.CPP / TYPE.CPP tech tree).
+    ///
+    /// A type with no rules entry, or an empty prerequisite list, is always
+    /// allowed. Unknown tokens do not pass, matching the original engine.
+    pub fn meets_prerequisites(&self, owner: u8, type_name: &str) -> bool {
+        let Some(rule) = self.rules.type_rule(type_name) else {
+            return true;
+        };
+        rule.prerequisite
+            .iter()
+            .all(|token| self.prerequisite_satisfied(owner, token))
+    }
+
+    /// Human-readable list of unmet prerequisite tokens for UI/diagnostics.
+    pub fn missing_prerequisites(&self, owner: u8, type_name: &str) -> Vec<String> {
+        let Some(rule) = self.rules.type_rule(type_name) else {
+            return Vec::new();
+        };
+        rule.prerequisite
+            .iter()
+            .filter(|token| !self.prerequisite_satisfied(owner, token))
+            .cloned()
+            .collect()
     }
 
     fn cell_center(cx: i32, cy: i32) -> Vec2 {
@@ -313,7 +390,7 @@ impl Game {
         {
             let mut unit = Unit::new(UnitType::InfantryE1, Self::cell(cx, cy), 1);
             if index == 0 {
-                unit.equip_weapon(Weapon::from_type(WeaponType::Grenade));
+                unit.equip_weapon(Weapon::from_type_with_rules(WeaponType::Grenade, &self.rules));
             }
             let id = self.units.len() as u32;
             nod.add_unit(id);
@@ -324,6 +401,7 @@ impl Game {
         self.houses.push(gdi);
         self.houses.push(nod);
         self.refresh_house_power();
+        self.refresh_weapon_rules();
     }
 
     /// Recompute each house power from its structures (BDATA.CPP POWER/DRAIN).
@@ -374,7 +452,8 @@ impl Game {
     }
 
     pub fn can_queue_unit(&self, owner: u8, unit_type: UnitType) -> bool {
-        self.has_producer(owner, Self::unit_factory_kind(unit_type))
+        self.meets_prerequisites(owner, unit_type.ini_name())
+            && self.has_producer(owner, Self::unit_factory_kind(unit_type))
             && self
                 .houses
                 .get(owner as usize)
@@ -382,14 +461,16 @@ impl Game {
     }
 
     pub fn can_queue_building(&self, owner: u8, structure: StructureType) -> bool {
-        self.buildings.iter().any(|building| {
-            building.owner == owner
-                && building.is_alive()
-                && building.structure_type() == Some(StructureType::ConstructionYard)
-        }) && self
-            .houses
-            .get(owner as usize)
-            .map_or(false, |house| house.can_afford(self.building_cost(structure)))
+        self.meets_prerequisites(owner, structure.ini_name())
+            && self.buildings.iter().any(|building| {
+                building.owner == owner
+                    && building.is_alive()
+                    && building.structure_type() == Some(StructureType::ConstructionYard)
+            })
+            && self
+                .houses
+                .get(owner as usize)
+                .map_or(false, |house| house.can_afford(self.building_cost(structure)))
     }
 
     /// Queue a unit at the house that owns the matching factory.
@@ -711,6 +792,7 @@ impl Game {
         damage: i32,
         warhead: WarheadType,
     ) {
+        let warhead = self.warhead_profile(warhead);
         for unit in &mut self.units {
             if !unit.is_alive() {
                 continue;
@@ -719,7 +801,9 @@ impl Game {
             if distance > radius {
                 continue;
             }
-            let modified = modify_damage(damage, warhead, unit.armor, px_to_leptons(distance));
+            let modified = warhead
+                .damage(Fixed16_16::from_int(damage), unit.armor, px_to_leptons(distance))
+                .int();
             unit.take_damage(Fixed16_16::from_int(modified));
         }
 
@@ -733,7 +817,9 @@ impl Game {
             if distance > radius {
                 continue;
             }
-            let modified = modify_damage(damage, warhead, building.armor, px_to_leptons(distance));
+            let modified = warhead
+                .damage(Fixed16_16::from_int(damage), building.armor, px_to_leptons(distance))
+                .int();
             building.health =
                 (building.health - Fixed16_16::from_int(modified)).max(Fixed16_16::ZERO);
         }
@@ -758,6 +844,7 @@ impl Game {
             };
             let position = self.spawn_position(owner);
             let mut unit = Unit::new(unit_type, position, owner);
+            unit.apply_weapon_rules(&self.rules);
             let strength = self.unit_strength(unit_type);
             let max_health = Fixed16_16::from_int(strength);
             unit.health = max_health;
@@ -3020,5 +3107,254 @@ mod rules_integration_tests {
         assert_eq!(game.unit_cost(UnitType::InfantryE1), 25);
         game.set_rules(RulesDatabase::default());
         assert_eq!(game.unit_cost(UnitType::InfantryE1), 100);
+    }
+}
+
+#[cfg(test)]
+mod weapon_rules_tests {
+    use super::*;
+    use crate::td_rules::{ticks_to_seconds, ArmorType};
+    use cnc_core::rules::RulesDatabase;
+
+    fn rules(source: &str) -> RulesDatabase {
+        RulesDatabase::from_str(source).expect("rules should parse")
+    }
+
+    #[test]
+    fn weapon_ini_names_match_rules_tables() {
+        assert_eq!(WeaponType::M16.ini_name(), "M16");
+        assert_eq!(WeaponType::Cannon105.ini_name(), "105mm");
+        assert_eq!(WeaponType::MammothTusk.ini_name(), "MammothTusk");
+        assert_eq!(WeaponType::ObeliskLaser.ini_name(), "ObeliskLaser");
+        assert_eq!(WarheadType::Sa.ini_name(), "SA");
+        assert_eq!(WarheadType::HollowPoint.ini_name(), "HollowPoint");
+        assert_eq!(WarheadType::from_ini_name("ap"), Some(WarheadType::Ap));
+        assert_eq!(WarheadType::from_ini_name("NOPE"), None);
+    }
+
+    #[test]
+    fn weapon_damage_rof_and_range_come_from_rules() {
+        let rules = rules("[M16]\nDamage=25\nROF=10\nRange=1280\n");
+        let game = Game::with_rules("test", 32, 32, rules);
+        let weapon = game.make_weapon(WeaponType::M16);
+
+        assert_eq!(weapon.damage, Fixed16_16::from_int(25));
+        assert_eq!(weapon.range, Fixed16_16::from_f32(leptons_to_px(1280)));
+        assert_eq!(weapon.rate_of_fire, Fixed16_16::from_f32(ticks_to_seconds(13)));
+        // The static M16 row stays untouched for games without a rules file.
+        let plain = Weapon::from_type(WeaponType::M16);
+        assert_eq!(plain.damage, Fixed16_16::from_int(15));
+        assert_ne!(plain.range, weapon.range);
+    }
+
+    #[test]
+    fn weapon_warhead_override_selects_rules_warhead() {
+        let rules = rules(
+            "[Grenade]\nWarhead=AP\n[AP]\nSpread=0\nVerses=10,20,30,40,50\n",
+        );
+        let game = Game::with_rules("test", 32, 32, rules);
+        let weapon = game.make_weapon(WeaponType::Grenade);
+
+        assert_eq!(weapon.warhead.warhead_type, WarheadType::Ap);
+        let base = Fixed16_16::from_int(100);
+        assert_eq!(
+            weapon.warhead.damage(base, ArmorType::Steel, 0),
+            Fixed16_16::from_int(40)
+        );
+        assert_eq!(
+            weapon.warhead.damage(base, ArmorType::None, 0),
+            Fixed16_16::from_int(10)
+        );
+    }
+
+    #[test]
+    fn warhead_verses_override_without_weapon_section() {
+        let rules = rules("[AP]\nSpread=0\nVerses=5,10,20,40,80\n");
+        let game = Game::with_rules("test", 32, 32, rules);
+        // M16's static warhead is SA, but an explicit warhead only applies to AP.
+        let m16 = game.make_weapon(WeaponType::M16);
+        assert!(m16.warhead.verses.is_none());
+
+        let profile = game.warhead_profile(WarheadType::Ap);
+        assert_eq!(
+            profile.damage(Fixed16_16::from_int(100), ArmorType::Concrete, 0),
+            Fixed16_16::from_int(80)
+        );
+    }
+
+    #[test]
+    fn rules_spread_attenuates_damage_with_distance() {
+        let rules = rules("[AP]\nSpread=2\nVerses=100,100,100,100,100\n");
+        let game = Game::with_rules("test", 32, 32, rules);
+        let profile = game.warhead_profile(WarheadType::Ap);
+        let near = profile.damage(Fixed16_16::from_int(100), ArmorType::Steel, 0);
+        let far = profile.damage(Fixed16_16::from_int(100), ArmorType::Steel, 8);
+        assert_eq!(near, Fixed16_16::from_int(100));
+        assert_eq!(far, Fixed16_16::from_int(25));
+    }
+
+    #[test]
+    fn set_rules_refreshes_existing_unit_weapons() {
+        let mut game = Game::new("test", 32, 32);
+        game.setup_demo();
+        game.set_rules(rules("[M16]\nDamage=99\nRange=2048\n"));
+
+        let infantry = game
+            .units
+            .iter()
+            .find(|unit| unit.unit_type == UnitType::InfantryE1)
+            .expect("demo GDI infantry");
+        let weapon = infantry.weapon.as_ref().expect("rifle");
+        assert_eq!(weapon.damage, Fixed16_16::from_int(99));
+        assert_eq!(weapon.range, Fixed16_16::from_f32(leptons_to_px(2048)));
+    }
+
+    #[test]
+    fn production_spawns_units_with_rules_weapons() {
+        let rules = rules("[E1]\nCost=100\n[M16]\nDamage=42\n");
+        let mut game = Game::with_rules("test", 32, 32, rules);
+        game.setup_demo();
+        game.units.clear();
+        assert!(game.queue_unit(0, UnitType::InfantryE1));
+        for _ in 0..600 {
+            game.update(Fixed16_16::from_f32(0.05));
+            if !game.units.is_empty() {
+                break;
+            }
+        }
+        let unit = game.units.first().expect("produced infantry");
+        assert_eq!(unit.weapon.as_ref().unwrap().damage, Fixed16_16::from_int(42));
+    }
+}
+
+#[cfg(test)]
+mod prerequisite_tests {
+    use super::*;
+    use cnc_core::rules::RulesDatabase;
+
+    fn rules(source: &str) -> RulesDatabase {
+        RulesDatabase::from_str(source).expect("rules should parse")
+    }
+
+    #[test]
+    fn types_without_rules_have_no_prerequisites() {
+        let game = Game::new("test", 32, 32);
+        assert!(game.meets_prerequisites(0, "E1"));
+        assert!(game.meets_prerequisites(0, "MISSING"));
+        assert!(game.missing_prerequisites(0, "E1").is_empty());
+    }
+
+    #[test]
+    fn unit_prerequisite_requires_owned_structure() {
+        let database = rules("[E1]\nCost=100\nPrerequisite=WEAP\n");
+        let mut game = Game::with_rules("test", 32, 32, database);
+        game.setup_demo();
+        assert!(game.meets_prerequisites(0, "E1"));
+
+        game.set_rules(rules("[E1]\nCost=100\nPrerequisite=EYE\n"));
+        assert!(!game.meets_prerequisites(0, "E1"));
+        assert_eq!(game.missing_prerequisites(0, "E1"), vec!["EYE"]);
+
+        game.units.clear();
+        let credits = game.status().gdi_credits;
+        assert!(!game.queue_unit(0, UnitType::InfantryE1));
+        assert_eq!(game.status().gdi_credits, credits);
+        assert_eq!(game.status().production, 0);
+    }
+
+    #[test]
+    fn building_prerequisite_is_enforced() {
+        let database = rules("[NUKE]\nCost=300\nPrerequisite=TMPL\n");
+        let mut game = Game::with_rules("test", 32, 32, database);
+        game.setup_demo();
+        assert!(!game.can_queue_building(0, StructureType::PowerPlant));
+        assert!(!game.queue_building(0, StructureType::PowerPlant));
+
+        game.set_rules(rules("[NUKE]\nCost=300\nPrerequisite=FACT\n"));
+        assert!(game.can_queue_building(0, StructureType::PowerPlant));
+        assert!(game.queue_building(0, StructureType::PowerPlant));
+    }
+
+    #[test]
+    fn none_and_faction_tokens_are_supported() {
+        let game = Game::with_rules(
+            "test",
+            32,
+            32,
+            rules("[E1]\nCost=100\nPrerequisite=NONE\n"),
+        );
+        assert!(game.meets_prerequisites(0, "E1"));
+
+        let mut game = Game::with_rules(
+            "test",
+            32,
+            32,
+            rules("[E1]\nCost=100\nPrerequisite=GDI\n"),
+        );
+        game.setup_demo();
+        assert!(game.meets_prerequisites(0, "E1"));
+        assert!(!game.meets_prerequisites(1, "E1"));
+        assert_eq!(game.missing_prerequisites(1, "E1"), vec!["GDI"]);
+
+        let mut game = Game::with_rules(
+            "test",
+            32,
+            32,
+            rules("[E1]\nCost=100\nPrerequisite=NOD\n"),
+        );
+        game.setup_demo();
+        assert!(game.meets_prerequisites(1, "E1"));
+        assert!(!game.meets_prerequisites(0, "E1"));
+    }
+
+    #[test]
+    fn gdi_and_nod_barracks_aliases_are_equivalent() {
+        let mut game = Game::with_rules(
+            "test",
+            32,
+            32,
+            rules("[E1]\nCost=100\nPrerequisite=PYLE\n"),
+        );
+        game.setup_demo();
+        assert!(game.meets_prerequisites(0, "E1"));
+
+        game.set_rules(rules("[E1]\nCost=100\nPrerequisite=HAND\n"));
+        // The demo GDI barracks satisfies the Nod spelling through the alias.
+        assert!(game.meets_prerequisites(0, "E1"));
+    }
+
+    #[test]
+    fn prerequisite_lists_require_every_token() {
+        let mut game = Game::with_rules(
+            "test",
+            32,
+            32,
+            rules("[E1]\nCost=100\nPrerequisite=WEAP,FACT\n"),
+        );
+        game.setup_demo();
+        assert!(game.meets_prerequisites(0, "E1"));
+
+        game.set_rules(rules("[E1]\nCost=100\nPrerequisite=WEAP,EYE\n"));
+        assert!(!game.meets_prerequisites(0, "E1"));
+        assert_eq!(game.missing_prerequisites(0, "E1"), vec!["EYE"]);
+    }
+
+    #[test]
+    fn unknown_prerequisite_fails_closed() {
+        let mut game = Game::with_rules(
+            "test",
+            32,
+            32,
+            rules("[E1]\nCost=100\nPrerequisite=NOT_A_BUILDING\n"),
+        );
+        game.setup_demo();
+        assert!(!game.meets_prerequisites(0, "E1"));
+        assert_eq!(game.missing_prerequisites(0, "E1"), vec!["NOT_A_BUILDING"]);
+    }
+
+    #[test]
+    fn prerequisite_only_sections_are_registered_as_types() {
+        let rules = rules("[E1]\nPrerequisite=WEAP\n");
+        assert_eq!(rules.type_rule("E1").unwrap().prerequisite, vec!["WEAP"]);
     }
 }

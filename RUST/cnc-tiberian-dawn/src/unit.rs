@@ -1,5 +1,6 @@
 //! Units for Tiberian Dawn
 
+use cnc_core::rules::RulesDatabase;
 use cnc_core::{ARGB8888, ClassId, Fixed16_16, Rect, Vec2, Vec2i};
 use cnc_asset::{AssetRegistry, SpriteAtlas};
 use cnc_renderer::{Renderer, Sprite};
@@ -189,6 +190,16 @@ impl Unit {
 
     pub fn equip_weapon(&mut self, weapon: Weapon) {
         self.weapon = Some(weapon);
+    }
+
+    /// Rebuild carried weapons from Rules.ini overrides, keeping their types.
+    pub fn apply_weapon_rules(&mut self, rules: &RulesDatabase) {
+        if let Some(weapon) = self.weapon.as_ref() {
+            self.weapon = Some(Weapon::from_type_with_rules(weapon.weapon_type, rules));
+        }
+        if let Some(weapon) = self.secondary_weapon.as_ref() {
+            self.secondary_weapon = Some(Weapon::from_type_with_rules(weapon.weapon_type, rules));
+        }
     }
 
     pub fn take_damage(&mut self, amount: Fixed16_16) {

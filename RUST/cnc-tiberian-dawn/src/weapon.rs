@@ -4,10 +4,12 @@
 //! repository (see td_rules.rs). This module only converts them into the
 //! pixel/fixed-point world used by the Rust simulation.
 
+use cnc_core::rules::{RulesDatabase, WarheadRule};
 use cnc_core::{ClassId, Fixed16_16, Vec2};
 
 use crate::td_rules::{
-    modify_damage, ArmorType, BulletType, WarheadType, WeaponType,
+    leptons_to_px, modify_damage, ticks_to_seconds, ArmorType, BulletType, WarheadType,
+    WeaponType,
 };
 
 /// A weapon instance carried by a unit.
@@ -49,22 +51,74 @@ impl Weapon {
             rate_of_fire: Fixed16_16::from_f32(stats.cooldown_seconds()),
             first_shot_delay: Fixed16_16::from_f32(stats.first_shot_seconds()),
             projectile_speed: speed,
-            warhead: Warhead {
-                warhead_type: stats.warhead(),
-            },
+            warhead: Warhead::from_type(stats.warhead()),
             bullet: stats.bullet,
             instant: stats.instant(),
         }
     }
+
+    /// Build a weapon with Rules.ini Damage/ROF/Range/Warhead overlays applied.
+    pub fn from_type_with_rules(weapon_type: WeaponType, rules: &RulesDatabase) -> Self {
+        let mut weapon = Self::from_type(weapon_type);
+
+        if let Some(rule) = rules.weapon(weapon_type.ini_name()) {
+            if rule.damage > 0 {
+                weapon.damage = Fixed16_16::from_int(rule.damage);
+            }
+            if rule.rof > 0 {
+                // TECHNO.CPP Rearm_Delay: ROF + 3 ticks.
+                weapon.rate_of_fire = Fixed16_16::from_f32(ticks_to_seconds(rule.rof + 3));
+            }
+            if rule.range > 0 {
+                weapon.range = Fixed16_16::from_f32(leptons_to_px(rule.range));
+            }
+            if let Some(warhead) = rule.warhead.as_deref().and_then(WarheadType::from_ini_name) {
+                weapon.warhead.warhead_type = warhead;
+            }
+        }
+
+        // Warhead tables can be tuned independently of the weapon that fires them.
+        if let Some(rule) = rules.warhead(weapon.warhead.warhead_type.ini_name()) {
+            weapon.warhead = Warhead::from_rule(weapon.warhead.warhead_type, rule);
+        }
+        weapon
+    }
 }
 
-/// Warhead wrapper around the CONST.CPP warhead table.
+/// Warhead wrapper around the CONST.CPP warhead table, optionally carrying
+/// Rules.ini Verses/Spread overrides.
 #[derive(Clone, Copy, Debug)]
 pub struct Warhead {
     pub warhead_type: WarheadType,
+    /// Rules.ini Verses percentages (None keeps the CONST.CPP armor table).
+    pub verses: Option<[u8; 5]>,
+    /// Rules.ini Spread shift (None keeps WarheadType::spread_factor).
+    pub spread: Option<i32>,
 }
 
 impl Warhead {
+    /// Warhead using the hard-coded CONST.CPP modifiers.
+    pub const fn from_type(warhead_type: WarheadType) -> Self {
+        Self {
+            warhead_type,
+            verses: None,
+            spread: None,
+        }
+    }
+
+    /// Warhead using a parsed Rules.ini warhead section.
+    pub fn from_rule(warhead_type: WarheadType, rule: &WarheadRule) -> Self {
+        let mut verses = [100u8; 5];
+        for (slot, percent) in verses.iter_mut().zip(rule.verses.iter()) {
+            *slot = *percent;
+        }
+        Self {
+            warhead_type,
+            verses: Some(verses),
+            spread: Some(rule.spread),
+        }
+    }
+
     /// COMBAT.CPP Modify_Damage applied to this weapon's base damage.
     pub fn damage(
         &self,
@@ -72,7 +126,24 @@ impl Warhead {
         armor: ArmorType,
         distance_leptons: i32,
     ) -> Fixed16_16 {
-        let modified = modify_damage(base_damage.int(), self.warhead_type, armor, distance_leptons);
+        let base = base_damage.int();
+        let modified = match self.verses {
+            Some(verses) => {
+                let percent = i32::from(verses[armor.index().min(4)]);
+                let mut damage = (i64::from(base) * i64::from(percent) / 100) as i32;
+                if damage != 0 {
+                    let spread = self
+                        .spread
+                        .unwrap_or_else(|| self.warhead_type.spread_factor())
+                        .clamp(0, 16);
+                    let mut distance = distance_leptons >> spread;
+                    distance = distance.clamp(0, 16);
+                    damage >>= distance;
+                }
+                damage
+            }
+            None => modify_damage(base, self.warhead_type, armor, distance_leptons),
+        };
         Fixed16_16::from_int(modified.max(0))
     }
 }

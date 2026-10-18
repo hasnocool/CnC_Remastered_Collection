@@ -418,9 +418,20 @@ impl TypeRule {
     /// Whether this rule looks like a playable object definition rather than a
     /// list/meta section.
     pub fn looks_like_type(section: &IniSection) -> bool {
-        ["Cost", "Strength", "Armor", "Primary", "Secondary", "Speed", "Sight", "TechLevel"]
-            .iter()
-            .any(|key| section.get_ci(key).is_some())
+        [
+            "Cost",
+            "Strength",
+            "Armor",
+            "Primary",
+            "Secondary",
+            "Speed",
+            "Sight",
+            "TechLevel",
+            "Prerequisite",
+            "Owner",
+        ]
+        .iter()
+        .any(|key| section.get_ci(key).is_some())
     }
 }
 
@@ -548,6 +559,31 @@ impl RulesDatabase {
                 || database.houses.contains_key(name)
             {
                 continue;
+            }
+            // Sections may also be defined without appearing in the list
+            // sections (hand-written or partial Rules.ini files). Classify by
+            // the keys they carry so lookups stay consistent.
+            if section.get_ci("Damage").is_some()
+                || section.get_ci("ROF").is_some()
+                || section.get_ci("Range").is_some()
+                || section.get_ci("Warhead").is_some()
+                || section.get_ci("Projectile").is_some()
+                || section.get_ci("Burst").is_some()
+            {
+                if section.get_ci("Cost").is_none() && section.get_ci("Strength").is_none() {
+                    database
+                        .weapons
+                        .insert(name.clone(), WeaponRule::from_section(name, section));
+                    continue;
+                }
+            }
+            if section.get_ci("Verses").is_some() || section.get_ci("Spread").is_some() {
+                if !database.weapons.contains_key(name) {
+                    database
+                        .warheads
+                        .insert(name.clone(), WarheadRule::from_section(name, section));
+                    continue;
+                }
             }
             if TypeRule::looks_like_type(section) {
                 database
@@ -794,5 +830,41 @@ mod tests {
         assert_eq!(DifficultyLevel::parse("NORMAL"), Some(DifficultyLevel::Normal));
         assert_eq!(DifficultyLevel::parse("Difficult"), Some(DifficultyLevel::Hard));
         assert_eq!(DifficultyLevel::parse("brutal"), None);
+    }
+}
+
+#[cfg(test)]
+mod classification_tests {
+    use super::*;
+
+    #[test]
+    fn parses_unlisted_weapon_and_warhead_sections() {
+        let rules = RulesDatabase::from_str(
+            "[M16]\nDamage=25\nROF=20\nRange=1024\nWarhead=AP\n[AP]\nSpread=0\nVerses=10,20,30,40,50\n",
+        )
+        .unwrap();
+        assert_eq!(rules.weapon("M16").unwrap().damage, 25);
+        assert_eq!(rules.weapon("M16").unwrap().warhead.as_deref(), Some("AP"));
+        assert_eq!(rules.warhead("AP").unwrap().verses_percent(3), 40);
+        assert!(rules.types.is_empty());
+    }
+
+    #[test]
+    fn section_classification_prefers_types_with_prerequisites() {
+        let rules = RulesDatabase::from_str("[E1]\nCost=100\nPrerequisite=WEAP\n").unwrap();
+        assert_eq!(rules.type_rule("E1").unwrap().prerequisite, vec!["WEAP"]);
+        assert!(rules.weapons.is_empty());
+    }
+
+    #[test]
+    fn structures_are_types_not_weapons() {
+        let rules = RulesDatabase::from_str(
+            "[NUKE]\nCost=300\nStrength=200\nPower=100\n[M16]\nDamage=15\nROF=20\n",
+        )
+        .unwrap();
+        assert_eq!(rules.type_cost("NUKE"), Some(300));
+        assert!(rules.weapon("NUKE").is_none());
+        assert_eq!(rules.weapon("M16").unwrap().damage, 15);
+        assert!(rules.type_rule("M16").is_none());
     }
 }
