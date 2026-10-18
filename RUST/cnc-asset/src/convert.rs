@@ -2,7 +2,7 @@
 //!
 //! The original collection ships Westwood-era formats (.mix/.shp/.voc/.aud/.pal).
 //! These helpers turn them into runtime friendly files (PNG frames, sprite sheets,
-//! JSON manifests, WAV audio) without touching the parsers themselves.
+//! JSON manifests, WAV/OGG audio) without touching the parsers themselves.
 
 use anyhow::{bail, Context, Result};
 use cnc_core::RGB888;
@@ -10,7 +10,9 @@ use image::{ImageBuffer, Rgba, RgbaImage};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
+use std::num::{NonZeroU8, NonZeroU32};
 use std::path::{Path, PathBuf};
+use vorbis_rs::{VorbisBitrateManagementStrategy, VorbisEncoderBuilder};
 
 use crate::archive::MixArchive;
 use crate::atlas::SpriteFrame;
@@ -222,30 +224,256 @@ pub fn write_shp_sheet(
     Ok(json_path)
 }
 
-/// Convert a .voc or .aud file to a WAV file at output.
-pub fn write_audio_wav(input: &Path, output: &Path) -> Result<()> {
+/// Default Vorbis quality used by the converter (0.4 is transparent enough for
+/// the low-bitrate Westwood source material).
+pub const DEFAULT_OGG_QUALITY: f32 = 0.4;
+
+/// Sample-range loop points, preserved in Ogg comments and the WAV smpl chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct AudioLoop {
+    /// First sample of the loop (inclusive).
+    pub start: u64,
+    /// One past the last sample of the loop (exclusive).
+    pub end: u64,
+}
+
+impl AudioLoop {
+    pub fn new(start: u64, end: u64) -> Result<Self> {
+        if end <= start {
+            bail!("invalid loop points: end ({end}) must be greater than start ({start})");
+        }
+        Ok(Self { start, end })
+    }
+
+    pub fn length(&self) -> u64 {
+        self.end - self.start
+    }
+}
+
+/// Audio container produced by the converter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioFormat {
+    Wav,
+    Ogg,
+}
+
+impl AudioFormat {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "wav" | "wave" => Ok(Self::Wav),
+            "ogg" | "vorbis" | "ogg-vorbis" => Ok(Self::Ogg),
+            other => bail!("unknown audio format '{}' (expected wav or ogg)", other),
+        }
+    }
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Wav => "wav",
+            Self::Ogg => "ogg",
+        }
+    }
+}
+
+/// Decoded PCM audio plus any loop points declared by the source file.
+#[derive(Debug, Clone)]
+pub struct PcmAudio {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub samples: Vec<i16>,
+    pub loop_points: Option<AudioLoop>,
+}
+
+impl PcmAudio {
+    /// Number of interleaved frames (samples per channel).
+    pub fn frames(&self) -> usize {
+        if self.channels == 0 {
+            0
+        } else {
+            self.samples.len() / usize::from(self.channels)
+        }
+    }
+
+    /// Interleave-free f32 channels in [-1.0, 1.0] for the encoder.
+    fn channel_samples(&self) -> Vec<Vec<f32>> {
+        let channels = usize::from(self.channels.max(1));
+        let frames = self.frames();
+        let mut planar = vec![Vec::with_capacity(frames); channels];
+        for frame in 0..frames {
+            for (channel, samples) in planar.iter_mut().enumerate() {
+                let sample = self.samples[frame * channels + channel];
+                samples.push(f32::from(sample) / 32_768.0);
+            }
+        }
+        planar
+    }
+}
+
+/// Decode a .voc or .aud file into PCM.
+pub fn load_audio(input: &Path) -> Result<PcmAudio> {
     let data = fs::read(input).with_context(|| format!("failed to read audio {:?}", input))?;
     let extension = input
         .extension()
         .and_then(|ext| ext.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let wav = match extension.as_str() {
-        "voc" => VocFile::load(&data)
-            .with_context(|| format!("failed to parse VOC {:?}", input))?
-            .to_wav()?,
-        "aud" => AudFile::load(&data)
-            .with_context(|| format!("failed to parse AUD {:?}", input))?
-            .to_wav()?,
+    match extension.as_str() {
+        "voc" => {
+            let voc = VocFile::load(&data)
+                .with_context(|| format!("failed to parse VOC {:?}", input))?;
+            let declared = match (voc.loop_start, voc.loop_end) {
+                (Some(start), Some(end)) => Some(AudioLoop::new(
+                    u64::from(start),
+                    u64::from(end),
+                )?),
+                _ => None,
+            };
+            Ok(PcmAudio {
+                sample_rate: voc.sample_rate,
+                channels: voc.channels,
+                samples: voc.data,
+                loop_points: declared,
+            })
+        }
+        "aud" => {
+            let aud = AudFile::load(&data)
+                .with_context(|| format!("failed to parse AUD {:?}", input))?;
+            Ok(PcmAudio {
+                sample_rate: aud.sample_rate,
+                channels: aud.channels,
+                samples: aud.data,
+                loop_points: None,
+            })
+        }
         other => bail!("unsupported audio extension '{}' for {:?}", other, input),
+    }
+}
+
+/// PCM to WAV bytes, optionally with a RIFF smpl loop chunk.
+pub fn audio_to_wav(audio: &PcmAudio, loop_points: Option<AudioLoop>) -> Result<Vec<u8>> {
+    if audio.channels == 0 {
+        bail!("audio has zero channels");
+    }
+    let spec = hound::WavSpec {
+        channels: audio.channels,
+        sample_rate: audio.sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut buffer = Vec::new();
+    {
+        let mut writer = hound::WavWriter::new(std::io::Cursor::new(&mut buffer), spec)?;
+        for &sample in &audio.samples {
+            writer.write_sample(sample)?;
+        }
+        writer.finalize()?;
+    }
+    match loop_points {
+        Some(loop_points) => append_smpl_chunk(buffer, audio.sample_rate, loop_points),
+        None => Ok(buffer),
+    }
+}
+
+/// Append a RIFF smpl chunk describing one forward loop.
+fn append_smpl_chunk(mut wav: Vec<u8>, sample_rate: u32, loop_points: AudioLoop) -> Result<Vec<u8>> {
+    if wav.len() < 12 || &wav[0..4] != b"RIFF" || &wav[8..12] != b"WAVE" {
+        bail!("cannot add loop points: encoder did not produce a RIFF/WAVE file");
+    }
+    let last_sample = loop_points.end.saturating_sub(1);
+    let mut chunk = Vec::with_capacity(68);
+    chunk.extend_from_slice(b"smpl");
+    chunk.extend_from_slice(&60u32.to_le_bytes()); // chunk size: 36 + 24 * loops
+    chunk.extend_from_slice(&0u32.to_le_bytes()); // manufacturer
+    chunk.extend_from_slice(&0u32.to_le_bytes()); // product
+    let sample_period = if sample_rate == 0 {
+        0
+    } else {
+        (1_000_000_000u64 / u64::from(sample_rate)) as u32
+    };
+    chunk.extend_from_slice(&sample_period.to_le_bytes());
+    chunk.extend_from_slice(&60u32.to_le_bytes()); // MIDI unity note
+    chunk.extend_from_slice(&0u32.to_le_bytes()); // MIDI pitch fraction
+    chunk.extend_from_slice(&0u32.to_le_bytes()); // SMPTE format
+    chunk.extend_from_slice(&0u32.to_le_bytes()); // SMPTE offset
+    chunk.extend_from_slice(&1u32.to_le_bytes()); // number of loops
+    chunk.extend_from_slice(&0u32.to_le_bytes()); // sampler data
+    chunk.extend_from_slice(&0u32.to_le_bytes()); // cue point id
+    chunk.extend_from_slice(&0u32.to_le_bytes()); // type: forward loop
+    chunk.extend_from_slice(&(loop_points.start.min(u64::from(u32::MAX)) as u32).to_le_bytes());
+    chunk.extend_from_slice(&(last_sample.min(u64::from(u32::MAX)) as u32).to_le_bytes());
+    chunk.extend_from_slice(&0u32.to_le_bytes()); // fraction
+    chunk.extend_from_slice(&0u32.to_le_bytes()); // play count: infinite
+
+    wav.extend_from_slice(&chunk);
+    let riff_size = (wav.len() - 8) as u32;
+    wav[4..8].copy_from_slice(&riff_size.to_le_bytes());
+    Ok(wav)
+}
+
+/// Encode PCM to an Ogg Vorbis stream, writing loop points as Vorbis comments.
+pub fn audio_to_ogg(audio: &PcmAudio, quality: f32, loop_points: Option<AudioLoop>) -> Result<Vec<u8>> {
+    if audio.channels == 0 || audio.channels > 8 {
+        bail!("unsupported channel count {} for Ogg Vorbis", audio.channels);
+    }
+    if audio.frames() == 0 {
+        bail!("audio contains no samples");
+    }
+    let sample_rate =
+        NonZeroU32::new(audio.sample_rate).context("sample rate must be non-zero")?;
+    let channels = NonZeroU8::new(audio.channels as u8).context("channel count must be non-zero")?;
+
+    let mut builder = VorbisEncoderBuilder::new(sample_rate, channels, Vec::<u8>::new())
+        .context("failed to create the Vorbis encoder")?;
+    builder.bitrate_management_strategy(VorbisBitrateManagementStrategy::QualityVbr {
+        target_quality: quality.clamp(-0.2, 1.0),
+    });
+    if let Some(loop_points) = loop_points {
+        builder.comment_tag("LOOPSTART", loop_points.start.to_string())?;
+        builder.comment_tag("LOOPEND", loop_points.end.to_string())?;
+        builder.comment_tag("LOOPLENGTH", loop_points.length().to_string())?;
+    }
+    let mut encoder = builder.build().context("failed to start Vorbis encoding")?;
+
+    let planar = audio.channel_samples();
+    let frames = audio.frames();
+    const BLOCK: usize = 1024;
+    let mut start = 0;
+    while start < frames {
+        let end = (start + BLOCK).min(frames);
+        let block: Vec<&[f32]> = planar.iter().map(|channel| &channel[start..end]).collect();
+        encoder
+            .encode_audio_block(&block)
+            .context("failed to encode an Ogg Vorbis block")?;
+        start = end;
+    }
+    encoder.finish().context("failed to finish the Ogg Vorbis stream")
+}
+
+/// Convert a .voc or .aud file into WAV or Ogg, preserving or overriding loops.
+pub fn write_audio(
+    input: &Path,
+    output: &Path,
+    format: AudioFormat,
+    loop_override: Option<AudioLoop>,
+    quality: f32,
+) -> Result<()> {
+    let audio = load_audio(input)?;
+    let loop_points = loop_override.or(audio.loop_points);
+    let bytes = match format {
+        AudioFormat::Wav => audio_to_wav(&audio, loop_points)?,
+        AudioFormat::Ogg => audio_to_ogg(&audio, quality, loop_points)?,
     };
     if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
         }
     }
-    fs::write(output, wav).with_context(|| format!("failed to write WAV {:?}", output))?;
+    fs::write(output, bytes).with_context(|| format!("failed to write audio {:?}", output))?;
     Ok(())
+}
+
+/// Convert a .voc or .aud file to a WAV file at output (loop points preserved).
+pub fn write_audio_wav(input: &Path, output: &Path) -> Result<()> {
+    write_audio(input, output, AudioFormat::Wav, None, DEFAULT_OGG_QUALITY)
 }
 
 /// Export a palette as JSON colours.
@@ -331,6 +559,10 @@ pub struct BatchOptions {
     pub palette: Option<PalFile>,
     pub transparent: Option<u8>,
     pub sprite_sheet: bool,
+    /// Container written for .voc/.aud sources (WAV by default).
+    pub audio_format: AudioFormat,
+    /// Vorbis quality used when audio_format is Ogg.
+    pub audio_quality: f32,
 }
 
 impl Default for BatchOptions {
@@ -339,6 +571,8 @@ impl Default for BatchOptions {
             palette: None,
             transparent: Some(DEFAULT_TRANSPARENT_INDEX),
             sprite_sheet: false,
+            audio_format: AudioFormat::Wav,
+            audio_quality: DEFAULT_OGG_QUALITY,
         }
     }
 }
@@ -447,7 +681,14 @@ fn convert_single(path: &Path, output_dir: &Path, options: &BatchOptions, report
             }
             AssetKind::Voc | AssetKind::Aud => {
                 let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
-                write_audio_wav(path, &output_dir.join(format!("{stem}.wav")))?;
+                let output = output_dir.join(format!("{stem}.{}", options.audio_format.extension()));
+                write_audio(
+                    path,
+                    &output,
+                    options.audio_format,
+                    None,
+                    options.audio_quality,
+                )?;
             }
             AssetKind::Pal => {
                 let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("palette");
@@ -725,5 +966,191 @@ mod tests {
         assert_eq!(report.failed(), 1);
         assert_eq!(report.failures[0].0.file_name().unwrap(), "BAD.SHP");
         fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod audio_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn sine_audio(rate: u32, frames: usize) -> PcmAudio {
+        let samples = (0..frames)
+            .map(|index| {
+                let phase = (index as f32) * 440.0 * std::f32::consts::TAU / rate as f32;
+                (phase.sin() * 12_000.0) as i16
+            })
+            .collect();
+        PcmAudio {
+            sample_rate: rate,
+            channels: 1,
+            samples,
+            loop_points: None,
+        }
+    }
+
+    fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+    }
+
+    #[test]
+    fn audio_loop_rejects_inverted_ranges() {
+        assert!(AudioLoop::new(10, 10).is_err());
+        assert!(AudioLoop::new(20, 10).is_err());
+        let good = AudioLoop::new(10, 20).unwrap();
+        assert_eq!(good.length(), 10);
+    }
+
+    #[test]
+    fn audio_format_parses_names_and_extensions() {
+        assert_eq!(AudioFormat::parse("WAV").unwrap(), AudioFormat::Wav);
+        assert_eq!(AudioFormat::parse("ogg").unwrap(), AudioFormat::Ogg);
+        assert_eq!(AudioFormat::parse("vorbis").unwrap(), AudioFormat::Ogg);
+        assert!(AudioFormat::parse("mp3").is_err());
+        assert_eq!(AudioFormat::Ogg.extension(), "ogg");
+    }
+
+    #[test]
+    fn ogg_stream_is_valid_and_carries_loop_comments() {
+        let audio = sine_audio(22_050, 4_410);
+        let loop_points = AudioLoop::new(100, 4_000).unwrap();
+        let ogg = audio_to_ogg(&audio, 0.3, Some(loop_points)).unwrap();
+
+        assert_eq!(&ogg[..4], b"OggS");
+        assert!(
+            ogg.windows(13).any(|window| window == b"LOOPSTART=100"),
+            "LOOPSTART comment missing"
+        );
+        assert!(
+            ogg.windows(12).any(|window| window == b"LOOPEND=4000"),
+            "LOOPEND comment missing"
+        );
+        assert!(
+            ogg.windows(15).any(|window| window == b"LOOPLENGTH=3900"),
+            "LOOPLENGTH comment missing"
+        );
+
+        let mut decoder = vorbis_rs::VorbisDecoder::new(Cursor::new(ogg)).unwrap();
+        assert_eq!(decoder.channels().get(), 1);
+        assert_eq!(decoder.sampling_frequency().get(), 22_050);
+        let mut decoded_frames = 0usize;
+        while let Some(block) = decoder.decode_audio_block().unwrap() {
+            decoded_frames += block.samples()[0].len();
+        }
+        assert!(
+            decoded_frames > 3_000,
+            "decoded too few frames: {decoded_frames}"
+        );
+    }
+
+    #[test]
+    fn ogg_without_loop_points_has_no_loop_comments() {
+        let audio = sine_audio(22_050, 1_024);
+        let ogg = audio_to_ogg(&audio, 0.2, None).unwrap();
+        assert!(!ogg.windows(9).any(|window| window == b"LOOPSTART"));
+    }
+
+    #[test]
+    fn wav_smpl_chunk_encodes_loop_and_updates_riff_size() {
+        let audio = sine_audio(22_050, 2_000);
+        let loop_points = AudioLoop::new(50, 1_500).unwrap();
+        let wav = audio_to_wav(&audio, Some(loop_points)).unwrap();
+
+        assert_eq!(&wav[..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+        assert_eq!(read_u32(&wav, 4) as usize, wav.len() - 8);
+
+        let smpl = wav
+            .windows(4)
+            .position(|window| window == b"smpl")
+            .expect("smpl chunk missing");
+        assert_eq!(read_u32(&wav, smpl + 4), 60);
+        assert_eq!(read_u32(&wav, smpl + 8 + 8), 1_000_000_000 / 22_050);
+        assert_eq!(read_u32(&wav, smpl + 8 + 28), 1, "number of loops");
+        assert_eq!(read_u32(&wav, smpl + 8 + 44), 50, "loop start");
+        assert_eq!(read_u32(&wav, smpl + 8 + 48), 1_499, "loop end is inclusive");
+    }
+
+    #[test]
+    fn wav_without_loop_has_no_smpl_chunk() {
+        let audio = sine_audio(22_050, 256);
+        let wav = audio_to_wav(&audio, None).unwrap();
+        assert!(!wav.windows(4).any(|window| window == b"smpl"));
+    }
+
+    #[test]
+    fn write_audio_converts_aud_to_ogg_with_override() {
+        let dir = test_dir("ogg_e2e");
+        let aud = dir.join("shot.aud");
+        let mut data = Vec::new();
+        data.extend_from_slice(&22_050u32.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        for index in 0..2_048i16 {
+            data.extend_from_slice(&(index % 1_000).to_le_bytes());
+        }
+        fs::write(&aud, data).unwrap();
+
+        let ogg = dir.join("shot.ogg");
+        let loop_points = AudioLoop::new(10, 1_000).unwrap();
+        write_audio(&aud, &ogg, AudioFormat::Ogg, Some(loop_points), 0.3).unwrap();
+        let bytes = fs::read(&ogg).unwrap();
+        assert_eq!(&bytes[..4], b"OggS");
+        assert!(bytes.windows(12).any(|window| window == b"LOOPEND=1000"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn voc_loop_points_are_preserved_by_default() {
+        // Block 0x09/0x0A carry loop start/end sample offsets.
+        let dir = test_dir("voc_loop");
+        let voc = dir.join("music.voc");
+        let mut data = Vec::new();
+        data.extend_from_slice(b"Creative Voice File\x1a");
+        data.extend_from_slice(&26u16.to_le_bytes());
+        data.extend_from_slice(&0x0100u16.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.push(0x09);
+        data.extend_from_slice(&4u32.to_le_bytes());
+        data.extend_from_slice(&120u32.to_le_bytes());
+        data.push(0x0A);
+        data.extend_from_slice(&4u32.to_le_bytes());
+        data.extend_from_slice(&900u32.to_le_bytes());
+        data.push(0x01);
+        data.extend_from_slice(&(2u32 + 64).to_le_bytes());
+        data.push(0xD3); // time constant for ~22050 Hz
+        data.push(0);
+        for index in 0..64u8 {
+            data.push(index);
+        }
+        data.push(0x00);
+        data.extend_from_slice(&0u32.to_le_bytes());
+        fs::write(&voc, data).unwrap();
+
+        let audio = load_audio(&voc).unwrap();
+        assert_eq!(audio.sample_rate, 22_222); // 1_000_000 / (256 - 0xD3)
+        assert_eq!(audio.loop_points, Some(AudioLoop::new(120, 900).unwrap()));
+        assert_eq!(audio.samples.len(), 64);
+
+        let wav = dir.join("music.wav");
+        write_audio(&voc, &wav, AudioFormat::Wav, None, 0.4).unwrap();
+        let bytes = fs::read(&wav).unwrap();
+        let smpl = bytes.windows(4).position(|window| window == b"smpl").unwrap();
+        assert_eq!(read_u32(&bytes, smpl + 8 + 44), 120);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "cnc_asset_audio_{}_{}_{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

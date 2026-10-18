@@ -25,6 +25,7 @@ image = { workspace = true }
 audio = { workspace = true }
 hound = { workspace = true }
 symphonia = { workspace = true }
+vorbis_rs = { workspace = true }
 parking_lot = { workspace = true }
 once_cell = { workspace = true }
 clap = { workspace = true, features = ["derive"] }

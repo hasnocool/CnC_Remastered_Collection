@@ -75,6 +75,19 @@ fn aud_bytes() -> Vec<u8> {
     data
 }
 
+
+fn aud_bytes_with_samples(frames: usize) -> Vec<u8> {
+    let mut data = Vec::new();
+    data.extend_from_slice(&22050u32.to_le_bytes());
+    data.extend_from_slice(&1u16.to_le_bytes());
+    data.extend_from_slice(&0u16.to_le_bytes());
+    for index in 0..frames {
+        let sample = ((index as f32 * 440.0 * std::f32::consts::TAU / 22050.0).sin() * 12000.0) as i16;
+        data.extend_from_slice(&sample.to_le_bytes());
+    }
+    data
+}
+
 fn mix_bytes() -> Vec<u8> {
     let entries: &[(&str, &[u8])] = &[("HELLO.TXT", b"hello mix"), ("DATA.BIN", b"12345678")];
     let mut out = Vec::new();
@@ -237,5 +250,60 @@ fn batch_returns_error_when_a_file_fails() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("BROKEN.SHP"), "stderr: {stderr}");
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn aud_to_ogg_with_loop_points_and_batch_ogg() {
+    let dir = test_dir("ogg");
+    let aud = dir.join("music.aud");
+    fs::write(&aud, aud_bytes_with_samples(4096)).unwrap();
+
+    let ogg = dir.join("music.ogg");
+    let stdout = assert_success(
+        cli()
+            .args(["voc", "--input"])
+            .arg(&aud)
+            .arg("--output")
+            .arg(&ogg)
+            .args(["--format", "ogg", "--loop-start", "100", "--loop-end", "3000"]),
+    );
+    assert!(stdout.contains("ogg"), "stdout: {stdout}");
+    let bytes = fs::read(&ogg).unwrap();
+    assert_eq!(&bytes[..4], b"OggS");
+    assert!(bytes.windows(13).any(|window| window == b"LOOPSTART=100"));
+    assert!(bytes.windows(12).any(|window| window == b"LOOPEND=3000"));
+
+    // Extension-based format inference also selects Ogg.
+    let inferred = dir.join("inferred.ogg");
+    assert_success(cli().args(["voc", "--input"]).arg(&aud).arg("--output").arg(&inferred));
+    assert_eq!(&fs::read(&inferred).unwrap()[..4], b"OggS");
+
+    // Batch converts to Ogg when requested.
+    let input = dir.join("in");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("shot.aud"), aud_bytes_with_samples(1024)).unwrap();
+    let out = dir.join("out");
+    let stdout = assert_success(
+        cli()
+            .args(["batch", "--input"])
+            .arg(&input)
+            .arg("--output")
+            .arg(&out)
+            .args(["--game", "td", "--audio-format", "ogg"]),
+    );
+    assert!(stdout.contains("aud: 1"), "stdout: {stdout}");
+    assert!(out.join("shot.ogg").exists());
+    assert!(!out.join("shot.wav").exists());
+
+    // Loop bounds must be supplied together.
+    assert_failure(
+        cli()
+            .args(["voc", "--input"])
+            .arg(&aud)
+            .arg("--output")
+            .arg(dir.join("bad.ogg"))
+            .args(["--loop-start", "10"]),
+    );
     fs::remove_dir_all(&dir).unwrap();
 }

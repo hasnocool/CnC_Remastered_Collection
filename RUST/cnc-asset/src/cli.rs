@@ -6,8 +6,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use cnc_asset::convert::{
     batch_convert, load_palette_or_grayscale, palette_to_css, palette_to_json, palette_to_png,
-    validate_game, write_audio_wav, write_shp_frames, write_shp_sheet, BatchOptions,
-    DEFAULT_TRANSPARENT_INDEX,
+    validate_game, write_audio, write_shp_frames, write_shp_sheet, AudioFormat, AudioLoop,
+    BatchOptions, DEFAULT_OGG_QUALITY, DEFAULT_TRANSPARENT_INDEX,
 };
 use cnc_asset::{AtlasStyle, MixArchive, PalFile, SpriteAtlas};
 use std::fs;
@@ -51,12 +51,24 @@ enum Commands {
         #[arg(long)]
         opaque: bool,
     },
-    /// Convert a .voc or .aud file to WAV.
+    /// Convert a .voc or .aud file to WAV or Ogg Vorbis.
     Voc {
         #[arg(short, long)]
         input: PathBuf,
         #[arg(short, long)]
         output: PathBuf,
+        /// Output container: wav or ogg (inferred from the output extension when omitted).
+        #[arg(short, long)]
+        format: Option<String>,
+        /// First loop sample (inclusive); requires --loop-end.
+        #[arg(long, requires = "loop_end")]
+        loop_start: Option<u64>,
+        /// One past the last loop sample; requires --loop-start.
+        #[arg(long, requires = "loop_start")]
+        loop_end: Option<u64>,
+        /// Vorbis quality in [-0.2, 1.0] (only used for Ogg).
+        #[arg(short, long, default_value_t = DEFAULT_OGG_QUALITY)]
+        quality: f32,
     },
     /// Export a .pal palette as json, png or css.
     Pal {
@@ -85,6 +97,12 @@ enum Commands {
         /// Keep palette index 0 opaque (it is transparent by default).
         #[arg(long)]
         opaque: bool,
+        /// Audio container for .voc/.aud: wav or ogg.
+        #[arg(long, default_value = "wav")]
+        audio_format: String,
+        /// Vorbis quality in [-0.2, 1.0] when --audio-format ogg is used.
+        #[arg(long, default_value_t = DEFAULT_OGG_QUALITY)]
+        audio_quality: f32,
     },
     /// Generate the built-in placeholder sprite atlas.
     GenerateAtlas {
@@ -106,7 +124,14 @@ fn main() -> Result<()> {
             sprite_sheet,
             opaque,
         } => cmd_shp(input, output, palette, sprite_sheet, opaque),
-        Commands::Voc { input, output } => cmd_voc(input, output),
+        Commands::Voc {
+            input,
+            output,
+            format,
+            loop_start,
+            loop_end,
+            quality,
+        } => cmd_voc(input, output, format, loop_start, loop_end, quality),
         Commands::Pal {
             input,
             output,
@@ -119,7 +144,18 @@ fn main() -> Result<()> {
             palette,
             sprite_sheet,
             opaque,
-        } => cmd_batch(input, output, game, palette, sprite_sheet, opaque),
+            audio_format,
+            audio_quality,
+        } => cmd_batch(
+            input,
+            output,
+            game,
+            palette,
+            sprite_sheet,
+            opaque,
+            audio_format,
+            audio_quality,
+        ),
         Commands::GenerateAtlas { out, style } => cmd_generate_atlas(out, style),
     }
 }
@@ -198,9 +234,35 @@ fn cmd_shp(
     Ok(())
 }
 
-fn cmd_voc(input: PathBuf, output: PathBuf) -> Result<()> {
-    write_audio_wav(&input, &output)?;
-    println!("wrote {} -> {}", input.display(), output.display());
+fn cmd_voc(
+    input: PathBuf,
+    output: PathBuf,
+    format: Option<String>,
+    loop_start: Option<u64>,
+    loop_end: Option<u64>,
+    quality: f32,
+) -> Result<()> {
+    let format = match format {
+        Some(format) => AudioFormat::parse(&format)?,
+        None => output
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(AudioFormat::parse)
+            .transpose()?
+            .unwrap_or(AudioFormat::Wav),
+    };
+    let loop_override = match (loop_start, loop_end) {
+        (Some(start), Some(end)) => Some(AudioLoop::new(start, end)?),
+        (None, None) => None,
+        _ => bail!("--loop-start and --loop-end must be provided together"),
+    };
+    write_audio(&input, &output, format, loop_override, quality)?;
+    println!(
+        "wrote {} -> {} ({})",
+        input.display(),
+        output.display(),
+        format.extension()
+    );
     Ok(())
 }
 
@@ -225,8 +287,13 @@ fn cmd_batch(
     palette: Option<PathBuf>,
     sprite_sheet: bool,
     opaque: bool,
+    audio_format: String,
+    audio_quality: f32,
 ) -> Result<()> {
     validate_game(&game)?;
+    if !(-0.2..=1.0).contains(&audio_quality) {
+        bail!("audio quality must be between -0.2 and 1.0");
+    }
     let palette = match palette {
         Some(path) => Some(PalFile::load_file(&path)?),
         None => None,
@@ -235,6 +302,8 @@ fn cmd_batch(
         palette,
         transparent: transparent_index(opaque),
         sprite_sheet,
+        audio_format: AudioFormat::parse(&audio_format)?,
+        audio_quality,
     };
     println!(
         "batch converting {} ({}) into {}",
