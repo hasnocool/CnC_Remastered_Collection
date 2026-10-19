@@ -1,6 +1,7 @@
 //! Map system for Tiberian Dawn
 
 use cnc_core::{Vec2i, Fixed16_16};
+use serde::{Deserialize, Serialize};
 use cnc_renderer::Renderer;
 
 use crate::td_rules::{
@@ -11,14 +12,14 @@ use crate::td_rules::{
 pub const TILE_SIZE: f32 = 24.0;
 
 /// Cell grid for the map
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CellGrid {
     pub width: u32,
     pub height: u32,
     pub cells: Vec<Cell>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Cell {
     pub terrain_type: u8,
     pub overlay_type: u8,
@@ -190,7 +191,7 @@ impl CellGrid {
 }
 
 /// Map structure
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Map {
     pub name: String,
     pub width: u32,
@@ -200,7 +201,7 @@ pub struct Map {
     pub trigger_zones: Vec<TriggerZone>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TriggerZone {
     pub id: u32,
     pub x1: i32,

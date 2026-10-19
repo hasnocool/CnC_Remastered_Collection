@@ -4,10 +4,15 @@ version = { workspace = true }
 edition = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
+default-run = "cnc-launcher"
 
 [[bin]]
 name = "cnc-launcher"
 path = "src/main.rs"
+
+[[bin]]
+name = "cnc-net-lobby"
+path = "src/bin/net_lobby.rs"
 
 [dependencies]
 cnc-core = { path = "../cnc-core" }

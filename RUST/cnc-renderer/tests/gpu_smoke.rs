@@ -55,7 +55,7 @@ fn render_and_readback(
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("gpu-smoke-encoder"),
     });
-    batch.flush(device, queue, &mut encoder, &view, wgpu::Color::BLACK);
+    batch.flush(device, queue, &mut encoder, &view, wgpu::Color::BLACK, false);
     encoder.copy_texture_to_buffer(
         wgpu::ImageCopyTexture {
             texture: &texture,

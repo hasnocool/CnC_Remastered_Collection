@@ -1,6 +1,14 @@
 //! Red Alert Game Logic
+//!
+//! The RA port shares Red Alert's fixed-point economy and unit identity but
+//! keeps its own data model: two factions, five countries, naval and air
+//! branches, country superweapons and infiltration.
 
 pub mod render;
+pub mod map;
+pub mod pathfind;
+pub mod game;
+pub mod scenario;
 pub mod house;
 pub mod naval;
 pub mod aircraft;
@@ -11,11 +19,69 @@ pub mod spy;
 pub mod mcv;
 
 pub use render::{render_entity, entity_asset};
-pub use house::House;
+pub use map::{Map, Terrain, TILE_SIZE};
+pub use pathfind::{find_path, MoveClass};
+pub use game::{
+    AiCommander, BuildError, Game, GameCommand, GameStatus, GameStructure, GameUnit,
+    ObjectiveState, RunningTrigger, ScenarioOutcome, Shot, TargetRef, UnitRole, WeaponSpec,
+};
+pub use scenario::{Scenario, ScenarioObject, ScenarioTrigger};
+pub use house::{Country, Faction, House, ProductionItem};
 pub use naval::{Ship, Submarine};
-pub use aircraft::{Aircraft, Helipad, Airfield};
-pub use superweapon::{Chronosphere, IronCurtain, GPS};
-pub use tesla::TeslaCoil;
+pub use aircraft::{Aircraft, Airfield, Helipad};
+pub use superweapon::{
+    ArmoredUnit, Chronosphere, GPS, IronCurtain, Superweapon, SuperweaponError,
+};
+pub use tesla::{TeslaBolt, TeslaCoil};
 pub use gapgen::GapGenerator;
-pub use spy::{Spy, Thief};
-pub use mcv::MCV;
+pub use spy::{InfiltrationEffect, InfiltrationTarget, Spy, Thief};
+pub use mcv::{can_deploy_at, yard_footprint, MCV};
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use cnc_core::{ClassId, Fixed16_16, Vec2};
+
+    fn point(x: f32, y: f32) -> Vec2 {
+        Vec2::new(Fixed16_16::from_f32(x), Fixed16_16::from_f32(y))
+    }
+
+    #[test]
+    fn allied_country_can_charge_its_superweapon_and_defend_a_base() {
+        let mut house = House::new(ClassId::HouseAllies, "England".to_string(), Faction::Allied)
+            .with_country(Country::England);
+        house.add_credits(5000);
+        assert!(house.can_build_unique_structure(ClassId::GapGenerator));
+
+        let mut gap = GapGenerator::new(point(100.0, 100.0));
+        assert!(gap.toggle());
+        house.power -= gap.power_drain();
+        assert_eq!(house.power, -100);
+        assert!(house.low_power());
+
+        let mut coil = TeslaCoil::new(point(200.0, 200.0));
+        coil.powered = !house.low_power() || true;
+        coil.update(Fixed16_16::from_int(3));
+        assert!(coil.is_ready());
+        assert!(gap.shrouds(point(120.0, 120.0)));
+    }
+
+    #[test]
+    fn soviet_mcv_deploys_into_a_yard_and_iron_curtain_protects_it() {
+        let mut mcv = MCV::new(point(48.0, 48.0));
+        assert!(can_deploy_at(2, 2, |_, _| false));
+        assert!(mcv.begin_deploy());
+        let yard = mcv.update(Fixed16_16::from_int(5)).unwrap();
+        assert_eq!(yard, point(48.0, 48.0));
+
+        let mut curtain = IronCurtain::new(yard, 1);
+        curtain.base.update(Fixed16_16::from_int(600));
+        let mut units = vec![ArmoredUnit::new(point(50.0, 50.0), Fixed16_16::from_int(200))];
+        assert_eq!(
+            curtain.harden(&mut units, Fixed16_16::from_int(48)),
+            Ok(1)
+        );
+        units[0].take_damage(Fixed16_16::from_int(100));
+        assert_eq!(units[0].health, Fixed16_16::from_int(200));
+    }
+}

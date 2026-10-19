@@ -9,17 +9,19 @@ repository = { workspace = true }
 cnc-core = { path = "../cnc-core" }
 cnc-renderer = { path = "../cnc-renderer" }
 cnc-asset = { path = "../cnc-asset" }
+cnc-ai = { path = "../cnc-ai" }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+image = { workspace = true }
 wgpu = { workspace = true }
 winit = { workspace = true }
-egui = "0.29"
-egui-wgpu = "0.29"
-egui-winit = "0.29"
+pollster = "0.4"
 parking_lot = { workspace = true }
 once_cell = { workspace = true }
+native-dialog = "0.9"
+softbuffer = "0.4"
 
 [dev-dependencies]
 criterion = "0.5"

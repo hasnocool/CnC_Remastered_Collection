@@ -1,13 +1,14 @@
 //! Buildings for Tiberian Dawn
 
 use cnc_core::{ARGB8888, ClassId, Fixed16_16, Rect, Vec2};
+use serde::{Deserialize, Serialize};
 use cnc_asset::{AssetRegistry, SpriteAtlas};
 use cnc_renderer::{Renderer, Sprite};
 
 use crate::td_rules::{ArmorType, StructureType};
 
 /// Base building structure
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Building {
     pub class_id: ClassId,
     pub armor: ArmorType,
@@ -131,7 +132,7 @@ impl Building {
 }
 
 /// Factory building
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Factory {
     pub base: Building,
     pub production_queue: Vec<u32>,
@@ -144,7 +145,7 @@ impl Factory {
 }
 
 /// Power plant
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PowerPlant {
     pub base: Building,
     pub power_output: i32,
@@ -157,7 +158,7 @@ impl PowerPlant {
 }
 
 /// Refinery
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Refinery {
     pub base: Building,
     pub stored_credits: i32,

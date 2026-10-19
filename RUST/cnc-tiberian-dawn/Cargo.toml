@@ -16,6 +16,7 @@ serde = { workspace = true }
 tokio = { workspace = true }
 parking_lot = { workspace = true }
 once_cell = { workspace = true }
+bincode = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"

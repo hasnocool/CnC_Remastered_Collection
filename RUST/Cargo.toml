@@ -9,6 +9,8 @@ members = [
     "cnc-asset",
     "cnc-map-editor",
     "cnc-launcher",
+    "cnc-net-directory",
+    "cnc-ai",
 ]
 
 [workspace.package]

@@ -16,6 +16,10 @@ pub trait Renderer: Send + Sync {
     fn draw_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]);
     fn draw_text(&mut self, text: &str, x: f32, y: f32, size: f32, color: [f32; 4]);
     fn set_camera(&mut self, camera: &Camera);
+    /// Submit everything queued so far with the current camera, so draws after
+    /// the next camera change composite on top instead of sharing its transform.
+    /// Backends that apply the camera per draw can leave this empty.
+    fn begin_layer(&mut self) {}
     fn resize(&mut self, width: u32, height: u32);
     fn set_palette(&mut self, palette: &Palette);
     /// Upload a sprite texture atlas (RGBA8). Backends without sprites ignore it.
@@ -146,6 +150,9 @@ pub struct WgpuRenderer {
     acquired_frame: Option<wgpu::SurfaceTexture>,
     frame_error: Option<anyhow::Error>,
     clear_color: wgpu::Color,
+    /// True once a layer of the current frame has been submitted; later layers
+    /// load instead of clearing the surface.
+    layer_submitted: bool,
 }
 
 impl WgpuRenderer {
@@ -224,6 +231,7 @@ impl WgpuRenderer {
             acquired_frame: None,
             frame_error: None,
             clear_color: wgpu::Color { r: 0.05, g: 0.05, b: 0.08, a: 1.0 },
+            layer_submitted: false,
         };
         renderer
             .sprite_batch
@@ -264,6 +272,8 @@ impl Renderer for WgpuRenderer {
     fn begin_frame(&mut self) {
         self.acquired_frame = None;
         self.frame_error = None;
+        self.layer_submitted = false;
+        self.sprite_batch.clear();
         match self.surface.get_current_texture() {
             Ok(frame) => self.acquired_frame = Some(frame),
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -301,12 +311,38 @@ impl Renderer for WgpuRenderer {
             &mut encoder,
             &view,
             self.clear_color,
+            self.layer_submitted,
         );
 
         self.queue.submit(Some(encoder.finish()));
         frame.present();
         self.sprite_batch.clear();
+        self.layer_submitted = false;
         Ok(())
+    }
+
+    fn begin_layer(&mut self) {
+        let Some(frame) = self.acquired_frame.as_ref() else {
+            return;
+        };
+        if self.sprite_batch.is_empty() {
+            return;
+        }
+        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("cnc_layer_encoder"),
+        });
+        self.sprite_batch.flush(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &view,
+            self.clear_color,
+            self.layer_submitted,
+        );
+        self.queue.submit(Some(encoder.finish()));
+        self.sprite_batch.clear();
+        self.layer_submitted = true;
     }
 
     fn draw_sprite(&mut self, sprite: &Sprite) {

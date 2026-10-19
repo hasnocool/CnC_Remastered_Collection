@@ -11,7 +11,7 @@ use cnc_renderer::Renderer;
 /// Draw one entity as a placeholder quad through any renderer implementation.
 pub fn render_entity(
     renderer: &mut dyn Renderer,
-    class_id: ClassId,
+    _class_id: ClassId,
     position: Vec2,
     size: f32,
     color: [f32; 4],

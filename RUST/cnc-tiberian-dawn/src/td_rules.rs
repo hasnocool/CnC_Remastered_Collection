@@ -12,6 +12,7 @@
 //! - MAP.CPP: Nearby_Location (RA backport)
 
 use cnc_core::{ClassId, Fixed16_16};
+use serde::{Deserialize, Serialize};
 
 /// Leptons per map cell (DISPLAY.H: ICON_LEPTON_W).
 pub const CELL_LEPTON_W: i32 = 256;
@@ -26,7 +27,7 @@ pub const TICKS_PER_SECOND: i32 = 15;
 pub const EXPLOSION_RANGE_LEPTONS: i32 = CELL_LEPTON_W + (CELL_LEPTON_W >> 1);
 
 /// Armor classes from DEFINES.H.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArmorType {
     None = 0,
     Wood = 1,
@@ -42,7 +43,7 @@ impl ArmorType {
 }
 
 /// Warhead classes from DEFINES.H.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WarheadType {
     Sa,
     He,
@@ -161,7 +162,7 @@ pub fn modify_damage(
 }
 
 /// Bullet classes from BBDATA.CPP with their speed and warhead.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BulletType {
     Sniper,
     Bullet,
@@ -272,7 +273,7 @@ impl BulletType {
 }
 
 /// Weapon classes and their CONST.CPP stats (bullet, damage, ROF ticks, range leptons).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WeaponType {
     Rifle,
     ChainGun,
@@ -602,7 +603,7 @@ pub fn mph_to_px_per_sec_infantry(mph: i32) -> f32 {
 }
 
 /// Unit stats from IDATA.CPP / UDATA.CPP for the demo roster.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnitType {
     InfantryE1,
     MediumTank,
@@ -822,7 +823,7 @@ pub fn unit_type_for_class(class_id: ClassId) -> Option<UnitType> {
 }
 
 /// Structure types ported from BDATA.CPP for the demo bases.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StructureType {
     ConstructionYard,
     PowerPlant,
@@ -886,7 +887,7 @@ pub const fn default_structure_owner(structure: StructureType, is_gdi: bool) -> 
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProductionKind {
     Infantry,
     Unit,

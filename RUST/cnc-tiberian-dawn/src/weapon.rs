@@ -6,6 +6,7 @@
 
 use cnc_core::rules::{RulesDatabase, WarheadRule};
 use cnc_core::{ClassId, Fixed16_16, Vec2};
+use serde::{Deserialize, Serialize};
 
 use crate::td_rules::{
     leptons_to_px, modify_damage, ticks_to_seconds, ArmorType, BulletType, WarheadType,
@@ -13,7 +14,7 @@ use crate::td_rules::{
 };
 
 /// A weapon instance carried by a unit.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Weapon {
     pub class_id: ClassId,
     pub weapon_type: WeaponType,
@@ -87,7 +88,7 @@ impl Weapon {
 
 /// Warhead wrapper around the CONST.CPP warhead table, optionally carrying
 /// Rules.ini Verses/Spread overrides.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Warhead {
     pub warhead_type: WarheadType,
     /// Rules.ini Verses percentages (None keeps the CONST.CPP armor table).
@@ -149,7 +150,7 @@ impl Warhead {
 }
 
 /// Projectile in flight.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Projectile {
     pub weapon: Weapon,
     pub position: Vec2,

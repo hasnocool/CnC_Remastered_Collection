@@ -1,6 +1,7 @@
 //! Units for Tiberian Dawn
 
 use cnc_core::rules::RulesDatabase;
+use serde::{Deserialize, Serialize};
 use cnc_core::{ARGB8888, ClassId, Fixed16_16, Rect, Vec2, Vec2i};
 use cnc_asset::{AssetRegistry, SpriteAtlas};
 use cnc_renderer::{Renderer, Sprite};
@@ -22,7 +23,7 @@ pub fn facing_difference(a: f32, b: f32) -> f32 {
 }
 
 /// Base unit structure
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Unit {
     pub class_id: ClassId,
     pub unit_type: UnitType,
@@ -411,7 +412,7 @@ impl Unit {
 }
 
 /// Infantry unit
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Infantry {
     pub base: Unit,
     pub veterancy: u8,
@@ -424,7 +425,7 @@ impl Infantry {
 }
 
 /// Vehicle unit
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Vehicle {
     pub base: Unit,
     pub turret_rotation: Fixed16_16,
@@ -437,7 +438,7 @@ impl Vehicle {
 }
 
 /// Aircraft unit
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Aircraft {
     pub base: Unit,
     pub altitude: Fixed16_16,

@@ -2,9 +2,32 @@
 //!
 //! Creates a winit 0.30 window and drives the renderer (wgpu by default, with
 //! a software fallback) from the RedrawRequested event at roughly 60 FPS.
-//! The demo scene is real Tiberian Dawn game state: a map, houses, buildings
-//! and units owned by cnc-tiberian-dawn's Game type.
+//!
+//! With no launch-mode flags the launcher boots into the **main menu**
+//! (`menu.rs`), which offers Campaign, Local Game and Online Game for both
+//! engines:
+//! - Campaign opens the TD mission selector or the RA campaign selector loaded
+//!   from the bundled `maps/td_campaign` / `maps/ra_campaign` directories
+//!   (override with `CNC_TD_CAMPAIGN` / `CNC_RA_CAMPAIGN`).
+//! - Local Game starts a TD skirmish or the RA skirmish setup screen.
+//! - Online Game opens the RA host/join network lobby.
+//! Esc on a game's menu-owned screen (mission select, skirmish setup, campaign
+//! select, lobby) returns to the main menu; `--menu` requests it explicitly.
+//!
+//! Passing a launch-mode flag keeps the direct CLI paths: `--mission FILE`,
+//! `--mission-dir DIR`, `--campaign DIR`, `--scenario FILE`, `--replay FILE`,
+//! `--net-role` / `--net-lobby` or an explicit `--game td|ra` start straight
+//! into that mode (`--game ra` opens the RA skirmish setup). `--frames N` caps
+//! a headless harness run.
+//!
+//! The TD demo scene is real Tiberian Dawn game state: a map, houses, buildings
+//! and units owned by cnc-tiberian-dawn's Game type. The RA mode runs
+//! cnc-red-alert's Game with naval/air movement, production, Tesla defenses and
+//! superweapons.
 
+
+use std::collections::{HashMap, HashSet};
+use std::net::{SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,13 +39,21 @@ use cnc_audio::AudioMixer;
 use cnc_core::rules::RulesDatabase;
 use cnc_core::{Fixed16_16, Vec2, Vec2i};
 use cnc_renderer::{Camera, Renderer, SoftwareRenderer, WgpuRenderer};
-use cnc_tiberian_dawn::{Buildable, Game, StructureType, UnitType};
+use cnc_red_alert::{Country, Game as RaGame, GameCommand, TILE_SIZE as RA_TILE_SIZE};
+use cnc_tiberian_dawn::network::{
+    Command as NetCommandKind, LiveEvent, LiveSession, NetCommand, NetPacket, NetworkConfig,
+};
+use cnc_tiberian_dawn::{Buildable, Game, Mission, MissionOutcome, StructureType, UnitType};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
+
+mod menu;
+
+use menu::{GameChoice, LaunchTarget, MainMenu, MenuCommand};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const MAP_SIZE: u32 = 64;
@@ -45,12 +76,118 @@ struct Args {
     /// Tiberian Dawn defaults.
     #[arg(long)]
     rules: Option<PathBuf>,
+
+    /// Optional campaign mission INI; triggers and objectives start immediately.
+    #[arg(long)]
+    mission: Option<PathBuf>,
+
+    /// List TD mission INIs in a directory and exit (no window).
+    #[arg(long)]
+    list_missions: Option<PathBuf>,
+
+    /// List RA campaign scenario INIs in a directory and exit (no window).
+    #[arg(long)]
+    list_campaign: Option<PathBuf>,
+
+    /// Open a TD mission-select screen for the INIs in this directory.
+    #[arg(long)]
+    mission_dir: Option<PathBuf>,
+
+    /// RA network role: "host" or "join" (skirmish over UDP).
+    #[arg(long)]
+    net_role: Option<String>,
+    /// Host address to join (with --net-role join).
+    #[arg(long)]
+    net_join: Option<String>,
+    /// Local UDP port for RA network play.
+    #[arg(long, default_value_t = 47770)]
+    net_port: u16,
+    /// Host peer addresses (repeatable) for RA network play.
+    #[arg(long = "net-peer")]
+    net_peers: Vec<String>,
+    /// Local bind IP for RA network play.
+    #[arg(long, default_value = "0.0.0.0")]
+    net_bind: String,
+    /// Advertised NAT address for RA network play.
+    #[arg(long)]
+    net_advertised: Option<String>,
+    /// Open the RA host/join lobby on startup instead of the skirmish setup.
+    #[arg(long)]
+    net_lobby: bool,
+    /// Write the network match replay here on exit (default saves/ra_network_replay.rep).
+    #[arg(long)]
+    net_replay: Option<PathBuf>,
+    /// Play a recorded CNCR network replay in the RA view.
+    #[arg(long)]
+    replay: Option<PathBuf>,
+
+    /// Open the main menu (the default when no launch-mode flag is given).
+    #[arg(long)]
+    menu: bool,
+
+    /// Game to run directly: "td"/"tiberian-dawn" or "ra"/"red-alert".
+    /// Omit it to open the main menu.
+    #[arg(short = 'g', long)]
+    game: Option<String>,
+
+    /// Optional frame cap; 0 runs until the window is closed.
+    #[arg(long, default_value_t = 0)]
+    frames: u64,
+
+    /// Editor-format scenario INI loaded by the Red Alert launcher mode.
+    #[arg(long)]
+    scenario: Option<PathBuf>,
+
+    /// Directory of RA campaign scenarios (default "maps") for mission select.
+    #[arg(long)]
+    campaign: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GameKind {
+    TiberianDawn,
+    RedAlert,
+}
+
+impl GameKind {
+    fn parse(value: &str) -> Result<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "td" | "tiberian-dawn" | "tiberiandawn" => Ok(Self::TiberianDawn),
+            "ra" | "red-alert" | "redalert" => Ok(Self::RedAlert),
+            other => Err(anyhow!(
+                "unknown game '{}' (expected 'td' or 'ra')",
+                other
+            )),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RendererKind {
     Wgpu,
     Software,
+}
+
+/// Shared renderer bootstrapping for the TD and RA launcher modes.
+fn create_renderer(
+    kind: RendererKind,
+    width: u32,
+    height: u32,
+    window: Arc<Window>,
+) -> Box<dyn Renderer> {
+    match kind {
+        RendererKind::Wgpu => match pollster::block_on(WgpuRenderer::new(window)) {
+            Ok(renderer) => {
+                tracing::info!("wgpu renderer initialized");
+                Box::new(renderer)
+            }
+            Err(error) => {
+                tracing::error!(%error, "wgpu renderer initialization failed; using software renderer");
+                Box::new(SoftwareRenderer::new(width, height))
+            }
+        },
+        RendererKind::Software => Box::new(SoftwareRenderer::new(width, height)),
+    }
 }
 
 impl RendererKind {
@@ -132,6 +269,1654 @@ fn build_label(buildable: Buildable) -> &'static str {
     }
 }
 
+fn default_campaign_progress_path() -> PathBuf {
+    let dir = std::env::var("CNC_SAVE_DIR").unwrap_or_else(|_| "saves".to_string());
+    PathBuf::from(dir).join("ra_campaign.ini")
+}
+
+fn default_td_progress_path() -> PathBuf {
+    let dir = std::env::var("CNC_SAVE_DIR").unwrap_or_else(|_| "saves".to_string());
+    PathBuf::from(dir).join("td_campaign.ini")
+}
+
+fn ra_save_path() -> PathBuf {
+    ra_save_path_for(0)
+}
+
+/// Default location for the replay written after a network match.
+fn default_network_replay_path() -> PathBuf {
+    let dir = std::env::var("CNC_SAVE_DIR").unwrap_or_else(|_| "saves".to_string());
+    PathBuf::from(dir).join("ra_network_replay.rep")
+}
+
+/// Path for RA save slot 0..2 (slot 0 keeps the historical filename).
+fn ra_save_path_for(slot: usize) -> PathBuf {
+    let dir = std::env::var("CNC_SAVE_DIR").unwrap_or_else(|_| "saves".to_string());
+    let file = if slot == 0 {
+        "ra_mission.sav".to_string()
+    } else {
+        format!("ra_mission{}.sav", slot + 1)
+    };
+    PathBuf::from(dir).join(file)
+}
+
+fn draw_td_briefing(
+    renderer: &mut dyn Renderer,
+    mission: &Mission,
+    width: u32,
+    height: u32,
+) {
+    let w = width as f32;
+    let h = height as f32;
+    renderer.draw_rect(0.0, 0.0, w, h, [0.05, 0.05, 0.07, 1.0]);
+    renderer.draw_rect(0.0, 110.0, w, 2.0, [0.70, 0.55, 0.25, 1.0]);
+    renderer.draw_text("MISSION BRIEFING", 60.0, 40.0, 24.0, [0.95, 0.70, 0.30, 1.0]);
+    renderer.draw_text(&mission.name, 60.0, 82.0, 15.0, [0.90, 0.93, 0.98, 1.0]);
+    renderer.draw_text(
+        &format!("Player: {}", if mission.player == 0 { "GDI" } else { "Nod" }),
+        60.0,
+        108.0,
+        10.0,
+        [0.75, 0.82, 0.92, 1.0],
+    );
+    let mut y = 150.0;
+    if !mission.briefing.is_empty() {
+        renderer.draw_text("BRIEFING", 60.0, y, 10.0, [0.60, 0.75, 0.95, 1.0]);
+        y += 18.0;
+        renderer.draw_text(&mission.briefing, 60.0, y, 11.0, [0.88, 0.90, 0.95, 1.0]);
+        y += 28.0;
+    }
+    if !mission.objectives.is_empty() {
+        renderer.draw_text("OBJECTIVES", 60.0, y, 10.0, [0.60, 0.75, 0.95, 1.0]);
+        y += 18.0;
+        for objective in &mission.objectives {
+            renderer.draw_text(
+                &format!("- {}", objective.text),
+                60.0,
+                y,
+                11.0,
+                [0.82, 0.88, 0.96, 1.0],
+            );
+            y += 16.0;
+        }
+    }
+    renderer.draw_text(
+        "Enter: begin mission    Esc: quit",
+        60.0,
+        h - 60.0,
+        10.0,
+        [0.70, 0.80, 0.92, 1.0],
+    );
+}
+
+/// Bottom-right terrain/unit minimap for the TD game view.
+fn draw_td_minimap(
+    renderer: &mut dyn Renderer,
+    game: &Game,
+    player: u8,
+    center: Vec2,
+    view_w: f32,
+    view_h: f32,
+    left: f32,
+    top: f32,
+    hud_w: f32,
+    hud_h: f32,
+) {
+    let map_w = game.map.width.max(1);
+    let map_h = game.map.height.max(1);
+    let (step, scale) = minimap_layout(map_w, map_h, 150.0);
+    // Bottom-left keeps the minimap clear of the right-hand build menu. The
+    // panel is placed in screen-sized HUD space; the view box below uses the
+    // real world view, which shrinks as the camera zooms in.
+    let (x, y, panel_w, panel_h) =
+        minimap_origin(map_w, map_h, left, top, hud_w, hud_h, false);
+    renderer.draw_rect(x - 4.0, y - 4.0, panel_w + 8.0, panel_h + 8.0, [0.02, 0.03, 0.05, 1.0]);
+    for py in (0..map_h).step_by(step as usize) {
+        for px in (0..map_w).step_by(step as usize) {
+            let index = py as usize * map_w as usize + px as usize;
+            let Some(cell) = game.map.grid.cells.get(index) else {
+                continue;
+            };
+            let color = if cell.has_tiberium {
+                [0.10, 0.60, 0.15, 1.0]
+            } else if cell.terrain_type == 0 {
+                [0.30, 0.30, 0.30, 1.0]
+            } else {
+                [0.45, 0.40, 0.25, 1.0]
+            };
+            renderer.draw_rect(
+                x + px as f32 * scale,
+                y + py as f32 * scale,
+                scale * step as f32,
+                scale * step as f32,
+                color,
+            );
+        }
+    }
+    for building in &game.buildings {
+        if !building.is_alive() {
+            continue;
+        }
+        let cell_x = (building.position.x.to_f32() / cnc_tiberian_dawn::map::TILE_SIZE).floor();
+        let cell_y = (building.position.y.to_f32() / cnc_tiberian_dawn::map::TILE_SIZE).floor();
+        let color = if building.owner == player {
+            [0.35, 0.85, 1.0, 1.0]
+        } else {
+            [1.0, 0.35, 0.30, 1.0]
+        };
+        renderer.draw_rect(
+            x + cell_x * scale,
+            y + cell_y * scale,
+            (scale * 2.0).max(2.0),
+            (scale * 2.0).max(2.0),
+            color,
+        );
+    }
+    for unit in &game.units {
+        if !unit.is_alive() {
+            continue;
+        }
+        let cell_x = (unit.position.x.to_f32() / cnc_tiberian_dawn::map::TILE_SIZE).floor();
+        let cell_y = (unit.position.y.to_f32() / cnc_tiberian_dawn::map::TILE_SIZE).floor();
+        let color = if unit.owner == player {
+            [0.65, 1.0, 0.75, 1.0]
+        } else {
+            [1.0, 0.55, 0.45, 1.0]
+        };
+        renderer.draw_rect(
+            x + cell_x * scale,
+            y + cell_y * scale,
+            scale.max(1.5),
+            scale.max(1.5),
+            color,
+        );
+    }
+    let view_left = (center.x.to_f32() - view_w * 0.5) / cnc_tiberian_dawn::map::TILE_SIZE;
+    let view_top = (center.y.to_f32() - view_h * 0.5) / cnc_tiberian_dawn::map::TILE_SIZE;
+    let view_cells_w = view_w / cnc_tiberian_dawn::map::TILE_SIZE;
+    let view_cells_h = view_h / cnc_tiberian_dawn::map::TILE_SIZE;
+    let border = [0.95, 0.90, 0.75, 1.0];
+    renderer.draw_rect(x + view_left * scale, y + view_top * scale, view_cells_w * scale, 1.0, border);
+    renderer.draw_rect(
+        x + view_left * scale,
+        y + (view_top + view_cells_h) * scale - 1.0,
+        view_cells_w * scale,
+        1.0,
+        border,
+    );
+    renderer.draw_rect(x + view_left * scale, y + view_top * scale, 1.0, view_cells_h * scale, border);
+    renderer.draw_rect(
+        x + (view_left + view_cells_w) * scale - 1.0,
+        y + view_top * scale,
+        1.0,
+        view_cells_h * scale,
+        border,
+    );
+    renderer.draw_text("MINIMAP", x, y - 13.0, 8.0, [0.60, 0.75, 0.95, 1.0]);
+}
+
+/// TD pause overlay (screen space).
+fn draw_td_pause(
+    renderer: &mut dyn Renderer,
+    game: &Game,
+    choice: usize,
+    save_slot: usize,
+    slot_label: &str,
+    width: u32,
+    height: u32,
+) {
+    let w = width as f32;
+    let h = height as f32;
+    renderer.draw_rect(0.0, 0.0, w, h, [0.02, 0.03, 0.05, 1.0]);
+    let panel_w = 460.0f32;
+    let panel_h = 260.0f32;
+    let panel_x = (w - panel_w) * 0.5;
+    let panel_y = (h - panel_h) * 0.5;
+    renderer.draw_rect(panel_x, panel_y, panel_w, panel_h, [0.07, 0.09, 0.13, 1.0]);
+    renderer.draw_rect(panel_x, panel_y, panel_w, 2.0, [0.70, 0.55, 0.25, 1.0]);
+    renderer.draw_text("PAUSED", panel_x + 24.0, panel_y + 20.0, 22.0, [0.95, 0.85, 0.60, 1.0]);
+    let status = game.status();
+    renderer.draw_text(
+        &format!(
+            "t={}s   {} units   {} structures   GDI {} credits",
+            game.elapsed.int(),
+            status.units,
+            status.buildings,
+            status.gdi_credits
+        ),
+        panel_x + 24.0,
+        panel_y + 58.0,
+        10.0,
+        [0.78, 0.86, 0.95, 1.0],
+    );
+    let options = vec![
+        "Resume".to_string(),
+        "Save game".to_string(),
+        "Load game".to_string(),
+        "Abort mission".to_string(),
+        format!("Save slot: {}/3 ({slot_label})", save_slot + 1),
+    ];
+    let mut y = panel_y + 100.0;
+    for (index, label) in options.iter().enumerate() {
+        let color = if index == choice {
+            [1.0, 0.90, 0.45, 1.0]
+        } else {
+            [0.78, 0.86, 0.95, 1.0]
+        };
+        renderer.draw_text(
+            &format!("{}{}", if index == choice { "> " } else { "  " }, label),
+            panel_x + 24.0,
+            y,
+            12.0,
+            color,
+        );
+        y += 24.0;
+    }
+    renderer.draw_text(
+        "Up/Down: select   Enter: confirm   Esc: resume",
+        panel_x + 24.0,
+        panel_y + panel_h - 24.0,
+        9.0,
+        [0.60, 0.70, 0.85, 1.0],
+    );
+}
+
+/// One spawn point extracted from a TD mission's scripts/triggers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MissionSpawn {
+    owner: u8,
+    cell: Vec2i,
+    structure: bool,
+}
+
+/// A TD mission-select entry plus preview data.
+#[derive(Clone, Debug)]
+struct TdChoice {
+    path: PathBuf,
+    name: String,
+    objectives: usize,
+    triggers: usize,
+    spawns: Vec<MissionSpawn>,
+}
+
+fn collect_action_spawns(action: &cnc_tiberian_dawn::Action, out: &mut Vec<MissionSpawn>) {
+    match action {
+        cnc_tiberian_dawn::Action::SpawnUnits {
+            owner, count, cell, ..
+        } => {
+            for _ in 0..*count {
+                out.push(MissionSpawn {
+                    owner: *owner,
+                    cell: *cell,
+                    structure: false,
+                });
+            }
+        }
+        cnc_tiberian_dawn::Action::SpawnStructure { owner, cell, .. } => {
+            out.push(MissionSpawn {
+                owner: *owner,
+                cell: *cell,
+                structure: true,
+            });
+        }
+        _ => {}
+    }
+}
+
+fn mission_spawns(mission: &Mission) -> Vec<MissionSpawn> {
+    let mut spawns = Vec::new();
+    for script in &mission.scripts {
+        for action in &script.actions {
+            collect_action_spawns(action, &mut spawns);
+        }
+    }
+    for trigger in &mission.triggers {
+        for action in &trigger.actions {
+            collect_action_spawns(action, &mut spawns);
+        }
+    }
+    spawns
+}
+
+/// Draw a spawn-marker overview for the selected mission.
+fn draw_td_mission_preview(
+    renderer: &mut dyn Renderer,
+    choice: &TdChoice,
+    x: f32,
+    y: f32,
+    size: f32,
+) {
+    renderer.draw_rect(x, y, size, size + 58.0, [0.03, 0.04, 0.06, 1.0]);
+    renderer.draw_rect(x, y, size, 1.5, [0.55, 0.45, 0.22, 1.0]);
+    renderer.draw_text(
+        "SPAWN OVERVIEW",
+        x + 12.0,
+        y + 10.0,
+        10.0,
+        [0.95, 0.82, 0.45, 1.0],
+    );
+    renderer.draw_text(
+        &format!(
+            "{} objectives   {} triggers",
+            choice.objectives, choice.triggers
+        ),
+        x + 12.0,
+        y + 26.0,
+        9.0,
+        [0.72, 0.78, 0.88, 1.0],
+    );
+    let extent = choice
+        .spawns
+        .iter()
+        .map(|spawn| spawn.cell.x.max(spawn.cell.y))
+        .max()
+        .map_or(32, |max| (max + 4).clamp(16, 64));
+    let scale = (size - 24.0) / extent as f32;
+    let grid_x = x + 12.0;
+    let grid_y = y + 44.0;
+    renderer.draw_rect(
+        grid_x,
+        grid_y,
+        extent as f32 * scale,
+        extent as f32 * scale,
+        [0.07, 0.08, 0.10, 1.0],
+    );
+    for step in (0..=extent).step_by(8) {
+        let line = step as f32 * scale;
+        renderer.draw_rect(grid_x + line, grid_y, 1.0, extent as f32 * scale, [0.14, 0.16, 0.20, 1.0]);
+        renderer.draw_rect(grid_x, grid_y + line, extent as f32 * scale, 1.0, [0.14, 0.16, 0.20, 1.0]);
+    }
+    for spawn in &choice.spawns {
+        let color = if spawn.owner == 0 {
+            [0.35, 0.60, 1.0, 1.0]
+        } else {
+            [1.0, 0.38, 0.32, 1.0]
+        };
+        let marker = if spawn.structure { 5.0 } else { 3.5 };
+        renderer.draw_rect(
+            grid_x + spawn.cell.x as f32 * scale,
+            grid_y + spawn.cell.y as f32 * scale,
+            marker,
+            marker,
+            color,
+        );
+    }
+    renderer.draw_text(
+        "blue GDI   red Nod   square = structure",
+        x + 12.0,
+        y + size + 20.0,
+        8.0,
+        [0.62, 0.68, 0.78, 1.0],
+    );
+    renderer.draw_text(
+        "preview from mission spawns (no terrain in INI)",
+        x + 12.0,
+        y + size + 34.0,
+        8.0,
+        [0.50, 0.56, 0.66, 1.0],
+    );
+}
+
+fn draw_td_mission_select(
+    renderer: &mut dyn Renderer,
+    choices: &[TdChoice],
+    completed: &[bool],
+    best_times: &[Option<i32>],
+    selected: usize,
+    filter: CampaignFilter,
+    width: u32,
+    height: u32,
+) {
+    let w = width as f32;
+    let h = height as f32;
+    renderer.draw_rect(0.0, 0.0, w, h, [0.05, 0.05, 0.07, 1.0]);
+    renderer.draw_rect(0.0, 110.0, w, 2.0, [0.70, 0.55, 0.25, 1.0]);
+    renderer.draw_text("TIBERIAN DAWN", 60.0, 40.0, 28.0, [0.95, 0.70, 0.30, 1.0]);
+    renderer.draw_text(
+        "Select Mission",
+        60.0,
+        84.0,
+        15.0,
+        [0.88, 0.90, 0.95, 1.0],
+    );
+    if choices.is_empty() {
+        renderer.draw_text(
+            "No missions found in this directory.",
+            60.0,
+            160.0,
+            12.0,
+            [0.95, 0.70, 0.45, 1.0],
+        );
+    } else {
+        let mut y = 150.0;
+        let visible: Vec<usize> = (0..choices.len())
+            .filter(|index| match filter {
+                CampaignFilter::All => true,
+                CampaignFilter::Incomplete => !completed.get(*index).copied().unwrap_or(false),
+                CampaignFilter::Completed => completed.get(*index).copied().unwrap_or(false),
+            })
+            .collect();
+        if visible.is_empty() {
+            renderer.draw_text(
+                "No missions match this filter.",
+                60.0,
+                y,
+                12.0,
+                [0.90, 0.75, 0.55, 1.0],
+            );
+            y += 24.0;
+        }
+        for index in visible {
+            let name = &choices[index].name;
+            let done = completed.get(index).copied().unwrap_or(false);
+            let color = if index == selected {
+                [1.0, 0.90, 0.45, 1.0]
+            } else if done {
+                [0.60, 0.85, 0.65, 1.0]
+            } else {
+                [0.82, 0.87, 0.94, 1.0]
+            };
+            let best = best_times
+                .get(index)
+                .and_then(|seconds| *seconds)
+                .map_or_else(|| "--".to_string(), |seconds| format!("{seconds}s"));
+            renderer.draw_text(
+                &format!(
+                    "{}{} {}. {}    best {}",
+                    if index == selected { "> " } else { "  " },
+                    if done { "[x]" } else { "[ ]" },
+                    index + 1,
+                    name,
+                    best
+                ),
+                60.0,
+                y,
+                12.0,
+                color,
+            );
+            y += 24.0;
+        }
+    }
+    if let Some(choice) = choices.get(selected) {
+        draw_td_mission_preview(renderer, choice, (w - 370.0).max(60.0), 150.0, 320.0);
+    }
+    renderer.draw_text(
+        &format!(
+            "Filter: {} (F)    Up/Down: select   Enter: deploy   S: stats   Esc: quit",
+            filter.label()
+        ),
+        60.0,
+        h - 60.0,
+        10.0,
+        [0.70, 0.78, 0.90, 1.0],
+    );
+}
+
+fn draw_td_campaign_complete(
+    renderer: &mut dyn Renderer,
+    missions: usize,
+    best_times: &[Option<i32>],
+    width: u32,
+    height: u32,
+) {
+    let w = width as f32;
+    let h = height as f32;
+    renderer.draw_rect(0.0, 0.0, w, h, [0.05, 0.05, 0.07, 1.0]);
+    renderer.draw_rect(0.0, 110.0, w, 2.0, [0.70, 0.55, 0.25, 1.0]);
+    renderer.draw_text("TIBERIAN DAWN", 60.0, 40.0, 28.0, [0.95, 0.70, 0.30, 1.0]);
+    renderer.draw_text(
+        "CAMPAIGN COMPLETE",
+        60.0,
+        84.0,
+        22.0,
+        [0.55, 0.95, 0.65, 1.0],
+    );
+    renderer.draw_text(
+        &format!("{missions}/{missions} missions cleared"),
+        60.0,
+        150.0,
+        13.0,
+        [0.90, 0.93, 0.98, 1.0],
+    );
+    let total: i32 = best_times.iter().filter_map(|time| *time).sum();
+    renderer.draw_text(
+        &format!("Total best time: {total}s"),
+        60.0,
+        176.0,
+        12.0,
+        [0.85, 0.82, 0.65, 1.0],
+    );
+    renderer.draw_text(
+        "Enter or Esc: back to mission select",
+        60.0,
+        h - 60.0,
+        11.0,
+        [0.70, 0.80, 0.92, 1.0],
+    );
+}
+
+fn draw_td_stats(
+    renderer: &mut dyn Renderer,
+    choices: &[TdChoice],
+    completed: &[bool],
+    best_times: &[Option<i32>],
+    width: u32,
+    height: u32,
+) {
+    let w = width as f32;
+    let h = height as f32;
+    renderer.draw_rect(0.0, 0.0, w, h, [0.05, 0.05, 0.07, 1.0]);
+    renderer.draw_rect(0.0, 110.0, w, 2.0, [0.70, 0.55, 0.25, 1.0]);
+    renderer.draw_text("TD CAMPAIGN STATS", 60.0, 40.0, 24.0, [0.95, 0.70, 0.30, 1.0]);
+    let cleared = completed.iter().filter(|done| **done).count();
+    renderer.draw_text(
+        &format!("{cleared}/{} missions cleared", choices.len()),
+        60.0,
+        82.0,
+        13.0,
+        [0.90, 0.93, 0.98, 1.0],
+    );
+    let mut y = 128.0;
+    let mut total = 0i32;
+    for (index, choice) in choices.iter().enumerate() {
+        let name = &choice.name;
+        let done = completed.get(index).copied().unwrap_or(false);
+        let best = best_times.get(index).and_then(|seconds| *seconds);
+        if let Some(seconds) = best {
+            total += seconds;
+        }
+        let color = if done {
+            [0.60, 0.85, 0.65, 1.0]
+        } else {
+            [0.82, 0.87, 0.94, 1.0]
+        };
+        renderer.draw_text(
+            &format!(
+                "{} {}. {}    {}",
+                if done { "[x]" } else { "[ ]" },
+                index + 1,
+                name,
+                best.map_or_else(|| "--".to_string(), |seconds| format!("{seconds}s"))
+            ),
+            60.0,
+            y,
+            11.0,
+            color,
+        );
+        y += 20.0;
+    }
+    renderer.draw_text(
+        &format!("Total best time: {total}s"),
+        60.0,
+        y + 6.0,
+        11.0,
+        [0.85, 0.82, 0.65, 1.0],
+    );
+    renderer.draw_text(
+        "Enter/Esc: back to mission select",
+        60.0,
+        h - 60.0,
+        10.0,
+        [0.70, 0.80, 0.92, 1.0],
+    );
+}
+
+/// Screen-space camera (world units == pixels) used by the setup screen.
+fn screen_camera(width: u32, height: u32) -> Camera {
+    let mut camera = Camera::default();
+    camera.set_viewport(width.max(1), height.max(1));
+    camera.position = Vec2::new(
+        Fixed16_16::from_f32(width as f32 * 0.5),
+        Fixed16_16::from_f32(height as f32 * 0.5),
+    );
+    camera.zoom = Fixed16_16::ONE;
+    camera
+}
+
+/// World-view zoom limits. The HUD is drawn unzoomed, so these only bound how
+/// much of the map the camera can show, not the size of menus or status text.
+const MIN_GAME_ZOOM: f32 = 0.5;
+const MAX_GAME_ZOOM: f32 = 4.0;
+/// Starting zoom for a match. 24 px cells at 2x match the original games' field
+/// of view much more closely than 1:1 pixels, which shows nearly a whole map.
+const DEFAULT_GAME_ZOOM: f32 = 2.0;
+/// Multiplier for one keyboard zoom step ("+" / "-").
+const KEY_ZOOM_STEP: f32 = 1.2;
+
+/// Screen-space HUD camera: the game camera's world centre without zoom, so
+/// status text, the build menu and the minimap keep a fixed pixel size while
+/// the map behind them is zoomed in or out.
+fn hud_camera(camera: &Camera) -> Camera {
+    let mut hud = *camera;
+    hud.zoom = Fixed16_16::ONE;
+    hud
+}
+
+/// Wheel delta to zoom factor; trackpads report fractional pixel deltas, so
+/// this stays smooth instead of stepping once per event.
+fn wheel_zoom_factor(amount: f32) -> f32 {
+    1.15f32.powf(amount)
+}
+
+/// Zoom a camera around a screen-space anchor (usually the cursor), clamped to
+/// the map so the view centre cannot drift into empty space.
+fn zoom_camera_at(
+    camera: &mut Camera,
+    anchor: Option<(f32, f32)>,
+    factor: f32,
+    world_width: f32,
+    world_height: f32,
+) {
+    let before = camera.zoom.to_f32().max(1.0e-6);
+    let after = (before * factor).clamp(MIN_GAME_ZOOM, MAX_GAME_ZOOM);
+    if (after - before).abs() <= f32::EPSILON {
+        return;
+    }
+    let view_w = camera.viewport_width as f32;
+    let view_h = camera.viewport_height as f32;
+    let (mut px, mut py) = (camera.position.x.to_f32(), camera.position.y.to_f32());
+    if let Some((sx, sy)) = anchor {
+        // Keep the world point under the cursor pinned while the scale changes.
+        let world_x = (sx - view_w * 0.5) / before + px;
+        let world_y = (sy - view_h * 0.5) / before + py;
+        px = world_x - (sx - view_w * 0.5) / after;
+        py = world_y - (sy - view_h * 0.5) / after;
+    }
+    camera.zoom = Fixed16_16::from_f32(after);
+    camera.position = Vec2::new(
+        Fixed16_16::from_f32(px.clamp(0.0, world_width)),
+        Fixed16_16::from_f32(py.clamp(0.0, world_height)),
+    );
+}
+
+/// Edge-scroll direction for a screen cursor inside a window (-1, 0 or 1).
+fn edge_pan_direction(
+    cursor_x: f32,
+    cursor_y: f32,
+    width: f32,
+    height: f32,
+    margin: f32,
+) -> (f32, f32) {
+    if cursor_x < 0.0 || cursor_y < 0.0 || cursor_x > width || cursor_y > height {
+        return (0.0, 0.0);
+    }
+    let mut dx = 0.0;
+    let mut dy = 0.0;
+    if cursor_x <= margin {
+        dx = -1.0;
+    } else if cursor_x >= width - margin {
+        dx = 1.0;
+    }
+    if cursor_y <= margin {
+        dy = -1.0;
+    } else if cursor_y >= height - margin {
+        dy = 1.0;
+    }
+    (dx, dy)
+}
+
+/// Production progress in percent (0 when the total is non-positive).
+fn production_percent(progress: Fixed16_16, total: Fixed16_16) -> i32 {
+    let total = total.to_f32();
+    if total <= 0.0 {
+        return 0;
+    }
+    ((progress.to_f32() / total) * 100.0).clamp(0.0, 100.0) as i32
+}
+
+/// Health fraction clamped to 0..1 (0 when the maximum is non-positive).
+fn health_fraction(current: Fixed16_16, maximum: Fixed16_16) -> f32 {
+    let max = maximum.to_f32();
+    if max <= 0.0 {
+        return 0.0;
+    }
+    (current.to_f32() / max).clamp(0.0, 1.0)
+}
+
+/// Colour for a health bar: green, yellow or red by remaining fraction.
+fn health_bar_color(fraction: f32) -> [f32; 4] {
+    if fraction > 0.5 {
+        [0.35, 0.90, 0.45, 1.0]
+    } else if fraction > 0.25 {
+        [0.95, 0.82, 0.30, 1.0]
+    } else {
+        [0.95, 0.35, 0.30, 1.0]
+    }
+}
+
+/// Draw a small health bar above a world-space entity.
+fn draw_health_bar(
+    renderer: &mut dyn Renderer,
+    center_x: f32,
+    y: f32,
+    fraction: f32,
+    width: f32,
+) {
+    if fraction >= 0.999 {
+        return;
+    }
+    renderer.draw_rect(center_x - width * 0.5, y, width, 3.0, [0.04, 0.04, 0.05, 1.0]);
+    renderer.draw_rect(
+        center_x - width * 0.5 + 1.0,
+        y + 1.0,
+        (width - 2.0) * fraction,
+        1.0,
+        health_bar_color(fraction),
+    );
+}
+
+/// Short description of a save slot's age ("empty", "42s ago", "3m ago").
+fn save_slot_label(path: &Path) -> String {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return "empty".to_string();
+    };
+    let Ok(modified) = metadata.modified() else {
+        return "saved".to_string();
+    };
+    let elapsed = modified.elapsed().unwrap_or_default().as_secs();
+    if elapsed < 60 {
+        format!("{elapsed}s ago")
+    } else if elapsed < 3600 {
+        format!("{}m ago", elapsed / 60)
+    } else {
+        format!("{}h ago", elapsed / 3600)
+    }
+}
+
+/// First incomplete mission after `current`, wrapping around; None if all done.
+fn next_incomplete(completed: &[bool], current: usize) -> Option<usize> {
+    let len = completed.len();
+    if len == 0 {
+        return None;
+    }
+    let start = (current + 1) % len;
+    (0..len)
+        .map(|offset| (start + offset) % len)
+        .find(|index| !completed.get(*index).copied().unwrap_or(false))
+}
+
+/// Map a digit key to a camera-bookmark slot (Ctrl+1..4).
+fn bookmark_slot(text: &str) -> Option<usize> {
+    match text {
+        "1" => Some(0),
+        "2" => Some(1),
+        "3" => Some(2),
+        "4" => Some(3),
+        _ => None,
+    }
+}
+
+/// Deterministic skirmish map used for the setup-screen preview.
+fn ra_setup_preview(size: u32) -> cnc_red_alert::Map {
+    cnc_red_alert::Map::new(size, size)
+}
+
+/// Draw a terrain/ore preview of the skirmish map on the setup screen.
+fn draw_ra_setup_preview(
+    renderer: &mut dyn Renderer,
+    map: &cnc_red_alert::Map,
+    x: f32,
+    y: f32,
+    size: f32,
+) {
+    let (step, scale) = minimap_layout(map.width, map.height, size);
+    let panel_w = map.width as f32 * scale;
+    let panel_h = map.height as f32 * scale;
+    renderer.draw_rect(x - 4.0, y - 4.0, panel_w + 8.0, panel_h + 8.0, [0.03, 0.04, 0.06, 1.0]);
+    for py in (0..map.height).step_by(step as usize) {
+        for px in (0..map.width).step_by(step as usize) {
+            let index = py as usize * map.width as usize + px as usize;
+            let Some(terrain) = map.terrain.get(index).copied() else {
+                continue;
+            };
+            let mut color = terrain.color();
+            if map.ore.get(index).copied().unwrap_or(0) > 0 {
+                color = [0.62, 0.55, 0.18, 1.0];
+            }
+            renderer.draw_rect(
+                x + px as f32 * scale,
+                y + py as f32 * scale,
+                scale * step as f32,
+                scale * step as f32,
+                color,
+            );
+        }
+    }
+    renderer.draw_text("MAP PREVIEW", x, y - 14.0, 9.0, [0.60, 0.75, 0.95, 1.0]);
+}
+
+fn draw_ra_setup(
+    renderer: &mut dyn Renderer,
+    setup: &SkirmishSetup,
+    width: u32,
+    height: u32,
+) {
+    let w = width as f32;
+    let h = height as f32;
+    renderer.draw_rect(0.0, 0.0, w, h, [0.04, 0.05, 0.08, 1.0]);
+    renderer.draw_rect(0.0, 112.0, w, 2.0, [0.25, 0.45, 0.75, 1.0]);
+    renderer.draw_text("RED ALERT", 60.0, 42.0, 30.0, [0.95, 0.55, 0.35, 1.0]);
+    renderer.draw_text(
+        "Skirmish Setup",
+        60.0,
+        84.0,
+        15.0,
+        [0.85, 0.90, 1.0, 1.0],
+    );
+    let rows = [
+        format!(
+            "Map size: {} x {}          (+ / -)",
+            setup.map_size, setup.map_size
+        ),
+        format!(
+            "Side: {}          (S)",
+            if setup.side == 0 { "Allies" } else { "Soviet" }
+        ),
+        format!("Your country: {}          (Tab)", setup.country.label()),
+        format!(
+            "AI difficulty: {}          (D)",
+            DIFFICULTY_NAMES[setup.difficulty]
+        ),
+        String::new(),
+        "N: network skirmish (host / join)".to_string(),
+        "Enter: start skirmish".to_string(),
+        "Esc: quit".to_string(),
+    ];
+    let mut y = 160.0;
+    for (index, row) in rows.iter().enumerate() {
+        let color = if index >= 5 {
+            [0.70, 0.80, 0.92, 1.0]
+        } else {
+            [0.90, 0.93, 0.98, 1.0]
+        };
+        renderer.draw_text(row, 60.0, y, 12.0, color);
+        y += 28.0;
+    }
+    let preview = ra_setup_preview(setup.map_size);
+    draw_ra_setup_preview(
+        renderer,
+        &preview,
+        (w - 320.0).max(60.0),
+        150.0,
+        280.0,
+    );
+    renderer.draw_text(
+        "RA skirmish: Allied vs Soviet, AI builds and attacks.",
+        60.0,
+        h - 60.0,
+        9.0,
+        [0.55, 0.65, 0.78, 1.0],
+    );
+}
+
+/// Host/join lobby screen shared by the TD and RA network modes.
+fn draw_net_lobby(
+    renderer: &mut dyn Renderer,
+    title: &str,
+    lobby: &NetLobby,
+    scan: Option<&LanScan>,
+    error: Option<&str>,
+    width: u32,
+    height: u32,
+) {
+    let w = width as f32;
+    let h = height as f32;
+    renderer.draw_rect(0.0, 0.0, w, h, [0.04, 0.05, 0.08, 1.0]);
+    renderer.draw_rect(0.0, 112.0, w, 2.0, [0.25, 0.45, 0.75, 1.0]);
+    renderer.draw_text(title, 60.0, 42.0, 30.0, [0.95, 0.55, 0.35, 1.0]);
+    renderer.draw_text(
+        "Network Lobby - Host / Join",
+        60.0,
+        84.0,
+        15.0,
+        [0.85, 0.90, 1.0, 1.0],
+    );
+
+    let (address_label, address) = match lobby.role {
+        NetRole::Host => ("Peer address", lobby.peer_address.as_str()),
+        NetRole::Join => ("Host address", lobby.join_address.as_str()),
+    };
+    let port = match lobby.role {
+        NetRole::Host => lobby.host_port,
+        NetRole::Join => lobby.join_port,
+    };
+    let editing = if lobby.focus == 0 {
+        "    (editing - Tab to leave)"
+    } else {
+        ""
+    };
+    let rows = [
+        format!("Role: {}    (R)", lobby.role_label()),
+        format!("Local port: {}    ([ / ])", port),
+        format!("{address_label}: {address}_ {editing}"),
+        String::new(),
+        "Tab: switch field   Backspace: delete".to_string(),
+        "L: scan LAN   Up/Down: pick host".to_string(),
+        "Enter: start network game".to_string(),
+        "Esc: stop scan / back to setup".to_string(),
+    ];
+    let mut y = 160.0;
+    for (index, row) in rows.iter().enumerate() {
+        let color = if index >= 4 {
+            [0.70, 0.80, 0.92, 1.0]
+        } else {
+            [0.90, 0.93, 0.98, 1.0]
+        };
+        renderer.draw_text(row, 60.0, y, 12.0, color);
+        y += 28.0;
+    }
+    let mut lan_y = y + 6.0;
+    renderer.draw_text("LAN HOSTS", 60.0, lan_y, 10.0, [0.60, 0.75, 0.95, 1.0]);
+    lan_y += 14.0;
+    match scan {
+        None => {
+            renderer.draw_text(
+                "Press L to listen for host beacons.",
+                60.0,
+                lan_y,
+                9.0,
+                [0.55, 0.65, 0.78, 1.0],
+            );
+        }
+        Some(scan) if scan.hosts.is_empty() => {
+            renderer.draw_text(
+                "Scanning UDP 47890... waiting for a host.",
+                60.0,
+                lan_y,
+                9.0,
+                [0.80, 0.75, 0.50, 1.0],
+            );
+        }
+        Some(scan) => {
+            for (index, host) in scan.hosts.iter().take(5).enumerate() {
+                let selected = index == scan.selected;
+                let color = if selected {
+                    [0.55, 0.95, 0.65, 1.0]
+                } else {
+                    [0.82, 0.88, 0.96, 1.0]
+                };
+                renderer.draw_text(
+                    &format!("{}{}", if selected { "> " } else { "  " }, host.label),
+                    60.0,
+                    lan_y,
+                    9.0,
+                    color,
+                );
+                lan_y += 12.0;
+            }
+        }
+    }
+    renderer.draw_text(
+        match lobby.role {
+            NetRole::Host => "Host: peer address is the JOIN player's address (e.g. 127.0.0.1:47871).",
+            NetRole::Join => "Join: host address is the HOST player's address (e.g. 127.0.0.1:47870).",
+        },
+        60.0,
+        h - 84.0,
+        9.0,
+        [0.55, 0.65, 0.78, 1.0],
+    );
+    if let Some(error) = error {
+        renderer.draw_text(
+            &format!("Network error: {error}"),
+            60.0,
+            h - 60.0,
+            9.0,
+            [1.0, 0.50, 0.45, 1.0],
+        );
+    }
+}
+
+fn draw_mission_emblem(
+    renderer: &mut dyn Renderer,
+    x: f32,
+    y: f32,
+    size: f32,
+    player: usize,
+    index: usize,
+) {
+    let color = if player == 0 {
+        [0.24, 0.44, 0.85, 1.0]
+    } else {
+        [0.78, 0.20, 0.18, 1.0]
+    };
+    let cell = size / 7.0;
+    let rows = [(3, 1), (2, 3), (1, 5), (1, 5), (2, 3), (3, 1)];
+    for (row, (offset, width)) in rows.iter().enumerate() {
+        renderer.draw_rect(
+            x + *offset as f32 * cell,
+            y + row as f32 * cell,
+            *width as f32 * cell,
+            cell,
+            color,
+        );
+    }
+    renderer.draw_rect(x + 0.0, y + 6.0 * cell, size, 1.5, [0.85, 0.75, 0.35, 1.0]);
+    renderer.draw_text(
+        &format!("{:02}", index + 1),
+        x + size * 0.34,
+        y + size * 0.36,
+        size * 0.24,
+        [0.98, 0.97, 0.92, 1.0],
+    );
+}
+
+fn draw_ra_campaign(
+    renderer: &mut dyn Renderer,
+    campaign: &[CampaignEntry],
+    selected: usize,
+    completed: &[bool],
+    best_times: &[Option<i32>],
+    replay_prompt: bool,
+    difficulty: usize,
+    filter: CampaignFilter,
+    width: u32,
+    height: u32,
+) {
+    let w = width as f32;
+    let h = height as f32;
+    renderer.draw_rect(0.0, 0.0, w, h, [0.04, 0.05, 0.08, 1.0]);
+    renderer.draw_rect(0.0, 112.0, w, 2.0, [0.25, 0.45, 0.75, 1.0]);
+    renderer.draw_text("RED ALERT", 60.0, 42.0, 30.0, [0.95, 0.55, 0.35, 1.0]);
+    renderer.draw_text(
+        "Campaign - Select Mission",
+        60.0,
+        84.0,
+        15.0,
+        [0.85, 0.90, 1.0, 1.0],
+    );
+    if campaign.is_empty() {
+        renderer.draw_text(
+            "No missions found. Pass --campaign DIR.",
+            60.0,
+            160.0,
+            12.0,
+            [0.95, 0.70, 0.45, 1.0],
+        );
+    } else {
+        let mut y = 150.0;
+        let visible: Vec<usize> = (0..campaign.len())
+            .filter(|index| match filter {
+                CampaignFilter::All => true,
+                CampaignFilter::Incomplete => !completed.get(*index).copied().unwrap_or(false),
+                CampaignFilter::Completed => completed.get(*index).copied().unwrap_or(false),
+            })
+            .collect();
+        if visible.is_empty() {
+            renderer.draw_text(
+                "No missions match this filter.",
+                60.0,
+                y,
+                12.0,
+                [0.90, 0.75, 0.55, 1.0],
+            );
+            y += 24.0;
+        }
+        for index in visible {
+            let entry = &campaign[index];
+            let index = index as usize;
+            let done = completed.get(index).copied().unwrap_or(false);
+            let color = if index == selected {
+                [1.0, 0.90, 0.45, 1.0]
+            } else if done {
+                [0.60, 0.85, 0.65, 1.0]
+            } else {
+                [0.82, 0.87, 0.94, 1.0]
+            };
+            let prefix = if index == selected { "> " } else { "  " };
+            let best = best_times
+                .get(index)
+                .and_then(|seconds| *seconds)
+                .map_or_else(|| "--".to_string(), |seconds| format!("{seconds}s"));
+            renderer.draw_text(
+                &format!(
+                    "{prefix}{} {}. {}    best {}",
+                    if done { "[x]" } else { "[ ]" },
+                    index + 1,
+                    entry.name,
+                    best
+                ),
+                60.0,
+                y,
+                12.0,
+                color,
+            );
+            y += 24.0;
+        }
+        renderer.draw_text(
+            &format!(
+                "Difficulty: {} (D)    Filter: {} (F)",
+                DIFFICULTY_NAMES[difficulty],
+                filter.label()
+            ),
+            60.0,
+            y + 4.0,
+            10.0,
+            [0.75, 0.82, 0.92, 1.0],
+        );
+        y += 24.0;
+        if let Some(entry) = campaign.get(selected) {
+            draw_mission_emblem(renderer, 420.0, 140.0, 96.0, entry.player, selected);
+            y += 10.0;
+            renderer.draw_text(
+                &format!(
+                    "Side: {}",
+                    if entry.player == 0 { "Allies" } else { "Soviet" }
+                ),
+                60.0,
+                y,
+                10.0,
+                [0.75, 0.82, 0.92, 1.0],
+            );
+            y += 18.0;
+            renderer.draw_text(
+                &format!(
+                    "Map: {}x{}    Objectives: {}    Triggers: {}",
+                    entry.width,
+                    entry.height,
+                    entry.objectives.len(),
+                    entry.triggers
+                ),
+                60.0,
+                y,
+                10.0,
+                [0.72, 0.80, 0.90, 1.0],
+            );
+            y += 18.0;
+            if !entry.briefing.is_empty() {
+                renderer.draw_text(
+                    &format!("Briefing: {}", entry.briefing),
+                    60.0,
+                    y,
+                    10.0,
+                    [0.85, 0.82, 0.65, 1.0],
+                );
+                y += 16.0;
+            }
+            for objective in entry.objectives.iter().take(3) {
+                renderer.draw_text(
+                    &format!("- {objective}"),
+                    60.0,
+                    y,
+                    9.0,
+                    [0.72, 0.82, 0.92, 1.0],
+                );
+                y += 14.0;
+            }
+
+            if !entry.terrain.is_empty() && entry.width > 0 && entry.height > 0 {
+                let preview_w = 240.0f32;
+                let preview_h = (preview_w * entry.height as f32 / entry.width as f32)
+                    .clamp(90.0, 180.0);
+                let preview_x = 60.0;
+                let preview_y = y + 12.0;
+                let cell_w = preview_w / entry.width as f32;
+                let cell_h = preview_h / entry.height as f32;
+                let step = ((entry.width.max(entry.height) as f32 / 80.0).ceil() as u32).max(1);
+                let block_w = (cell_w * step as f32).max(1.0);
+                let block_h = (cell_h * step as f32).max(1.0);
+                let mut py = 0u32;
+                while py < entry.height {
+                    let mut px = 0u32;
+                    while px < entry.width {
+                        let index = py as usize * entry.width as usize + px as usize;
+                        let terrain = entry.terrain.get(index).copied().unwrap_or(0);
+                        let color = match terrain {
+                            1 => [0.10, 0.24, 0.48, 1.0],
+                            2 => [0.56, 0.50, 0.32, 1.0],
+                            4 => [0.38, 0.38, 0.40, 1.0],
+                            _ => [0.22, 0.36, 0.20, 1.0],
+                        };
+                        renderer.draw_rect(
+                            preview_x + px as f32 * cell_w,
+                            preview_y + py as f32 * cell_h,
+                            block_w,
+                            block_h,
+                            color,
+                        );
+                        if entry.ore.get(index).copied().unwrap_or(0) > 0 {
+                            renderer.draw_rect(
+                                preview_x + px as f32 * cell_w + block_w * 0.25,
+                                preview_y + py as f32 * cell_h + block_h * 0.25,
+                                (block_w * 0.5).max(1.0),
+                                (block_h * 0.5).max(1.0),
+                                [0.85, 0.72, 0.22, 1.0],
+                            );
+                        }
+                        px += step;
+                    }
+                    py += step;
+                }
+                let border = [0.35, 0.50, 0.65, 1.0];
+                renderer.draw_rect(preview_x, preview_y, preview_w, 1.0, border);
+                renderer.draw_rect(preview_x, preview_y + preview_h - 1.0, preview_w, 1.0, border);
+                renderer.draw_rect(preview_x, preview_y, 1.0, preview_h, border);
+                renderer.draw_rect(preview_x + preview_w - 1.0, preview_y, 1.0, preview_h, border);
+            }
+        }
+    }
+    renderer.draw_text(
+        "Up/Down: select   Enter: deploy   D: difficulty   F: filter   S: stats   Esc: quit",
+        60.0,
+        h - 60.0,
+        10.0,
+        [0.65, 0.72, 0.82, 1.0],
+    );
+
+    if replay_prompt {
+        let box_w = 400.0f32;
+        let box_h = 90.0f32;
+        let box_x = (w - box_w) * 0.5;
+        let box_y = (h - box_h) * 0.5;
+        renderer.draw_rect(box_x, box_y, box_w, box_h, [0.07, 0.09, 0.13, 1.0]);
+        renderer.draw_rect(box_x, box_y, box_w, 2.0, [0.85, 0.70, 0.30, 1.0]);
+        renderer.draw_text(
+            "Mission already cleared. Replay?",
+            box_x + 16.0,
+            box_y + 18.0,
+            11.0,
+            [0.95, 0.90, 0.70, 1.0],
+        );
+        renderer.draw_text(
+            "Enter: replay    Esc: cancel",
+            box_x + 16.0,
+            box_y + 52.0,
+            10.0,
+            [0.75, 0.82, 0.92, 1.0],
+        );
+    }
+}
+
+fn draw_ra_campaign_stats(
+    renderer: &mut dyn Renderer,
+    campaign: &[CampaignEntry],
+    completed: &[bool],
+    best_times: &[Option<i32>],
+    difficulty: usize,
+    width: u32,
+    height: u32,
+) {
+    let w = width as f32;
+    let h = height as f32;
+    renderer.draw_rect(0.0, 0.0, w, h, [0.04, 0.05, 0.08, 1.0]);
+    renderer.draw_rect(0.0, 112.0, w, 2.0, [0.25, 0.45, 0.75, 1.0]);
+    renderer.draw_text("CAMPAIGN STATS", 60.0, 42.0, 26.0, [0.95, 0.55, 0.35, 1.0]);
+    let cleared = completed.iter().filter(|done| **done).count();
+    renderer.draw_text(
+        &format!(
+            "{cleared}/{} missions cleared    Difficulty: {}",
+            campaign.len(),
+            DIFFICULTY_NAMES[difficulty]
+        ),
+        60.0,
+        92.0,
+        13.0,
+        [0.90, 0.93, 0.98, 1.0],
+    );
+
+    let mut y = 136.0;
+    let mut total = 0i32;
+    for (index, entry) in campaign.iter().enumerate() {
+        let done = completed.get(index).copied().unwrap_or(false);
+        let best = best_times.get(index).and_then(|seconds| *seconds);
+        if let Some(seconds) = best {
+            total += seconds;
+        }
+        let color = if done {
+            [0.60, 0.85, 0.65, 1.0]
+        } else {
+            [0.82, 0.87, 0.94, 1.0]
+        };
+        renderer.draw_text(
+            &format!(
+                "{} {}. {}    {}",
+                if done { "[x]" } else { "[ ]" },
+                index + 1,
+                entry.name,
+                best.map_or_else(|| "--".to_string(), |seconds| format!("{seconds}s"))
+            ),
+            60.0,
+            y,
+            11.0,
+            color,
+        );
+        y += 22.0;
+    }
+    renderer.draw_text(
+        &format!("Total best time: {total}s"),
+        60.0,
+        y + 6.0,
+        11.0,
+        [0.85, 0.82, 0.65, 1.0],
+    );
+    renderer.draw_text(
+        "Enter/Esc: back to mission select",
+        60.0,
+        h - 60.0,
+        10.0,
+        [0.70, 0.80, 0.92, 1.0],
+    );
+}
+
+fn draw_ra_campaign_complete(
+    renderer: &mut dyn Renderer,
+    missions: usize,
+    elapsed_seconds: i32,
+    width: u32,
+    height: u32,
+) {
+    let w = width as f32;
+    let h = height as f32;
+    renderer.draw_rect(0.0, 0.0, w, h, [0.04, 0.05, 0.08, 1.0]);
+    renderer.draw_rect(0.0, 112.0, w, 2.0, [0.25, 0.45, 0.75, 1.0]);
+    renderer.draw_text(
+        "CAMPAIGN COMPLETE",
+        60.0,
+        42.0,
+        28.0,
+        [0.55, 1.0, 0.60, 1.0],
+    );
+    renderer.draw_text(
+        &format!("All {missions} missions cleared"),
+        60.0,
+        92.0,
+        14.0,
+        [0.90, 0.93, 0.98, 1.0],
+    );
+    renderer.draw_text(
+        &format!("Final mission time: {elapsed_seconds}s"),
+        60.0,
+        126.0,
+        11.0,
+        [0.72, 0.80, 0.90, 1.0],
+    );
+    renderer.draw_text(
+        "Enter: mission select    Esc: quit",
+        60.0,
+        h - 60.0,
+        11.0,
+        [0.70, 0.80, 0.92, 1.0],
+    );
+}
+
+/// Minimap step and per-cell scale for a map of `map_w x map_h` cells.
+fn minimap_layout(map_w: u32, map_h: u32, size: f32) -> (u32, f32) {
+    let max_dim = map_w.max(map_h).max(1);
+    let step = ((max_dim as f32 / 48.0).ceil() as u32).max(1);
+    (step, size / max_dim as f32)
+}
+
+/// Top-left corner and size of a minimap panel inside the visible world area.
+fn minimap_origin(
+    map_w: u32,
+    map_h: u32,
+    left: f32,
+    top: f32,
+    view_w: f32,
+    view_h: f32,
+    bottom_right: bool,
+) -> (f32, f32, f32, f32) {
+    let (_, scale) = minimap_layout(map_w, map_h, 150.0);
+    let panel_w = map_w.max(1) as f32 * scale;
+    let panel_h = map_h.max(1) as f32 * scale;
+    let x = if bottom_right {
+        left + view_w - panel_w - 18.0
+    } else {
+        left + 18.0
+    };
+    let y = top + view_h - panel_h - 18.0;
+    (x, y, panel_w, panel_h)
+}
+
+/// Map cell under a world position on a minimap, if the click hit the panel.
+fn minimap_cell_at(
+    world: Vec2,
+    map_w: u32,
+    map_h: u32,
+    left: f32,
+    top: f32,
+    view_w: f32,
+    view_h: f32,
+    bottom_right: bool,
+) -> Option<Vec2i> {
+    let (x, y, panel_w, panel_h) = minimap_origin(map_w, map_h, left, top, view_w, view_h, bottom_right);
+    let rel_x = world.x.to_f32() - x;
+    let rel_y = world.y.to_f32() - y;
+    if rel_x < 0.0 || rel_y < 0.0 || rel_x >= panel_w || rel_y >= panel_h {
+        return None;
+    }
+    let (_, scale) = minimap_layout(map_w, map_h, 150.0);
+    Some(Vec2i::new(
+        (rel_x / scale).floor() as i32,
+        (rel_y / scale).floor() as i32,
+    ))
+}
+
+/// Bottom-right terrain/unit minimap for the RA game view.
+fn draw_ra_minimap(
+    renderer: &mut dyn Renderer,
+    game: &RaGame,
+    player: usize,
+    center: Vec2,
+    view_w: f32,
+    view_h: f32,
+    left: f32,
+    top: f32,
+    hud_w: f32,
+    hud_h: f32,
+) {
+    let map_w = game.map.width.max(1);
+    let map_h = game.map.height.max(1);
+    let (step, scale) = minimap_layout(map_w, map_h, 150.0);
+    let (x, y, panel_w, panel_h) =
+        minimap_origin(map_w, map_h, left, top, hud_w, hud_h, true);
+    renderer.draw_rect(x - 4.0, y - 4.0, panel_w + 8.0, panel_h + 8.0, [0.02, 0.03, 0.05, 1.0]);
+    for py in (0..map_h).step_by(step as usize) {
+        for px in (0..map_w).step_by(step as usize) {
+            let index = py as usize * map_w as usize + px as usize;
+            let terrain = game.map.terrain.get(index).copied().unwrap_or(cnc_red_alert::Terrain::Grass);
+            let mut color = terrain.color();
+            if game.map.ore.get(index).copied().unwrap_or(0) > 0 {
+                color = [0.62, 0.55, 0.18, 1.0];
+            }
+            renderer.draw_rect(
+                x + px as f32 * scale,
+                y + py as f32 * scale,
+                scale * step as f32,
+                scale * step as f32,
+                color,
+            );
+        }
+    }
+    for structure in &game.structures {
+        if !structure.is_alive() {
+            continue;
+        }
+        let color = if structure.owner == player {
+            [0.35, 0.85, 1.0, 1.0]
+        } else {
+            [1.0, 0.35, 0.30, 1.0]
+        };
+        renderer.draw_rect(
+            x + structure.cell.x as f32 * scale,
+            y + structure.cell.y as f32 * scale,
+            (scale * 2.0).max(2.0),
+            (scale * 2.0).max(2.0),
+            color,
+        );
+    }
+    for unit in &game.units {
+        if !unit.is_alive() {
+            continue;
+        }
+        let color = if unit.owner == player {
+            [0.65, 1.0, 0.75, 1.0]
+        } else {
+            [1.0, 0.55, 0.45, 1.0]
+        };
+        renderer.draw_rect(
+            x + unit.cell.x as f32 * scale,
+            y + unit.cell.y as f32 * scale,
+            scale.max(1.5),
+            scale.max(1.5),
+            color,
+        );
+    }
+    let view_left = (center.x.to_f32() - view_w * 0.5) / RA_TILE_SIZE;
+    let view_top = (center.y.to_f32() - view_h * 0.5) / RA_TILE_SIZE;
+    let view_cells_w = view_w / RA_TILE_SIZE;
+    let view_cells_h = view_h / RA_TILE_SIZE;
+    let border = [0.95, 0.90, 0.75, 1.0];
+    renderer.draw_rect(x + view_left * scale, y + view_top * scale, view_cells_w * scale, 1.0, border);
+    renderer.draw_rect(
+        x + view_left * scale,
+        y + (view_top + view_cells_h) * scale - 1.0,
+        view_cells_w * scale,
+        1.0,
+        border,
+    );
+    renderer.draw_rect(x + view_left * scale, y + view_top * scale, 1.0, view_cells_h * scale, border);
+    renderer.draw_rect(
+        x + (view_left + view_cells_w) * scale - 1.0,
+        y + view_top * scale,
+        1.0,
+        view_cells_h * scale,
+        border,
+    );
+    renderer.draw_text("MINIMAP", x, y - 13.0, 8.0, [0.60, 0.75, 0.95, 1.0]);
+}
+
+fn draw_ra_pause(
+    renderer: &mut dyn Renderer,
+    game: &RaGame,
+    choice: usize,
+    save_slot: usize,
+    slot_label: &str,
+    width: u32,
+    height: u32,
+) {
+    let w = width as f32;
+    let h = height as f32;
+    renderer.draw_rect(0.0, 0.0, w, h, [0.02, 0.03, 0.05, 1.0]);
+    let panel_w = 420.0f32;
+    let panel_h = 240.0f32;
+    let panel_x = (w - panel_w) * 0.5;
+    let panel_y = (h - panel_h) * 0.5;
+    renderer.draw_rect(panel_x, panel_y, panel_w, panel_h, [0.07, 0.09, 0.13, 1.0]);
+    renderer.draw_rect(panel_x, panel_y, panel_w, 2.0, [0.35, 0.55, 0.85, 1.0]);
+    renderer.draw_text("PAUSED", panel_x + 24.0, panel_y + 20.0, 22.0, [0.95, 0.85, 0.60, 1.0]);
+    renderer.draw_text(
+        &format!(
+            "t={}s   {} units   {} structures   {} credits",
+            game.elapsed.int(),
+            game.units.len(),
+            game.structures.len(),
+            game.houses
+                .get(game.player_owner)
+                .map_or(0, |house| house.credits)
+        ),
+        panel_x + 24.0,
+        panel_y + 58.0,
+        10.0,
+        [0.78, 0.86, 0.95, 1.0],
+    );
+    let options = vec![
+        "Resume".to_string(),
+        "Restart mission".to_string(),
+        "Abort to menu".to_string(),
+        "Save game".to_string(),
+        "Load game".to_string(),
+        format!("Save slot: {}/3 ({slot_label})", save_slot + 1),
+    ];
+    let mut y = panel_y + 96.0;
+    for (index, label) in options.iter().enumerate() {
+        let color = if index == choice {
+            [1.0, 0.90, 0.45, 1.0]
+        } else {
+            [0.78, 0.86, 0.95, 1.0]
+        };
+        renderer.draw_text(
+            &format!("{}{}", if index == choice { "> " } else { "  " }, label),
+            panel_x + 24.0,
+            y,
+            13.0,
+            color,
+        );
+        y += 26.0;
+    }
+    renderer.draw_text(
+        "Up/Down: choose   Enter: select   Esc: resume",
+        panel_x + 24.0,
+        panel_y + panel_h - 28.0,
+        9.0,
+        [0.65, 0.72, 0.82, 1.0],
+    );
+}
+
+fn draw_ra_briefing(
+    renderer: &mut dyn Renderer,
+    mission: &str,
+    game: &RaGame,
+    index: usize,
+    width: u32,
+    height: u32,
+) {
+    let w = width as f32;
+    let h = height as f32;
+    renderer.draw_rect(0.0, 0.0, w, h, [0.04, 0.05, 0.08, 1.0]);
+    renderer.draw_rect(0.0, 112.0, w, 2.0, [0.25, 0.45, 0.75, 1.0]);
+    renderer.draw_text("MISSION BRIEFING", 60.0, 42.0, 26.0, [0.95, 0.55, 0.35, 1.0]);
+    renderer.draw_text(mission, 60.0, 82.0, 15.0, [0.90, 0.93, 0.98, 1.0]);
+    draw_mission_emblem(
+        renderer,
+        w - 170.0,
+        34.0,
+        110.0,
+        game.player_owner,
+        index,
+    );
+    renderer.draw_text(
+        &format!(
+            "Side: {}",
+            if game.player_owner == 0 { "Allies" } else { "Soviet" }
+        ),
+        60.0,
+        112.0,
+        11.0,
+        [0.70, 0.80, 0.92, 1.0],
+    );
+
+    let mut y = 154.0;
+    if !game.briefing.is_empty() {
+        renderer.draw_text("BRIEFING", 60.0, y, 11.0, [0.60, 0.75, 0.95, 1.0]);
+        y += 18.0;
+        renderer.draw_text(&game.briefing, 60.0, y, 11.0, [0.88, 0.90, 0.95, 1.0]);
+        y += 28.0;
+    }
+    if !game.objectives.is_empty() {
+        renderer.draw_text("OBJECTIVES", 60.0, y, 11.0, [0.60, 0.75, 0.95, 1.0]);
+        y += 18.0;
+        for objective in &game.objectives {
+            renderer.draw_text(
+                &format!("- {}", objective.text),
+                60.0,
+                y,
+                11.0,
+                [0.82, 0.88, 0.96, 1.0],
+            );
+            y += 16.0;
+        }
+    }
+
+    renderer.draw_text(
+        "Enter: begin mission    Esc: quit",
+        60.0,
+        h - 60.0,
+        11.0,
+        [0.70, 0.80, 0.92, 1.0],
+    );
+}
+
 struct LauncherApp {
     kind: RendererKind,
     width: u32,
@@ -150,6 +1935,13 @@ struct LauncherApp {
     drag_start: Option<winit::dpi::PhysicalPosition<f64>>,
     drag_current: Option<winit::dpi::PhysicalPosition<f64>>,
     shift_down: bool,
+    ctrl_down: bool,
+    alt_down: bool,
+    bookmarks: [Option<Vec2>; 4],
+    control_groups: [Vec<usize>; 4],
+    selected_building: Option<usize>,
+    save_slot: usize,
+    game_speed: f32,
     frame_index: u64,
     last_produced: u64,
     last_harvested: i64,
@@ -159,6 +1951,30 @@ struct LauncherApp {
     last_frame: Instant,
     next_frame: Instant,
     software_warning_emitted: bool,
+    mission_dir: Option<PathBuf>,
+    mission_choices: Vec<TdChoice>,
+    mission_index: usize,
+    selecting_mission: bool,
+    td_completed: Vec<bool>,
+    td_best: Vec<Option<i32>>,
+    td_progress_path: PathBuf,
+    td_recorded: bool,
+    td_briefing_open: bool,
+    td_filter: CampaignFilter,
+    td_stats_open: bool,
+    td_complete: bool,
+    td_paused: bool,
+    td_pause_choice: usize,
+    td_notice: Option<(String, Instant)>,
+    /// True while the TD host/join lobby owns the screen.
+    td_lobby_open: bool,
+    td_lobby: NetLobby,
+    td_lobby_error: Option<String>,
+    td_lan_scan: Option<LanScan>,
+    /// Live lockstep session while a TD network match runs.
+    network: Option<TdNetwork>,
+    /// Set when a menu-owned screen wants the shell to reopen the main menu.
+    return_to_menu: bool,
 }
 
 impl LauncherApp {
@@ -169,6 +1985,7 @@ impl LauncherApp {
         let mut camera = Camera::default();
         camera.set_viewport(width.max(1), height.max(1));
         camera.position = game.world_center();
+        camera.zoom = Fixed16_16::from_f32(DEFAULT_GAME_ZOOM);
 
         Ok(Self {
             kind,
@@ -185,6 +2002,13 @@ impl LauncherApp {
             drag_start: None,
             drag_current: None,
             shift_down: false,
+            ctrl_down: false,
+            alt_down: false,
+            bookmarks: [None; 4],
+            control_groups: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            selected_building: None,
+            save_slot: 0,
+            game_speed: 1.0,
             frame_index: 0,
             last_produced: 0,
             last_harvested: 0,
@@ -194,23 +2018,32 @@ impl LauncherApp {
             last_frame: Instant::now(),
             next_frame: Instant::now() + FRAME_INTERVAL,
             software_warning_emitted: false,
+            mission_dir: None,
+            mission_choices: Vec::new(),
+            mission_index: 0,
+            selecting_mission: false,
+            td_completed: Vec::new(),
+            td_best: Vec::new(),
+            td_progress_path: default_td_progress_path(),
+            td_recorded: false,
+            td_briefing_open: false,
+            td_filter: CampaignFilter::All,
+            td_stats_open: false,
+            td_complete: false,
+            td_paused: false,
+            td_pause_choice: 0,
+            td_notice: None,
+            td_lobby_open: false,
+            td_lobby: NetLobby::td_default(),
+            td_lobby_error: None,
+            td_lan_scan: None,
+            network: None,
+            return_to_menu: false,
         })
     }
 
     fn create_renderer(&mut self, window: Arc<Window>) -> Box<dyn Renderer> {
-        match self.kind {
-            RendererKind::Wgpu => match pollster::block_on(WgpuRenderer::new(window)) {
-                Ok(renderer) => {
-                    tracing::info!("wgpu renderer initialized");
-                    Box::new(renderer)
-                }
-                Err(error) => {
-                    tracing::error!(%error, "wgpu renderer initialization failed; using software renderer");
-                    Box::new(SoftwareRenderer::new(self.width, self.height))
-                }
-            },
-            RendererKind::Software => Box::new(SoftwareRenderer::new(self.width, self.height)),
-        }
+        create_renderer(self.kind, self.width, self.height, window)
     }
 
     fn screen_to_world(&self, position: winit::dpi::PhysicalPosition<f64>) -> Vec2 {
@@ -224,10 +2057,768 @@ impl LauncherApp {
         self.cursor.map(|position| self.screen_to_world(position))
     }
 
-    fn sidebar(&self) -> Sidebar {
+    /// Map a world point from the zoomed game view into HUD space. The HUD is
+    /// drawn unzoomed, so clicks, hovers and minimap hit tests need this to line
+    /// up with the build menu and minimap.
+    fn hud_world(&self, world: Vec2) -> Vec2 {
+        let position = self.camera.position;
         let zoom = self.camera.zoom.to_f32().max(1.0e-6);
-        let half_w = self.camera.viewport_width as f32 / (2.0 * zoom);
-        let half_h = self.camera.viewport_height as f32 / (2.0 * zoom);
+        Vec2::new(
+            Fixed16_16::from_f32(
+                position.x.to_f32() + (world.x.to_f32() - position.x.to_f32()) * zoom,
+            ),
+            Fixed16_16::from_f32(
+                position.y.to_f32() + (world.y.to_f32() - position.y.to_f32()) * zoom,
+            ),
+        )
+    }
+
+    /// World under the cursor in HUD space (see hud_world).
+    fn hud_cursor_world(&self) -> Option<Vec2> {
+        self.cursor_world().map(|world| self.hud_world(world))
+    }
+
+    /// Zoom the TD world view by factor, anchored at the cursor.
+    fn zoom_td(&mut self, factor: f32) {
+        let world_w = self.game.map.width as f32 * cnc_tiberian_dawn::map::TILE_SIZE;
+        let world_h = self.game.map.height as f32 * cnc_tiberian_dawn::map::TILE_SIZE;
+        let anchor = self.cursor.map(|cursor| (cursor.x as f32, cursor.y as f32));
+        zoom_camera_at(&mut self.camera, anchor, factor, world_w, world_h);
+    }
+
+    /// Center the TD camera when a click lands on the bottom-left minimap.
+    fn td_minimap_click(&mut self, world: Vec2) -> bool {
+        let world = self.hud_world(world);
+        let view_w = self.camera.viewport_width as f32;
+        let view_h = self.camera.viewport_height as f32;
+        let left = self.camera.position.x.to_f32() - view_w * 0.5;
+        let top = self.camera.position.y.to_f32() - view_h * 0.5;
+        let Some(cell) = minimap_cell_at(
+            world,
+            self.game.map.width,
+            self.game.map.height,
+            left,
+            top,
+            view_w,
+            view_h,
+            false,
+        ) else {
+            return false;
+        };
+        self.camera.position = Vec2::new(
+            Fixed16_16::from_f32((cell.x as f32 + 0.5) * cnc_tiberian_dawn::map::TILE_SIZE),
+            Fixed16_16::from_f32((cell.y as f32 + 0.5) * cnc_tiberian_dawn::map::TILE_SIZE),
+        );
+        true
+    }
+
+    /// Pan the TD camera while the cursor rests near a window edge.
+    fn apply_td_edge_pan(&mut self, delta: f32) {
+        let Some(cursor) = self.cursor else {
+            return;
+        };
+        let (dx, dy) = edge_pan_direction(
+            cursor.x as f32,
+            cursor.y as f32,
+            self.width as f32,
+            self.height as f32,
+            8.0,
+        );
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
+        let zoom = self.camera.zoom.to_f32().max(1.0e-6);
+        let step = 520.0 * delta / zoom;
+        let max_x = self.game.map.width as f32 * cnc_tiberian_dawn::map::TILE_SIZE;
+        let max_y = self.game.map.height as f32 * cnc_tiberian_dawn::map::TILE_SIZE;
+        self.camera.position = Vec2::new(
+            Fixed16_16::from_f32(
+                (self.camera.position.x.to_f32() + dx * step).clamp(0.0, max_x),
+            ),
+            Fixed16_16::from_f32(
+                (self.camera.position.y.to_f32() + dy * step).clamp(0.0, max_y),
+            ),
+        );
+    }
+
+    /// Repair the selected TD building, paying for missing health.
+    fn repair_selected_building(&mut self) {
+        let Some(index) = self.selected_building else {
+            return;
+        };
+        let player = self.game.player_owner;
+        match self.game.repair_building(player, index) {
+            Some(cost) => {
+                self.td_notice = Some((
+                    format!("Building repaired (-{cost} credits)"),
+                    Instant::now(),
+                ));
+                tracing::info!(index, cost, "TD building repaired");
+            }
+            None => {
+                self.td_notice = Some(("No repair needed".to_string(), Instant::now()));
+            }
+        }
+    }
+
+    /// Cycle through the three TD save slots.
+    fn cycle_td_save_slot(&mut self) {
+        self.save_slot = (self.save_slot + 1) % 3;
+        self.td_notice = Some((
+            format!("Save slot {}/3", self.save_slot + 1),
+            Instant::now(),
+        ));
+    }
+
+    /// Leave the TD campaign-complete screen.
+    fn dismiss_td_campaign_complete(&mut self) {
+        self.td_complete = false;
+        self.selecting_mission = !self.mission_choices.is_empty();
+    }
+
+    /// Cancel the front TD production item.
+    fn cancel_td_production(&mut self) {
+        let player = self.game.player_owner;
+        match self.game.cancel_production(player) {
+            Some(cost) => {
+                self.td_notice = Some((
+                    format!("Production cancelled (+{cost} credits)"),
+                    Instant::now(),
+                ));
+            }
+            None => {
+                self.td_notice = Some(("No production to cancel".to_string(), Instant::now()));
+            }
+        }
+    }
+
+    /// Sell the building selected by a left click (TD).
+    fn sell_selected_building(&mut self) {
+        let Some(index) = self.selected_building.take() else {
+            return;
+        };
+        let player = self.game.player_owner;
+        match self.game.sell_building(player, index) {
+            Some(refund) => {
+                self.td_notice = Some((
+                    format!("Building sold (+{refund} credits)"),
+                    Instant::now(),
+                ));
+                tracing::info!(index, refund, "TD building sold");
+            }
+            None => {
+                self.td_notice = Some(("No building to sell".to_string(), Instant::now()));
+            }
+        }
+    }
+
+    /// Adjust the TD simulation speed (0.25x .. 3x).
+    fn adjust_td_speed(&mut self, delta: f32) {
+        self.game_speed = (self.game_speed + delta).clamp(0.25, 3.0);
+        self.td_notice = Some((format!("Game speed {:.2}x", self.game_speed), Instant::now()));
+    }
+
+    /// Store the selected TD units in a control group (by unit index).
+    fn store_td_control_group(&mut self, slot: usize) {
+        let player = self.game.player_owner;
+        let indices: Vec<usize> = self
+            .game
+            .units
+            .iter()
+            .enumerate()
+            .filter(|(_, unit)| unit.is_selected && unit.owner == player && unit.is_alive())
+            .map(|(index, _)| index)
+            .collect();
+        if let Some(group) = self.control_groups.get_mut(slot) {
+            *group = indices;
+            self.td_notice = Some((format!("Group {} stored", slot + 1), Instant::now()));
+        }
+    }
+
+    /// Recall a stored TD control group; false when the slot is empty.
+    fn recall_td_control_group(&mut self, slot: usize) -> bool {
+        let Some(indices) = self.control_groups.get(slot).cloned() else {
+            return false;
+        };
+        if indices.is_empty() {
+            return false;
+        }
+        let player = self.game.player_owner;
+        for (index, unit) in self.game.units.iter_mut().enumerate() {
+            unit.is_selected = indices.contains(&index) && unit.owner == player && unit.is_alive();
+        }
+        self.td_notice = Some((format!("Group {} recalled", slot + 1), Instant::now()));
+        true
+    }
+
+    /// Store the current camera view in a bookmark slot.
+    fn save_td_bookmark(&mut self, slot: usize) {
+        if let Some(bookmark) = self.bookmarks.get_mut(slot) {
+            *bookmark = Some(self.camera.position);
+            self.td_notice = Some((format!("View {} saved", slot + 1), Instant::now()));
+        }
+    }
+
+    /// Jump to a stored camera bookmark; false when the slot is empty.
+    fn jump_td_bookmark(&mut self, slot: usize) -> bool {
+        if let Some(Some(position)) = self.bookmarks.get(slot).copied() {
+            self.camera.position = position;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn quick_save_path() -> PathBuf {
+        Self::quick_save_path_for(0)
+    }
+
+    fn quick_save_path_for(slot: usize) -> PathBuf {
+        let dir = std::env::var("CNC_SAVE_DIR").unwrap_or_else(|_| "saves".to_string());
+        let file = if slot == 0 {
+            "quicksave.sav".to_string()
+        } else {
+            format!("quicksave{}.sav", slot + 1)
+        };
+        PathBuf::from(dir).join(file)
+    }
+
+    fn quick_save(&mut self) -> bool {
+        let path = Self::quick_save_path_for(self.save_slot);
+        match self.game.save_to_file(&path) {
+            Ok(()) => {
+                self.td_notice = Some(("Game saved".to_string(), Instant::now()));
+                tracing::info!(path = %path.display(), "quicksave written");
+                true
+            }
+            Err(error) => {
+                self.td_notice = Some((format!("Save failed: {error}"), Instant::now()));
+                tracing::warn!(%error, "quicksave failed");
+                false
+            }
+        }
+    }
+
+    fn quick_load(&mut self) -> bool {
+        let path = Self::quick_save_path_for(self.save_slot);
+        match Game::load_from_file(&path) {
+            Ok(game) => {
+                self.game = game;
+                self.camera.position = self.game.world_center();
+                self.last_produced = self.game.units_produced;
+                self.last_harvested = self.game.harvested_credits;
+                self.last_aircraft_shots = self.game.aircraft_shots;
+                self.last_aircraft_rearmed = self.game.aircraft_rearmed;
+                self.last_secondary_shots = self.game.secondary_shots;
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.set_camera(&self.camera);
+                }
+                self.td_notice = Some(("Game loaded".to_string(), Instant::now()));
+                tracing::info!(path = %path.display(), "quicksave loaded");
+                true
+            }
+            Err(error) => {
+                self.td_notice = Some((format!("Load failed: {error}"), Instant::now()));
+                tracing::warn!(%error, path = %path.display(), "quickload failed");
+                false
+            }
+        }
+    }
+
+    /// True once when a screen asks the shell to return to the main menu.
+    fn take_return_to_menu(&mut self) -> bool {
+        std::mem::take(&mut self.return_to_menu)
+    }
+
+    // ----- Tiberian Dawn network lobby and lockstep -----------------------
+
+    /// Open the TD host/join lobby (menu "Online Game" choice).
+    fn open_td_lobby(&mut self) {
+        self.td_lobby_open = true;
+        self.td_lobby_error = None;
+        self.td_lan_scan = None;
+        self.td_lobby.focus = 0;
+    }
+
+    fn td_network_active(&self) -> bool {
+        self.network.is_some()
+    }
+
+    fn toggle_td_lan_scan(&mut self) {
+        toggle_lan_scan(&mut self.td_lan_scan, &mut self.td_lobby_error);
+    }
+
+    fn poll_td_lan_scan(&mut self) {
+        poll_lan_scan_socket(&mut self.td_lan_scan);
+    }
+
+    /// Start the match described by the TD lobby fields.
+    fn start_td_lobby(&mut self) -> Result<()> {
+        let setup = match self.td_lobby.role {
+            NetRole::Host => NetworkSetup {
+                role: "host".to_string(),
+                join: None,
+                port: self.td_lobby.host_port,
+                peers: vec![self.td_lobby.peer_address.trim().to_string()],
+                bind: "0.0.0.0".to_string(),
+                advertised: None,
+            },
+            NetRole::Join => NetworkSetup {
+                role: "join".to_string(),
+                join: Some(self.td_lobby.join_address.trim().to_string()),
+                port: self.td_lobby.join_port,
+                peers: Vec::new(),
+                bind: "0.0.0.0".to_string(),
+                advertised: None,
+            },
+        };
+        self.td_lobby_error = None;
+        match self.enable_td_network(&setup) {
+            Ok(()) => {
+                self.td_lan_scan = None;
+                self.td_lobby_open = false;
+                self.td_notice = Some(("Network game started".to_string(), Instant::now()));
+                Ok(())
+            }
+            Err(error) => {
+                self.td_lobby_error = Some(error.to_string());
+                Ok(())
+            }
+        }
+    }
+
+    /// Bind the UDP socket and attach a live lockstep session to the TD view.
+    fn enable_td_network(&mut self, setup: &NetworkSetup) -> Result<()> {
+        let config = NetworkConfig {
+            bind_address: setup.bind.clone(),
+            port: setup.port,
+            advertised: setup.advertised.clone(),
+            max_players: 2,
+        };
+        config.validate().map_err(|error| anyhow!(error))?;
+        let local_player: u8 = match setup.role.as_str() {
+            "host" => 0,
+            "join" => 1,
+            other => return Err(anyhow!("unknown net role '{}' (host|join)", other)),
+        };
+        let bind = format!("{}:{}", setup.bind.trim(), setup.port);
+        let socket = UdpSocket::bind(&bind).with_context(|| format!("failed to bind {bind}"))?;
+        socket
+            .set_nonblocking(true)
+            .context("failed to make the network socket non-blocking")?;
+        let _ = socket.set_broadcast(true);
+        let local_address = socket.local_addr().ok();
+        let mut session = LiveSession::new(local_player, 2, local_address)
+            .map_err(|error| anyhow!("network session setup failed: {error:?}"))?;
+        if local_player == 0 {
+            let mut index = 0usize;
+            for peer in setup.peers.iter().filter(|peer| !peer.trim().is_empty()) {
+                let address = peer
+                    .parse::<SocketAddr>()
+                    .with_context(|| format!("invalid peer '{peer}'"))?;
+                session.register_peer((1 + index) as u8, address);
+                index += 1;
+            }
+        } else {
+            let host = setup
+                .join
+                .clone()
+                .ok_or_else(|| anyhow!("joining requires a host address"))?;
+            let address = host
+                .parse::<SocketAddr>()
+                .with_context(|| format!("invalid host address '{host}'"))?;
+            session.register_peer(0, address);
+        }
+        // Both clients rebuild the same demo so pre-match input cannot leak in.
+        let rules = self.game.rules.clone();
+        self.game = Game::with_rules("TD Network", MAP_SIZE, MAP_SIZE, rules);
+        self.game.setup_demo();
+        self.game.player_owner = local_player;
+        self.selecting_mission = false;
+        self.td_briefing_open = false;
+        self.td_stats_open = false;
+        self.td_complete = false;
+        self.td_paused = false;
+        self.selected_building = None;
+        self.camera.position = self.game.world_center();
+        let peers = session.peers.len();
+        self.network = Some(TdNetwork {
+            socket,
+            session,
+            last_tick: Instant::now(),
+            sent: 0,
+            applied: 0,
+            seen: HashSet::new(),
+            role: setup.role.clone(),
+            last_beacon: Instant::now(),
+        });
+        println!(
+            "td net role={} local_player={} addr={:?} peers={}",
+            setup.role, local_player, local_address, peers
+        );
+        tracing::info!(
+            role = %setup.role,
+            local_player,
+            peers,
+            "TD network session started"
+        );
+        Ok(())
+    }
+
+    /// Drain incoming datagrams and advance one lockstep frame on a timer.
+    fn poll_td_network(&mut self) {
+        let Some(net) = self.network.as_mut() else {
+            return;
+        };
+        let mut buffer = [0u8; 2048];
+        loop {
+            match net.socket.recv_from(&mut buffer) {
+                Ok((size, source)) => {
+                    if parse_chat_line(&buffer[..size]).is_some() {
+                        continue;
+                    }
+                    let event = net.session.handle_datagram(source, &buffer[..size]);
+                    match event {
+                        LiveEvent::Commands(packet) => {
+                            for command in &packet.commands {
+                                if !net.seen.insert(command.hash()) {
+                                    continue;
+                                }
+                                if apply_td_command(&mut self.game, command) {
+                                    net.applied += 1;
+                                }
+                            }
+                        }
+                        LiveEvent::Migration(_) | LiveEvent::Duplicate | LiveEvent::Invalid => {}
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => {
+                    tracing::warn!(%error, "TD network receive failed");
+                    break;
+                }
+            }
+        }
+
+        if net.role == "host" && net.last_beacon.elapsed() >= Duration::from_secs(2) {
+            net.last_beacon = Instant::now();
+            if let Ok(local) = net.socket.local_addr() {
+                let beacon = lan_beacon_text(local.port(), "TD");
+                for address in [
+                    std::net::Ipv4Addr::BROADCAST,
+                    std::net::Ipv4Addr::new(127, 255, 255, 255),
+                ] {
+                    let _ = net
+                        .socket
+                        .send_to(beacon.as_bytes(), (address, LAN_DISCOVERY_PORT));
+                }
+            }
+        }
+
+        if net.last_tick.elapsed() < Duration::from_millis(250) {
+            return;
+        }
+        net.last_tick = Instant::now();
+        match net.session.advance() {
+            Ok((_commands, bytes, targets)) => {
+                for target in targets {
+                    if net.socket.send_to(&bytes, target).is_ok() {
+                        net.sent += 1;
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(?error, "TD network packet encoding failed"),
+        }
+    }
+
+    /// Queue one local command for the next lockstep frame.
+    fn send_td_command(&mut self, command: NetCommandKind) {
+        if let Some(net) = self.network.as_mut() {
+            net.session.queue_local(command);
+        }
+    }
+
+    /// Queue a sidebar unit/structure locally and broadcast the same command.
+    fn queue_td_buildable(&mut self, buildable: Buildable) -> bool {
+        let player = self.game.player_owner;
+        let queued = match buildable {
+            Buildable::Unit(unit) => self.game.queue_unit(player, unit),
+            Buildable::Structure(structure) => self.game.queue_building(player, structure),
+        };
+        if queued {
+            self.send_td_command(td_produce_command(buildable));
+        }
+        queued
+    }
+
+    /// Place a completed structure locally and broadcast the placement.
+    fn place_td_building(&mut self, cell: Vec2i) -> bool {
+        let player = self.game.player_owner;
+        let placed = self.game.place_ready_building(player, cell);
+        if placed {
+            let tile = cnc_tiberian_dawn::map::TILE_SIZE;
+            let location = Vec2::new(
+                Fixed16_16::from_f32((cell.x as f32 + 0.5) * tile),
+                Fixed16_16::from_f32((cell.y as f32 + 0.5) * tile),
+            );
+            self.send_td_command(NetCommandKind::PlaceBuilding { location });
+        }
+        placed
+    }
+
+    /// Pause menu methods for the TD game view.
+    fn enter_td_pause(&mut self) {
+        self.td_paused = true;
+        self.td_pause_choice = 0;
+    }
+
+    fn activate_td_pause_choice(&mut self) {
+        match self.td_pause_choice {
+            0 => self.td_paused = false,
+            1 => {
+                self.quick_save();
+            }
+            2 => {
+                if self.quick_load() {
+                    self.td_paused = false;
+                }
+            }
+            3 => {
+                self.td_paused = false;
+                if self.mission_choices.is_empty() {
+                    // A skirmish has no mission selector to fall back to.
+                    self.return_to_menu = true;
+                } else {
+                    self.selecting_mission = true;
+                }
+            }
+            4 => self.cycle_td_save_slot(),
+            _ => {}
+        }
+    }
+
+    fn load_td_progress(&mut self) {
+        let Ok(text) = std::fs::read_to_string(&self.td_progress_path) else {
+            return;
+        };
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            match key.trim().to_ascii_lowercase().as_str() {
+                "completed" => {
+                    for index in value
+                        .split(',')
+                        .filter_map(|index| index.trim().parse::<usize>().ok())
+                    {
+                        if let Some(slot) = self.td_completed.get_mut(index) {
+                            *slot = true;
+                        }
+                    }
+                }
+                "besttimes" => {
+                    for entry in value.split(',') {
+                        let Some((index, seconds)) = entry.trim().split_once(':') else {
+                            continue;
+                        };
+                        let (Ok(index), Ok(seconds)) = (
+                            index.trim().parse::<usize>(),
+                            seconds.trim().parse::<i32>(),
+                        ) else {
+                            continue;
+                        };
+                        if let Some(slot) = self.td_best.get_mut(index) {
+                            *slot = Some(seconds);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn save_td_progress(&self) {
+        if let Some(parent) = self.td_progress_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        let completed: Vec<String> = self
+            .td_completed
+            .iter()
+            .enumerate()
+            .filter(|(_, done)| **done)
+            .map(|(index, _)| index.to_string())
+            .collect();
+        let best: Vec<String> = self
+            .td_best
+            .iter()
+            .enumerate()
+            .filter_map(|(index, seconds)| seconds.map(|seconds| format!("{index}:{seconds}")))
+            .collect();
+        if let Err(error) = std::fs::write(
+            &self.td_progress_path,
+            format!(
+                "[Campaign]\nCompleted={}\nBestTimes={}\n",
+                completed.join(","),
+                best.join(",")
+            ),
+        ) {
+            tracing::warn!(%error, "failed to save TD campaign progress");
+        }
+    }
+
+    /// Leave a finished TD mission: record it and return to the selector,
+    /// selecting the next mission after a victory.
+    fn finish_td_mission(&mut self) {
+        if self.game.mission.outcome.is_none() {
+            return;
+        }
+        self.record_mission_result();
+        let won = self.game.mission.outcome == Some(MissionOutcome::Victory);
+        self.td_briefing_open = false;
+        if won && self.td_completed.iter().all(|done| *done) {
+            self.td_complete = true;
+            self.selecting_mission = false;
+            return;
+        }
+        self.selecting_mission = true;
+        if won {
+            if let Some(next) = next_incomplete(&self.td_completed, self.mission_index) {
+                self.mission_index = next;
+            }
+        }
+        self.td_recorded = false;
+    }
+
+    fn record_mission_result(&mut self) {
+        if self.td_recorded || self.game.mission.outcome != Some(MissionOutcome::Victory) {
+            return;
+        }
+        let index = self.mission_index;
+        if let Some(slot) = self.td_completed.get_mut(index) {
+            *slot = true;
+        }
+        let elapsed = self.game.elapsed.int();
+        if let Some(slot) = self.td_best.get_mut(index) {
+            if slot.is_none_or(|best| elapsed < best) {
+                *slot = Some(elapsed);
+            }
+        }
+        self.td_recorded = true;
+        self.save_td_progress();
+        tracing::info!(mission = index + 1, elapsed, "TD mission complete");
+    }
+
+    fn load_mission_dir(&mut self, dir: &Path) -> Result<usize> {
+        self.mission_dir = Some(dir.to_path_buf());
+        self.mission_choices.clear();
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+            .with_context(|| format!("failed to read mission directory {}", dir.display()))?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("ini"))
+            })
+            .collect();
+        paths.sort();
+        for path in paths {
+            match Mission::from_file(&path) {
+                Ok(mission) => {
+                    let spawns = mission_spawns(&mission);
+                    self.mission_choices.push(TdChoice {
+                        path,
+                        name: mission.name,
+                        objectives: mission.objectives.len(),
+                        triggers: mission.triggers.len(),
+                        spawns,
+                    });
+                }
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), %error, "skipping invalid mission");
+                }
+            }
+        }
+        self.mission_index = 0;
+        self.selecting_mission = !self.mission_choices.is_empty();
+        let len = self.mission_choices.len();
+        self.td_completed = vec![false; len];
+        self.td_best = vec![None; len];
+        self.load_td_progress();
+        Ok(len)
+    }
+
+    fn td_visible(&self) -> Vec<usize> {
+        (0..self.mission_choices.len())
+            .filter(|index| match self.td_filter {
+                CampaignFilter::All => true,
+                CampaignFilter::Incomplete => {
+                    !self.td_completed.get(*index).copied().unwrap_or(false)
+                }
+                CampaignFilter::Completed => {
+                    self.td_completed.get(*index).copied().unwrap_or(false)
+                }
+            })
+            .collect()
+    }
+
+    fn cycle_mission(&mut self, delta: i32) {
+        let visible = self.td_visible();
+        if visible.is_empty() {
+            return;
+        }
+        let position = visible
+            .iter()
+            .position(|index| *index == self.mission_index)
+            .unwrap_or(0);
+        let len = visible.len() as i32;
+        let next = (((position as i32 + delta) % len) + len) % len;
+        self.mission_index = visible[next as usize];
+    }
+
+    fn cycle_td_filter(&mut self) {
+        self.td_filter = self.td_filter.next();
+        let visible = self.td_visible();
+        if !visible.is_empty() && !visible.contains(&self.mission_index) {
+            self.mission_index = visible[0];
+        }
+    }
+
+    fn activate_selected_mission(&mut self) -> Result<bool> {
+        let Some(choice) = self.mission_choices.get(self.mission_index).cloned() else {
+            return Ok(false);
+        };
+        let path = choice.path;
+        self.game
+            .load_mission(&path)
+            .with_context(|| format!("failed to load mission {}", path.display()))?;
+        self.selecting_mission = false;
+        self.selected_building = None;
+        self.td_recorded = false;
+        self.td_briefing_open = !self.game.mission.briefing.is_empty()
+            || !self.game.mission.objectives.is_empty();
+        self.camera.position = self.game.world_center();
+        self.last_produced = self.game.units_produced;
+        self.last_harvested = self.game.harvested_credits;
+        self.last_aircraft_shots = self.game.aircraft_shots;
+        self.last_aircraft_rearmed = self.game.aircraft_rearmed;
+        self.last_secondary_shots = self.game.secondary_shots;
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_camera(&self.camera);
+        }
+        tracing::info!(
+            mission = %self.game.mission.name,
+            path = %path.display(),
+            "mission selected"
+        );
+        Ok(true)
+    }
+
+    fn sidebar(&self) -> Sidebar {
+        // Screen-sized HUD space (unzoomed) so the menu does not grow with zoom.
+        let half_w = self.camera.viewport_width as f32 * 0.5;
+        let half_h = self.camera.viewport_height as f32 * 0.5;
         let left = self.camera.position.x.to_f32() - half_w;
         let top = self.camera.position.y.to_f32() - half_h;
         let x = left + 2.0 * half_w - SIDEBAR_WIDTH - 8.0;
@@ -252,7 +2843,7 @@ impl LauncherApp {
                 action: BuildAction::Unit(unit),
                 label: build_label(option.buildable),
                 cost: option.cost,
-                enabled: self.game.can_queue_unit(0, unit),
+                enabled: self.game.can_queue_unit(self.game.player_owner, unit),
             });
             row_y += SIDEBAR_ROW_HEIGHT;
         }
@@ -271,7 +2862,7 @@ impl LauncherApp {
                 action: BuildAction::Structure(structure),
                 label: build_label(option.buildable),
                 cost: option.cost,
-                enabled: self.game.can_queue_building(0, structure),
+                enabled: self.game.can_queue_building(self.game.player_owner, structure),
             });
             row_y += SIDEBAR_ROW_HEIGHT;
         }
@@ -288,6 +2879,7 @@ impl LauncherApp {
     }
 
     fn sidebar_hit(&self, world: Vec2) -> SidebarHit {
+        let world = self.hud_world(world);
         let sidebar = self.sidebar();
         let x = world.x.to_f32();
         let y = world.y.to_f32();
@@ -307,8 +2899,10 @@ impl LauncherApp {
         match self.sidebar_hit(world) {
             SidebarHit::Action(action) => {
                 let queued = match action {
-                    BuildAction::Unit(unit) => self.game.queue_unit(0, unit),
-                    BuildAction::Structure(structure) => self.game.queue_building(0, structure),
+                    BuildAction::Unit(unit) => self.queue_td_buildable(Buildable::Unit(unit)),
+                    BuildAction::Structure(structure) => {
+                        self.queue_td_buildable(Buildable::Structure(structure))
+                    }
                 };
                 tracing::debug!(?action, queued, "sidebar build");
                 true
@@ -322,11 +2916,129 @@ impl LauncherApp {
         let now = Instant::now();
         let delta = (now - self.last_frame).as_secs_f32().min(0.1).max(1.0e-4);
         self.last_frame = now;
+        if self.td_lobby_open {
+            self.poll_td_lan_scan();
+            let Some(renderer) = self.renderer.as_mut() else {
+                return;
+            };
+            renderer.begin_frame();
+            renderer.set_camera(&screen_camera(self.width, self.height));
+            draw_net_lobby(
+                renderer.as_mut(),
+                "TIBERIAN DAWN",
+                &self.td_lobby,
+                self.td_lan_scan.as_ref(),
+                self.td_lobby_error.as_deref(),
+                self.width,
+                self.height,
+            );
+            if let Err(error) = renderer.end_frame() {
+                tracing::warn!(%error, "TD lobby frame presentation failed");
+            }
+            self.frame_index = self.frame_index.wrapping_add(1);
+            return;
+        }
+        if self.network.is_some()
+            && !self.selecting_mission
+            && !self.td_paused
+            && !self.td_briefing_open
+        {
+            self.poll_td_network();
+        }
+        if !self.selecting_mission && !self.td_paused && !self.td_briefing_open {
+            self.apply_td_edge_pan(delta);
+        }
+
+        if self.td_complete {
+            let Some(renderer) = self.renderer.as_mut() else {
+                return;
+            };
+            renderer.begin_frame();
+            renderer.set_camera(&screen_camera(self.width, self.height));
+            draw_td_campaign_complete(
+                renderer.as_mut(),
+                self.mission_choices.len(),
+                &self.td_best,
+                self.width,
+                self.height,
+            );
+            if let Err(error) = renderer.end_frame() {
+                tracing::warn!(%error, "TD campaign complete frame presentation failed");
+            }
+            self.frame_index = self.frame_index.wrapping_add(1);
+            return;
+        }
+
+        if self.selecting_mission {
+            let Some(renderer) = self.renderer.as_mut() else {
+                return;
+            };
+            renderer.begin_frame();
+            renderer.set_camera(&screen_camera(self.width, self.height));
+            draw_td_mission_select(
+                renderer.as_mut(),
+                &self.mission_choices,
+                &self.td_completed,
+                &self.td_best,
+                self.mission_index,
+                self.td_filter,
+                self.width,
+                self.height,
+            );
+            if let Err(error) = renderer.end_frame() {
+                tracing::warn!(%error, "mission select frame presentation failed");
+            }
+            self.frame_index = self.frame_index.wrapping_add(1);
+            return;
+        }
+
+        if self.td_stats_open {
+            let Some(renderer) = self.renderer.as_mut() else {
+                return;
+            };
+            renderer.begin_frame();
+            renderer.set_camera(&screen_camera(self.width, self.height));
+            draw_td_stats(
+                renderer.as_mut(),
+                &self.mission_choices,
+                &self.td_completed,
+                &self.td_best,
+                self.width,
+                self.height,
+            );
+            if let Err(error) = renderer.end_frame() {
+                tracing::warn!(%error, "TD stats frame presentation failed");
+            }
+            self.frame_index = self.frame_index.wrapping_add(1);
+            return;
+        }
+
+        if self.td_briefing_open {
+            let Some(renderer) = self.renderer.as_mut() else {
+                return;
+            };
+            renderer.begin_frame();
+            renderer.set_camera(&screen_camera(self.width, self.height));
+            draw_td_briefing(renderer.as_mut(), &self.game.mission, self.width, self.height);
+            if let Err(error) = renderer.end_frame() {
+                tracing::warn!(%error, "TD briefing frame presentation failed");
+            }
+            self.frame_index = self.frame_index.wrapping_add(1);
+            return;
+        }
+
+        self.record_mission_result();
 
         let drag_rect = match (self.drag_start, self.drag_current) {
             (Some(start), Some(end)) => {
-                let a = self.screen_to_world(start);
-                let b = self.screen_to_world(end);
+                let a = self.camera.screen_to_world(Vec2::new(
+                    Fixed16_16::from_f32(start.x as f32),
+                    Fixed16_16::from_f32(start.y as f32),
+                ));
+                let b = self.camera.screen_to_world(Vec2::new(
+                    Fixed16_16::from_f32(end.x as f32),
+                    Fixed16_16::from_f32(end.y as f32),
+                ));
                 let min_x = a.x.to_f32().min(b.x.to_f32());
                 let min_y = a.y.to_f32().min(b.y.to_f32());
                 let max_x = a.x.to_f32().max(b.x.to_f32());
@@ -343,12 +3055,17 @@ impl LauncherApp {
 
         let sidebar = self.sidebar();
         let cursor = self.cursor_world();
+        // Hover highlighting works in HUD space, which ignores world zoom.
+        let hud_cursor = self.hud_cursor_world();
 
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
 
-        self.game.update(Fixed16_16::from_f32(delta));
+        if !self.td_paused {
+            self.game
+                .update(Fixed16_16::from_f32(delta * self.game_speed));
+        }
 
         if self.game.units_produced != self.last_produced {
             self.last_produced = self.game.units_produced;
@@ -387,21 +3104,93 @@ impl LauncherApp {
             self.game.render(renderer.as_mut());
         }
 
+        for unit in &self.game.units {
+            if unit.is_alive() {
+                draw_health_bar(
+                    renderer.as_mut(),
+                    unit.position.x.to_f32(),
+                    unit.position.y.to_f32() - 14.0,
+                    health_fraction(unit.health, unit.max_health),
+                    16.0,
+                );
+            }
+        }
+        for building in &self.game.buildings {
+            if building.is_alive() {
+                draw_health_bar(
+                    renderer.as_mut(),
+                    building.position.x.to_f32(),
+                    building.position.y.to_f32() - 18.0,
+                    health_fraction(building.health, building.max_health),
+                    24.0,
+                );
+            }
+        }
+
+        if let Some(index) = self.selected_building {
+            if let Some(building) = self.game.buildings.get(index) {
+                if building.is_alive() {
+                    let tile = cnc_tiberian_dawn::map::TILE_SIZE;
+                    let x = building.position.x.to_f32() - tile * 0.5;
+                    let y = building.position.y.to_f32() - tile * 0.5;
+                    let color = [1.0, 0.82, 0.30, 1.0];
+                    for (rx, ry, rw, rh) in [
+                        (x, y, tile, 2.0),
+                        (x, y + tile - 2.0, tile, 2.0),
+                        (x, y, 2.0, tile),
+                        (x + tile - 2.0, y, 2.0, tile),
+                    ] {
+                        renderer.draw_rect(rx, ry, rw, rh, color);
+                    }
+                }
+            }
+        }
+
+        if self.game.ready_building_for(self.game.player_owner).is_some() {
+            if let Some(world) = cursor {
+                let tile = cnc_tiberian_dawn::map::TILE_SIZE;
+                let cell = Vec2i::new(
+                    (world.x.to_f32() / tile).floor() as i32,
+                    (world.y.to_f32() / tile).floor() as i32,
+                );
+                let color = if self.game.can_place_building(cell) {
+                    [0.40, 1.0, 0.50, 1.0]
+                } else {
+                    [1.0, 0.35, 0.30, 1.0]
+                };
+                let x = cell.x as f32 * tile;
+                let y = cell.y as f32 * tile;
+                renderer.draw_rect(x, y, tile, 1.5, color);
+                renderer.draw_rect(x, y + tile - 1.5, tile, 1.5, color);
+                renderer.draw_rect(x, y, 1.5, tile, color);
+                renderer.draw_rect(x + tile - 1.5, y, 1.5, tile, color);
+            }
+        }
+
         // Drag-selection rectangle.
         if let Some((x, y, width, height)) = drag_rect {
             renderer.draw_rect(x, y, width, height, [0.20, 0.80, 1.00, 0.18]);
         }
 
-        // HUD
+        // HUD. Its own layer, drawn with an unzoomed camera so status text, the
+        // build menu and the minimap keep a constant pixel size while the map
+        // zooms underneath.
+        renderer.begin_layer();
+        renderer.set_camera(&hud_camera(&self.camera));
         let zoom = self.camera.zoom.to_f32().max(1.0e-6);
-        let half_w = self.camera.viewport_width as f32 / (2.0 * zoom);
-        let half_h = self.camera.viewport_height as f32 / (2.0 * zoom);
+        let half_w = self.camera.viewport_width as f32 * 0.5;
+        let half_h = self.camera.viewport_height as f32 * 0.5;
         let left = self.camera.position.x.to_f32() - half_w;
         let top = self.camera.position.y.to_f32() - half_h;
 
         let status = self.game.status();
+        let player_vs = if self.game.player_owner == 0 {
+            "GDI vs Nod"
+        } else {
+            "Nod vs GDI"
+        };
         renderer.draw_text(
-            &format!("{} - GDI vs Nod", status.mission),
+            &format!("{} - {player_vs}", status.mission),
             left + 16.0,
             top + 16.0,
             16.0,
@@ -426,7 +3215,7 @@ impl LauncherApp {
                 status.production,
                 status.gdi_ion,
                 status.gdi_nuke,
-                self.game.ready_building_for(0)
+                self.game.ready_building_for(self.game.player_owner)
             ),
             left + 16.0,
             top + 40.0,
@@ -435,15 +3224,65 @@ impl LauncherApp {
         );
         renderer.draw_text(
             &format!(
-                "1 inf 2 tank 3 mammoth 4 harv 5-9 build 0 orca  I ion N nuke  LMB select/place  Shift add  RMB move/attack  A all  ESC quit  frame {} {}",
+                "1 inf 2 tank 3 mammoth 4 harv 5-9 build 0 orca  I ion N nuke  LMB select/place  Shift add  RMB move/attack  edge pan  A all  Bksp cancel  F5 save F9 load  Ctrl+1-4 view  Alt+1-4 group  X sell R repair  +/- or wheel zoom  F6/F7 speed  ESC pause  frame {} {}  {:.2}x",
                 self.frame_index,
-                self.kind.label()
+                self.kind.label(),
+                self.game_speed
             ),
             left + 16.0,
             top + 56.0,
             8.0,
             [0.70, 0.75, 0.85, 1.0],
         );
+        if let Some((notice, at)) = &self.td_notice {
+            if at.elapsed() < Duration::from_secs(4) {
+                renderer.draw_text(
+                    notice,
+                    left + 16.0,
+                    top + 72.0,
+                    9.0,
+                    [1.0, 0.76, 0.35, 1.0],
+                );
+            }
+        }
+
+        // Campaign objective / mission log line.
+        let mission_line = if let Some(outcome) = self.game.mission.outcome {
+            match outcome {
+                cnc_tiberian_dawn::MissionOutcome::Victory => {
+                    "MISSION COMPLETE - Enter: mission select".to_string()
+                }
+                cnc_tiberian_dawn::MissionOutcome::Defeat => {
+                    "MISSION FAILED - Enter: mission select".to_string()
+                }
+            }
+        } else if !self.game.mission.objectives.is_empty() {
+            let pending = self
+                .game
+                .mission
+                .objectives
+                .iter()
+                .find(|objective| !objective.completed)
+                .map(|objective| objective.text.as_str())
+                .unwrap_or("all objectives complete");
+            format!(
+                "OBJECTIVES {}/{}  {}",
+                status.objectives_done, status.objectives_total, pending
+            )
+        } else {
+            String::new()
+        };
+        if !mission_line.is_empty() {
+            let color = match self.game.mission.outcome {
+                Some(cnc_tiberian_dawn::MissionOutcome::Victory) => [0.45, 1.00, 0.55, 1.0],
+                Some(cnc_tiberian_dawn::MissionOutcome::Defeat) => [1.00, 0.45, 0.45, 1.0],
+                None => [0.95, 0.85, 0.45, 1.0],
+            };
+            renderer.draw_text(&mission_line, left + 16.0, top + 72.0, 9.0, color);
+            if let Some(last) = self.game.mission.messages.last() {
+                renderer.draw_text(last, left + 16.0, top + 88.0, 8.0, [0.75, 0.85, 0.95, 1.0]);
+            }
+        }
 
         // Sidebar build menu (drawn in world space, anchored to the camera).
         renderer.draw_rect(
@@ -467,8 +3306,26 @@ impl LauncherApp {
             10.0,
             [0.80, 0.90, 1.00, 1.0],
         );
+        let (superweapon, charge) = if self.game.player_owner == 0 {
+            ("ion", status.gdi_ion)
+        } else {
+            ("nuke", status.nod_nuke)
+        };
+        let queue_label = self
+            .game
+            .houses
+            .get(self.game.player_owner as usize)
+            .and_then(|house| house.production_queue.front())
+            .map(|item| {
+                format!(
+                    "{:?} {}%",
+                    item.class_id,
+                    production_percent(item.progress, item.total_time)
+                )
+            })
+            .unwrap_or_else(|| "empty".to_string());
         renderer.draw_text(
-            &format!("queue {}  ion {}%", status.production, status.gdi_ion),
+            &format!("queue {queue_label}  {superweapon} {charge}%"),
             sidebar.x + 8.0,
             sidebar.y + 22.0,
             8.0,
@@ -490,7 +3347,7 @@ impl LauncherApp {
         );
 
         for entry in &sidebar.entries {
-            let hovered = cursor.map_or(false, |hover| {
+            let hovered = hud_cursor.map_or(false, |hover| {
                 let x = hover.x.to_f32();
                 let y = hover.y.to_f32();
                 x >= entry.x && x <= entry.x + entry.w && y >= entry.y && y <= entry.y + entry.h
@@ -513,6 +3370,34 @@ impl LauncherApp {
                 entry.y + 4.0,
                 8.0,
                 color,
+            );
+        }
+
+        draw_td_minimap(
+            renderer.as_mut(),
+            &self.game,
+            self.game.player_owner,
+            self.camera.position,
+            self.camera.viewport_width as f32 / zoom,
+            self.camera.viewport_height as f32 / zoom,
+            left,
+            top,
+            self.camera.viewport_width as f32,
+            self.camera.viewport_height as f32,
+        );
+
+        if self.td_paused {
+            renderer.begin_layer();
+            renderer.set_camera(&screen_camera(self.width, self.height));
+            let slot_label = save_slot_label(&Self::quick_save_path_for(self.save_slot));
+            draw_td_pause(
+                renderer.as_mut(),
+                &self.game,
+                self.td_pause_choice,
+                self.save_slot,
+                &slot_label,
+                self.width,
+                self.height,
             );
         }
 
@@ -600,6 +3485,87 @@ impl ApplicationHandler for LauncherApp {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        if self.td_complete {
+            match &event {
+                WindowEvent::CloseRequested => event_loop.exit(),
+                WindowEvent::KeyboardInput { event, .. }
+                    if event.state == ElementState::Pressed =>
+                {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) | Key::Named(NamedKey::Enter) => {
+                            self.dismiss_td_campaign_complete();
+                        }
+                        _ => {}
+                    }
+                }
+                WindowEvent::RedrawRequested => self.draw(),
+                _ => {}
+            }
+            return;
+        }
+        if self.selecting_mission {
+            match &event {
+                WindowEvent::CloseRequested => event_loop.exit(),
+                WindowEvent::KeyboardInput { event, .. }
+                    if event.state == ElementState::Pressed =>
+                {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => self.return_to_menu = true,
+                        Key::Named(NamedKey::ArrowUp) => self.cycle_mission(-1),
+                        Key::Named(NamedKey::ArrowDown) => self.cycle_mission(1),
+                        Key::Named(NamedKey::Enter) => {
+                            if let Err(error) = self.activate_selected_mission() {
+                                tracing::warn!(%error, "mission selection failed");
+                            }
+                        }
+                        Key::Character(text) => match text.to_ascii_lowercase().as_str() {
+                            "f" => self.cycle_td_filter(),
+                            "s" => self.td_stats_open = true,
+                            _ => {}
+                        },
+                        _ => {}
+                    }
+                }
+                WindowEvent::RedrawRequested => self.draw(),
+                _ => {}
+            }
+            return;
+        }
+        if self.td_stats_open {
+            match &event {
+                WindowEvent::CloseRequested => event_loop.exit(),
+                WindowEvent::KeyboardInput { event, .. }
+                    if event.state == ElementState::Pressed =>
+                {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) | Key::Named(NamedKey::Enter) => {
+                            self.td_stats_open = false;
+                        }
+                        _ => {}
+                    }
+                }
+                WindowEvent::RedrawRequested => self.draw(),
+                _ => {}
+            }
+            return;
+        }
+        if self.td_briefing_open {
+            match &event {
+                WindowEvent::CloseRequested => event_loop.exit(),
+                WindowEvent::KeyboardInput { event, .. }
+                    if event.state == ElementState::Pressed =>
+                {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => self.return_to_menu = true,
+                        Key::Named(NamedKey::Enter) => self.td_briefing_open = false,
+                        _ => {}
+                    }
+                }
+                WindowEvent::RedrawRequested => self.draw(),
+                _ => {}
+            }
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -619,8 +3585,20 @@ impl ApplicationHandler for LauncherApp {
                     self.drag_current = Some(position);
                 }
             }
+            WindowEvent::MouseWheel { delta, .. } => {
+                use winit::event::MouseScrollDelta;
+                let amount = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(position) => position.y as f32 / 40.0,
+                };
+                if amount.abs() > f32::EPSILON {
+                    self.zoom_td(wheel_zoom_factor(amount));
+                }
+            }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.shift_down = modifiers.state().shift_key();
+                self.ctrl_down = modifiers.state().control_key();
+                self.alt_down = modifiers.state().alt_key();
             }
             WindowEvent::MouseInput { state, button, .. } => match (state, button) {
                 (ElementState::Pressed, MouseButton::Left) => {
@@ -632,6 +3610,9 @@ impl ApplicationHandler for LauncherApp {
                     let end = self.drag_current.take();
                     if let (Some(start), Some(end)) = (start, end) {
                         let world = self.screen_to_world(end);
+                        if self.td_minimap_click(world) {
+                            return;
+                        }
                         let start_world = self.screen_to_world(start);
                         let over_sidebar = !matches!(self.sidebar_hit(world), SidebarHit::Outside);
                         let started_in_sidebar =
@@ -641,14 +3622,15 @@ impl ApplicationHandler for LauncherApp {
                             self.handle_sidebar_click(world);
                         } else if started_in_sidebar {
                             // Drag started on the build menu: ignore.
-                        } else if self.game.ready_building_for(0).is_some() {
+                        } else if self.game.ready_building_for(self.game.player_owner).is_some() {
                             let tile = cnc_tiberian_dawn::map::TILE_SIZE;
                             let cell = Vec2i::new(
                                 (world.x.to_f32() / tile).floor() as i32,
                                 (world.y.to_f32() / tile).floor() as i32,
                             );
-                            let placed = self.game.place_ready_building(0, cell);
-                            tracing::debug!(placed, "place GDI structure");
+                            let player = self.game.player_owner;
+                            let placed = self.game.place_ready_building(player, cell);
+                            tracing::debug!(placed, "place player structure");
                         } else {
                             let dx = end.x - start.x;
                             let dy = end.y - start.y;
@@ -656,9 +3638,37 @@ impl ApplicationHandler for LauncherApp {
                                 let count =
                                     self.game
                                         .select_in_rect(start_world, world, self.shift_down);
+                                self.selected_building = None;
                                 tracing::debug!(count, additive = self.shift_down, "box selection");
                             } else {
                                 let selected = self.game.select_at_additive(world, self.shift_down);
+                                if selected.is_some() {
+                                    self.selected_building = None;
+                                } else {
+                                    let tile = cnc_tiberian_dawn::map::TILE_SIZE;
+                                    let cell = Vec2i::new(
+                                        (world.x.to_f32() / tile).floor() as i32,
+                                        (world.y.to_f32() / tile).floor() as i32,
+                                    );
+                                    let player = self.game.player_owner;
+                                    self.selected_building = self
+                                        .game
+                                        .buildings
+                                        .iter()
+                                        .enumerate()
+                                        .find(|(_, building)| {
+                                            let building_cell = Vec2i::new(
+                                                (building.position.x.to_f32() / tile).floor()
+                                                    as i32,
+                                                (building.position.y.to_f32() / tile).floor()
+                                                    as i32,
+                                            );
+                                            building.owner == player
+                                                && building.is_alive()
+                                                && building_cell == cell
+                                        })
+                                        .map(|(index, _)| index);
+                                }
                                 tracing::debug!(
                                     ?selected,
                                     additive = self.shift_down,
@@ -685,30 +3695,190 @@ impl ApplicationHandler for LauncherApp {
             },
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed {
+                    if self.td_lobby_open {
+                        match &event.logical_key {
+                            Key::Named(NamedKey::Escape) => {
+                                if self.td_lan_scan.take().is_none() {
+                                    self.return_to_menu = true;
+                                }
+                            }
+                            Key::Named(NamedKey::Enter) => {
+                                let _ = self.start_td_lobby();
+                            }
+                            Key::Named(NamedKey::Tab) => {
+                                self.td_lobby.focus = (self.td_lobby.focus + 1) % 2;
+                            }
+                            Key::Named(NamedKey::Backspace) => self.td_lobby.backspace(),
+                            Key::Named(NamedKey::ArrowUp) => {
+                                if let Some(scan) = self.td_lan_scan.as_mut() {
+                                    if !scan.hosts.is_empty() {
+                                        scan.selected =
+                                            (scan.selected + scan.hosts.len() - 1) % scan.hosts.len();
+                                    }
+                                }
+                            }
+                            Key::Named(NamedKey::ArrowDown) => {
+                                if let Some(scan) = self.td_lan_scan.as_mut() {
+                                    if !scan.hosts.is_empty() {
+                                        scan.selected = (scan.selected + 1) % scan.hosts.len();
+                                    }
+                                }
+                            }
+                            Key::Character(text) => match text.as_str() {
+                                "r" | "R" => self.td_lobby.toggle_role(),
+                                "l" | "L" => self.toggle_td_lan_scan(),
+                                "[" => self.td_lobby.adjust_port(-1),
+                                "]" => self.td_lobby.adjust_port(1),
+                                other => {
+                                    for character in other.chars() {
+                                        self.td_lobby.push_char(character);
+                                    }
+                                }
+                            },
+                            _ => {}
+                        }
+                        return;
+                    }
+                    if self.game.mission.outcome.is_some() {
+                        match &event.logical_key {
+                            Key::Named(NamedKey::Enter) => {
+                                self.finish_td_mission();
+                                return;
+                            }
+                            Key::Named(NamedKey::Escape) => {
+                                event_loop.exit();
+                                return;
+                            }
+                            _ => return,
+                        }
+                    }
+                    let player = self.game.player_owner;
+                    if self.td_paused {
+                        match &event.logical_key {
+                            Key::Named(NamedKey::Escape) => self.td_paused = false,
+                            Key::Named(NamedKey::Enter) => self.activate_td_pause_choice(),
+                            Key::Named(NamedKey::ArrowUp) => {
+                                self.td_pause_choice = (self.td_pause_choice + 4) % 5;
+                            }
+                            Key::Named(NamedKey::ArrowDown) => {
+                                self.td_pause_choice = (self.td_pause_choice + 1) % 5;
+                            }
+                            _ => {}
+                        }
+                        return;
+                    }
+                    if self.ctrl_down {
+                        if let Key::Character(text) = &event.logical_key {
+                            if let Some(slot) = bookmark_slot(text) {
+                                if self.shift_down {
+                                    self.save_td_bookmark(slot);
+                                } else {
+                                    self.jump_td_bookmark(slot);
+                                }
+                                return;
+                            }
+                        }
+                    }
+                    if self.alt_down {
+                        if let Key::Character(text) = &event.logical_key {
+                            if let Some(slot) = bookmark_slot(text) {
+                                if self.shift_down {
+                                    self.store_td_control_group(slot);
+                                } else {
+                                    self.recall_td_control_group(slot);
+                                }
+                                return;
+                            }
+                        }
+                    }
                     match &event.logical_key {
-                        Key::Named(NamedKey::Escape) => event_loop.exit(),
+                        Key::Named(NamedKey::Escape) => {
+                            if self.td_network_active() {
+                                self.td_notice = Some((
+                                    "Pause is disabled in network games".to_string(),
+                                    Instant::now(),
+                                ));
+                            } else {
+                                self.enter_td_pause();
+                            }
+                        }
+                        Key::Named(NamedKey::F5) => {
+                            if self.td_network_active() {
+                                self.td_notice = Some((
+                                    "Save is disabled in network games".to_string(),
+                                    Instant::now(),
+                                ));
+                            } else {
+                                self.quick_save();
+                            }
+                        }
+                        Key::Named(NamedKey::F9) => {
+                            if self.td_network_active() {
+                                self.td_notice = Some((
+                                    "Load is disabled in network games".to_string(),
+                                    Instant::now(),
+                                ));
+                            } else {
+                                self.quick_load();
+                            }
+                        }
+                        Key::Character(text) if text == "+" || text == "=" => {
+                            self.zoom_td(KEY_ZOOM_STEP);
+                        }
+                        Key::Character(text) if text == "-" || text == "_" => {
+                            self.zoom_td(1.0 / KEY_ZOOM_STEP);
+                        }
+                        Key::Named(NamedKey::F6) => {
+                            if self.td_network_active() {
+                                self.td_notice = Some((
+                                    "Game speed is locked in network games".to_string(),
+                                    Instant::now(),
+                                ));
+                            } else {
+                                self.adjust_td_speed(-0.25);
+                            }
+                        }
+                        Key::Named(NamedKey::F7) => {
+                            if self.td_network_active() {
+                                self.td_notice = Some((
+                                    "Game speed is locked in network games".to_string(),
+                                    Instant::now(),
+                                ));
+                            } else {
+                                self.adjust_td_speed(0.25);
+                            }
+                        }
+                        Key::Character(text) if text.eq_ignore_ascii_case("x") => {
+                            self.sell_selected_building();
+                        }
+                        Key::Character(text) if text.eq_ignore_ascii_case("r") => {
+                            self.repair_selected_building();
+                        }
+                        Key::Named(NamedKey::Backspace) => {
+                            self.cancel_td_production();
+                        }
                         Key::Character(text) if text.eq_ignore_ascii_case("a") => {
-                            let count = self.game.select_all_owned(0);
+                            let count = self.game.select_all_owned(player);
                             tracing::debug!(count, "select all GDI units");
                         }
                         Key::Character(text) if text.eq_ignore_ascii_case("1") => {
-                            let queued = self.game.queue_unit(0, UnitType::InfantryE1);
+                            let queued = self.queue_td_buildable(Buildable::Unit(UnitType::InfantryE1));
                             tracing::debug!(queued, "queue GDI infantry");
                         }
                         Key::Character(text) if text.eq_ignore_ascii_case("2") => {
-                            let queued = self.game.queue_unit(0, UnitType::MediumTank);
+                            let queued = self.queue_td_buildable(Buildable::Unit(UnitType::MediumTank));
                             tracing::debug!(queued, "queue GDI medium tank");
                         }
                         Key::Character(text) if text.eq_ignore_ascii_case("3") => {
-                            let queued = self.game.queue_unit(0, UnitType::MammothTank);
+                            let queued = self.queue_td_buildable(Buildable::Unit(UnitType::MammothTank));
                             tracing::debug!(queued, "queue GDI mammoth tank");
                         }
                         Key::Character(text) if text.eq_ignore_ascii_case("4") => {
-                            let queued = self.game.queue_unit(0, UnitType::Harvester);
+                            let queued = self.queue_td_buildable(Buildable::Unit(UnitType::Harvester));
                             tracing::debug!(queued, "queue GDI harvester");
                         }
                         Key::Character(text) if text.eq_ignore_ascii_case("5") => {
-                            let queued = self.game.queue_building(0, StructureType::PowerPlant);
+                            let queued = self.queue_td_buildable(Buildable::Structure(StructureType::PowerPlant));
                             let status = self.game.status();
                             tracing::debug!(
                                 queued,
@@ -718,23 +3888,23 @@ impl ApplicationHandler for LauncherApp {
                             );
                         }
                         Key::Character(text) if text.eq_ignore_ascii_case("6") => {
-                            let queued = self.game.queue_building(0, StructureType::Refinery);
+                            let queued = self.queue_td_buildable(Buildable::Structure(StructureType::Refinery));
                             tracing::debug!(queued, "queue GDI refinery");
                         }
                         Key::Character(text) if text.eq_ignore_ascii_case("7") => {
-                            let queued = self.game.queue_building(0, StructureType::Barracks);
+                            let queued = self.queue_td_buildable(Buildable::Structure(StructureType::Barracks));
                             tracing::debug!(queued, "queue GDI barracks");
                         }
                         Key::Character(text) if text.eq_ignore_ascii_case("8") => {
-                            let queued = self.game.queue_building(0, StructureType::WarFactory);
+                            let queued = self.queue_td_buildable(Buildable::Structure(StructureType::WarFactory));
                             tracing::debug!(queued, "queue GDI war factory");
                         }
                         Key::Character(text) if text.eq_ignore_ascii_case("9") => {
-                            let queued = self.game.queue_building(0, StructureType::Silo);
+                            let queued = self.queue_td_buildable(Buildable::Structure(StructureType::Silo));
                             tracing::debug!(queued, "queue GDI silo");
                         }
                         Key::Character(text) if text.eq_ignore_ascii_case("0") => {
-                            let queued = self.game.queue_unit(0, UnitType::Orca);
+                            let queued = self.queue_td_buildable(Buildable::Unit(UnitType::Orca));
                             tracing::debug!(queued, "queue GDI orca");
                         }
                         Key::Character(text) if text.eq_ignore_ascii_case("i") => {
@@ -744,7 +3914,7 @@ impl ApplicationHandler for LauncherApp {
                                     (world.x.to_f32() / tile).floor() as i32,
                                     (world.y.to_f32() / tile).floor() as i32,
                                 );
-                                let fired = self.game.fire_ion_cannon(0, cell);
+                                let fired = self.game.fire_ion_cannon(player, cell);
                                 tracing::debug!(fired, "fire ion cannon");
                             }
                         }
@@ -755,7 +3925,7 @@ impl ApplicationHandler for LauncherApp {
                                     (world.x.to_f32() / tile).floor() as i32,
                                     (world.y.to_f32() / tile).floor() as i32,
                                 );
-                                let fired = self.game.fire_nuke(0, cell);
+                                let fired = self.game.fire_nuke(player, cell);
                                 tracing::debug!(fired, "fire nuke");
                             }
                         }
@@ -780,11 +3950,3582 @@ impl ApplicationHandler for LauncherApp {
     }
 }
 
+/// Interactive Red Alert skirmish mode (the RA counterpart of LauncherApp).
+///
+/// It uses the same window/renderer plumbing but drives cnc-red-alert's Game:
+/// ground/naval/air pathfinding, house production, Tesla defenses, harvesting
+/// and the Chronosphere. The HUD is intentionally minimal; the point is to run
+/// the full RA simulation loop on screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RaMode {
+    Setup,
+    NetworkLobby,
+    CampaignSelect,
+    CampaignStats,
+    CampaignComplete,
+    Playing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CampaignFilter {
+    All,
+    Incomplete,
+    Completed,
+}
+
+impl CampaignFilter {
+    fn next(self) -> Self {
+        match self {
+            Self::All => Self::Incomplete,
+            Self::Incomplete => Self::Completed,
+            Self::Completed => Self::All,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Incomplete => "Incomplete",
+            Self::Completed => "Completed",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CampaignEntry {
+    path: PathBuf,
+    name: String,
+    briefing: String,
+    player: usize,
+    width: u32,
+    height: u32,
+    terrain: Vec<u8>,
+    ore: Vec<u32>,
+    objectives: Vec<String>,
+    triggers: usize,
+}
+
+const RA_MAP_SIZES: [u32; 3] = [48, 64, 96];
+const ALLIED_COUNTRIES: [Country; 3] = [Country::England, Country::Germany, Country::France];
+const SOVIET_COUNTRIES: [Country; 2] = [Country::Russia, Country::Ukraine];
+const DIFFICULTY_NAMES: [&str; 3] = ["Easy", "Normal", "Hard"];
+
+#[derive(Clone, Copy, Debug)]
+struct SkirmishSetup {
+    map_size: u32,
+    side: usize,
+    country: Country,
+    difficulty: usize,
+}
+
+/// Host/join choice and addresses shown by the network lobby screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NetRole {
+    Host,
+    Join,
+}
+
+#[derive(Clone, Debug)]
+struct NetLobby {
+    role: NetRole,
+    host_port: u16,
+    join_port: u16,
+    peer_address: String,
+    join_address: String,
+    focus: usize,
+}
+
+impl Default for NetLobby {
+    fn default() -> Self {
+        Self {
+            role: NetRole::Host,
+            host_port: 47870,
+            join_port: 47871,
+            peer_address: format!("127.0.0.1:{}", 47871),
+            join_address: format!("127.0.0.1:{}", 47870),
+            focus: 0,
+        }
+    }
+}
+
+impl NetLobby {
+    /// Tiberian Dawn defaults; different ports from Red Alert so both lobbies
+    /// can run on one machine.
+    fn td_default() -> Self {
+        Self {
+            role: NetRole::Host,
+            host_port: 47872,
+            join_port: 47873,
+            peer_address: format!("127.0.0.1:{}", 47873),
+            join_address: format!("127.0.0.1:{}", 47872),
+            focus: 0,
+        }
+    }
+
+    fn role_label(&self) -> &'static str {
+        match self.role {
+            NetRole::Host => "Host",
+            NetRole::Join => "Join",
+        }
+    }
+
+    fn toggle_role(&mut self) {
+        self.role = match self.role {
+            NetRole::Host => NetRole::Join,
+            NetRole::Join => NetRole::Host,
+        };
+        self.focus = 0;
+    }
+
+    fn active_port(&mut self) -> &mut u16 {
+        match self.role {
+            NetRole::Host => &mut self.host_port,
+            NetRole::Join => &mut self.join_port,
+        }
+    }
+
+    fn adjust_port(&mut self, delta: i32) {
+        let port = self.active_port();
+        let next = (*port as i32 + delta).clamp(1024, 65535);
+        *port = next as u16;
+    }
+
+    fn active_address(&mut self) -> &mut String {
+        match self.role {
+            NetRole::Host => &mut self.peer_address,
+            NetRole::Join => &mut self.join_address,
+        }
+    }
+
+    fn push_char(&mut self, character: char) {
+        if character.is_ascii_digit() || character == '.' || character == ':' {
+            let address = self.active_address();
+            if address.len() < 32 {
+                address.push(character);
+            }
+        }
+    }
+
+    fn backspace(&mut self) {
+        self.active_address().pop();
+    }
+}
+
+impl Default for SkirmishSetup {
+    fn default() -> Self {
+        Self {
+            map_size: 64,
+            side: 0,
+            country: Country::England,
+            difficulty: 1,
+        }
+    }
+}
+
+/// CLI-driven RA network setup.
+#[derive(Clone, Debug)]
+struct NetworkSetup {
+    role: String,
+    join: Option<String>,
+    port: u16,
+    peers: Vec<String>,
+    bind: String,
+    advertised: Option<String>,
+}
+
+/// A peer that has been silent this long is reported lost (host migration).
+const PEER_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Text chat prefix; chat lines travel outside the lockstep packet stream.
+const CHAT_PREFIX: &str = "CNCCHAT 1";
+
+/// Parse `CNCCHAT 1 <player> <text>`.
+fn parse_chat_line(bytes: &[u8]) -> Option<(u8, String)> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let rest = text.strip_prefix(CHAT_PREFIX)?.trim_start();
+    let (player, message) = rest.split_once(' ')?;
+    let message = message.trim();
+    if message.is_empty() {
+        return None;
+    }
+    Some((player.parse().ok()?, message.to_string()))
+}
+
+/// Join peers announce their player id so a host can register a fresh or
+/// reconnecting address even before any command is sent.
+const JOIN_HANDSHAKE_PREFIX: &str = "CNCRAJOIN 1";
+
+/// Well-known UDP port used for host beacons (does not carry commands).
+const LAN_DISCOVERY_PORT: u16 = 47890;
+const LAN_BEACON_PREFIX: &str = "CNCRALAN 1";
+
+/// One host heard on the LAN.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LanHost {
+    address: String,
+    label: String,
+}
+
+/// Passive listener for host beacons while the lobby scans the LAN.
+struct LanScan {
+    socket: UdpSocket,
+    hosts: Vec<LanHost>,
+    selected: usize,
+}
+
+impl LanScan {
+    fn ingest(&mut self, source: SocketAddr, bytes: &[u8]) {
+        let Some((port, name)) = parse_lan_beacon(bytes) else {
+            return;
+        };
+        let address = format!("{}:{}", source.ip(), port);
+        if self.hosts.iter().any(|host| host.address == address) {
+            return;
+        }
+        self.hosts.push(LanHost {
+            label: format!("{name}  {address}"),
+            address,
+        });
+        self.hosts.sort_by(|left, right| left.address.cmp(&right.address));
+        self.hosts.truncate(8);
+        if self.selected >= self.hosts.len() {
+            self.selected = self.hosts.len().saturating_sub(1);
+        }
+    }
+}
+
+/// Start or stop listening for host beacons on the LAN discovery port.
+fn toggle_lan_scan(scan: &mut Option<LanScan>, error: &mut Option<String>) {
+    if scan.is_some() {
+        *scan = None;
+        return;
+    }
+    match UdpSocket::bind(("0.0.0.0", LAN_DISCOVERY_PORT)) {
+        Ok(socket) => match socket.set_nonblocking(true) {
+            Ok(()) => {
+                *scan = Some(LanScan {
+                    socket,
+                    hosts: Vec::new(),
+                    selected: 0,
+                });
+                *error = None;
+            }
+            Err(err) => {
+                *error = Some(format!("LAN scan setup failed: {err}"));
+            }
+        },
+        Err(err) => {
+            *error = Some(format!(
+                "LAN scan could not bind UDP {LAN_DISCOVERY_PORT}: {err}"
+            ));
+        }
+    }
+}
+
+/// Collect every beacon that arrived since the last poll.
+fn poll_lan_scan_socket(scan: &mut Option<LanScan>) {
+    let Some(scan) = scan.as_mut() else {
+        return;
+    };
+    let mut buffer = [0u8; 512];
+    loop {
+        match scan.socket.recv_from(&mut buffer) {
+            Ok((size, source)) => scan.ingest(source, &buffer[..size]),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(_) => break,
+        }
+    }
+}
+
+/// Parse `CNCRAJOIN 1 <player>`; returns the claimed player id.
+fn parse_join_handshake(bytes: &[u8]) -> Option<u8> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let mut parts = text.split_whitespace();
+    if parts.next()? != "CNCRAJOIN" || parts.next()? != "1" {
+        return None;
+    }
+    parts.next()?.parse().ok()
+}
+
+/// Register a peer from its join handshake, reviving a previously lost slot.
+fn register_join_peer(net: &mut RaNetwork, source: SocketAddr, player: u8) {
+    if player >= net.session.players || player == net.session.local_player {
+        return;
+    }
+    net.session.register_peer(player, source);
+    net.last_seen.insert(player, Instant::now());
+    let was_lost = net.reported.remove(&player);
+    if was_lost || !net.session.migration.alive.contains(&player) {
+        net.session.migration.alive.insert(player);
+        // A reconnecting peer restarts its sequence numbers; stale relay
+        // hashes would otherwise suppress its first packets.
+        net.session.relay.clear();
+        if was_lost {
+            net.rejoined += 1;
+            tracing::info!(player, "network peer reconnected");
+        }
+    }
+}
+
+/// Beacon text a host broadcasts on the LAN discovery port.
+fn lan_beacon_text(port: u16, game: &str) -> String {
+    format!("{LAN_BEACON_PREFIX} {port} {game}")
+}
+
+/// Parse `CNCRALAN 1 <game_port> [name]`; malformed beacons are ignored.
+fn parse_lan_beacon(bytes: &[u8]) -> Option<(u16, String)> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let mut parts = text.split_whitespace();
+    if parts.next()? != "CNCRALAN" || parts.next()? != "1" {
+        return None;
+    }
+    let port: u16 = parts.next()?.parse().ok()?;
+    let name = parts.next().unwrap_or("RA").to_string();
+    Some((port, name))
+}
+
+/// Playback state for a recorded network match.
+struct ReplayState {
+    commands: Vec<NetCommand>,
+    next: usize,
+    frame: u32,
+    last_tick: Instant,
+    paused: bool,
+    done: bool,
+}
+
+/// Live UDP lockstep session attached to the RA game view.
+struct RaNetwork {
+    socket: UdpSocket,
+    session: LiveSession,
+    last_tick: Instant,
+    sent: u64,
+    applied: u64,
+    seen: HashSet<u64>,
+    role: String,
+    last_beacon: Instant,
+    last_handshake: Instant,
+    last_seen: HashMap<u8, Instant>,
+    reported: HashSet<u8>,
+    migrations: u64,
+    losses: u64,
+    rejoined: u64,
+    replay_commands: Vec<NetCommand>,
+}
+
+/// Apply one remote lockstep move to the RA game (shared by polling and tests).
+fn apply_net_move(game: &mut RaGame, player: u8, units: &[u32], target: Vec2) {
+    game.apply_command(&GameCommand::Move {
+        owner: player as usize,
+        units: units.to_vec(),
+        target,
+    });
+}
+
+/// UI production timings; remote peers derive the same value from the class.
+fn ra_unit_build_seconds(class_id: cnc_core::ClassId) -> i32 {
+    match class_id {
+        cnc_core::ClassId::InfantryE1 => 4,
+        cnc_core::ClassId::VehicleE1 => 6,
+        cnc_core::ClassId::VehicleE2 => 8,
+        cnc_core::ClassId::ShipE1 => 9,
+        _ => 5,
+    }
+}
+
+/// Deploy a remote player's MCV.
+fn apply_net_deploy(game: &mut RaGame, player: u8, unit: u32) -> bool {
+    game.apply_command(&GameCommand::Deploy {
+        owner: player as usize,
+        unit,
+    }) > 0
+}
+
+/// Sell a remote player's structure.
+fn apply_net_sell(game: &mut RaGame, player: u8, building: u32) -> bool {
+    game.apply_command(&GameCommand::Sell {
+        owner: player as usize,
+        building,
+    }) > 0
+}
+
+/// Cancel a remote player's front production item.
+fn apply_net_cancel(game: &mut RaGame, player: u8) -> bool {
+    game.apply_command(&GameCommand::CancelProduction {
+        owner: player as usize,
+    }) > 0
+}
+
+/// Apply one network/replay command to the game; true when it had an effect.
+fn apply_net_command(game: &mut RaGame, command: &NetCommand) -> bool {
+    match &command.command {
+        NetCommandKind::Move { units, target } => {
+            apply_net_move(game, command.player, units, *target);
+            true
+        }
+        NetCommandKind::Build { building, location } => {
+            apply_net_build(game, command.player, *building, *location)
+        }
+        NetCommandKind::Produce { unit_type, .. } => {
+            apply_net_produce(game, command.player, *unit_type)
+        }
+        NetCommandKind::Attack { units, target } => {
+            apply_net_attack(game, command.player, units, *target) > 0
+        }
+        NetCommandKind::Sell { building } => apply_net_sell(game, command.player, *building),
+        NetCommandKind::Deploy { unit } => apply_net_deploy(game, command.player, *unit),
+        NetCommandKind::Stop { units } => apply_net_stop(game, command.player, units) > 0,
+        NetCommandKind::RepairStructure { building } => {
+            apply_net_repair(game, command.player, *building)
+        }
+        NetCommandKind::Power { building, on } => {
+            apply_net_power(game, command.player, *building, *on)
+        }
+        NetCommandKind::CancelProduction => apply_net_cancel(game, command.player),
+        _ => false,
+    }
+}
+
+/// Toggle a remote player's structure power.
+fn apply_net_power(game: &mut RaGame, player: u8, building: u32, on: bool) -> bool {
+    game.apply_command(&GameCommand::Power {
+        owner: player as usize,
+        building,
+        on,
+    }) > 0
+}
+
+/// Repair a remote player's structure.
+fn apply_net_repair(game: &mut RaGame, player: u8, building: u32) -> bool {
+    game.apply_command(&GameCommand::Repair {
+        owner: player as usize,
+        building,
+    }) > 0
+}
+
+/// Stop a remote player's listed units.
+fn apply_net_stop(game: &mut RaGame, player: u8, units: &[u32]) -> usize {
+    game.apply_command(&GameCommand::Stop {
+        owner: player as usize,
+        units: units.to_vec(),
+    })
+}
+
+/// Order a remote player's units to attack a shared object id.
+fn apply_net_attack(game: &mut RaGame, player: u8, units: &[u32], target: u32) -> usize {
+    game.apply_command(&GameCommand::Attack {
+        owner: player as usize,
+        units: units.to_vec(),
+        target,
+    })
+}
+
+/// Queue a remote player's unit production.
+fn apply_net_produce(game: &mut RaGame, player: u8, class_id: cnc_core::ClassId) -> bool {
+    game.apply_command(&GameCommand::Produce {
+        owner: player as usize,
+        class_id,
+        seconds: ra_unit_build_seconds(class_id),
+    }) > 0
+}
+
+/// Place a remote player's structure; returns true when the placement stuck.
+fn apply_net_build(
+    game: &mut RaGame,
+    player: u8,
+    class_id: cnc_core::ClassId,
+    location: Vec2,
+) -> bool {
+    let cell = Vec2i::new(
+        (location.x.to_f32() / RA_TILE_SIZE).floor() as i32,
+        (location.y.to_f32() / RA_TILE_SIZE).floor() as i32,
+    );
+    game.place_structure(player as usize, class_id, cell).is_ok()
+}
+
+/// Discriminator used by TD Produce commands to mark structure production.
+const TD_PRODUCE_STRUCTURE: u32 = u32::MAX;
+
+/// Encode a TD sidebar choice as a lockstep Produce command.
+fn td_produce_command(buildable: Buildable) -> NetCommandKind {
+    match buildable {
+        Buildable::Unit(unit) => {
+            let index = UnitType::ALL
+                .iter()
+                .position(|candidate| *candidate == unit)
+                .unwrap_or(0) as u32;
+            NetCommandKind::Produce {
+                factory: index,
+                unit_type: buildable.class_id(),
+            }
+        }
+        Buildable::Structure(structure) => NetCommandKind::Produce {
+            factory: TD_PRODUCE_STRUCTURE,
+            unit_type: structure.class_id(),
+        },
+    }
+}
+
+/// Decode a TD Produce command back into a sidebar choice.
+fn td_produce_target(factory: u32, class_id: cnc_core::ClassId) -> Option<Buildable> {
+    if factory == TD_PRODUCE_STRUCTURE {
+        StructureType::from_class_id(class_id).map(Buildable::Structure)
+    } else {
+        UnitType::ALL
+            .get(factory as usize)
+            .copied()
+            .map(Buildable::Unit)
+    }
+}
+
+/// Apply one network/replay command to the TD game; true when it had an effect.
+fn apply_td_command(game: &mut Game, command: &NetCommand) -> bool {
+    let player = command.player;
+    match &command.command {
+        NetCommandKind::Move { units, target } => {
+            game.order_units_move(player, units, *target) > 0
+        }
+        NetCommandKind::Attack { units, target } => {
+            game.order_units_attack(player, units, *target as usize) > 0
+        }
+        NetCommandKind::Stop { units } => game.order_units_stop(player, units) > 0,
+        NetCommandKind::Produce {
+            factory,
+            unit_type,
+        } => match td_produce_target(*factory, *unit_type) {
+            Some(Buildable::Unit(unit)) => game.queue_unit(player, unit),
+            Some(Buildable::Structure(structure)) => game.queue_building(player, structure),
+            None => false,
+        },
+        NetCommandKind::PlaceBuilding { location } => {
+            let tile = cnc_tiberian_dawn::map::TILE_SIZE;
+            let cell = Vec2i::new(
+                (location.x.to_f32() / tile).floor() as i32,
+                (location.y.to_f32() / tile).floor() as i32,
+            );
+            game.place_ready_building(player, cell)
+        }
+        NetCommandKind::Sell { building } => {
+            game.sell_building(player, *building as usize).is_some()
+        }
+        NetCommandKind::RepairStructure { building } => {
+            game.repair_building(player, *building as usize).is_some()
+        }
+        NetCommandKind::CancelProduction => game.cancel_production(player).is_some(),
+        _ => false,
+    }
+}
+
+/// Live UDP lockstep session attached to the TD game view.
+struct TdNetwork {
+    socket: UdpSocket,
+    session: LiveSession,
+    last_tick: Instant,
+    sent: u64,
+    applied: u64,
+    seen: HashSet<u64>,
+    role: String,
+    last_beacon: Instant,
+}
+
+struct RaLauncherApp {
+    kind: RendererKind,
+    width: u32,
+    height: u32,
+    // Renderer must drop before the window: on Wayland the wgpu surface must
+    // not outlive the native window.
+    renderer: Option<Box<dyn Renderer>>,
+    window: Option<Arc<Window>>,
+    camera: Camera,
+    game: RaGame,
+    scenario_name: String,
+    mode: RaMode,
+    setup: SkirmishSetup,
+    lobby: NetLobby,
+    lobby_error: Option<String>,
+    lan_scan: Option<LanScan>,
+    notice: Option<(String, Instant)>,
+    campaign: Vec<CampaignEntry>,
+    campaign_index: usize,
+    campaign_active: bool,
+    campaign_progress_path: PathBuf,
+    campaign_completed: Vec<bool>,
+    campaign_best: Vec<Option<i32>>,
+    campaign_difficulty: usize,
+    campaign_filter: CampaignFilter,
+    replay_prompt: bool,
+    briefing_open: bool,
+    paused: bool,
+    pause_choice: usize,
+    active_scenario_path: Option<PathBuf>,
+    network: Option<RaNetwork>,
+    replay: Option<ReplayState>,
+    net_replay_path: Option<PathBuf>,
+    pending_commands: Vec<GameCommand>,
+    placing: Option<cnc_core::ClassId>,
+    selected_structure: Option<u32>,
+    save_slot: usize,
+    shift_down: bool,
+    ctrl_down: bool,
+    alt_down: bool,
+    bookmarks: [Option<Vec2>; 4],
+    control_groups: [Vec<u32>; 4],
+    game_speed: f32,
+    chat_open: bool,
+    chat_input: String,
+    chat_log: Vec<(u8, String)>,
+    cursor: Option<winit::dpi::PhysicalPosition<f64>>,
+    selection_start: Option<winit::dpi::PhysicalPosition<f64>>,
+    panning: bool,
+    last_pointer: (f64, f64),
+    frame_index: u64,
+    frame_limit: u64,
+    last_frame: Instant,
+    next_frame: Instant,
+    software_warning_emitted: bool,
+    /// Set when a menu-owned screen wants the shell to reopen the main menu.
+    return_to_menu: bool,
+}
+
+impl RaLauncherApp {
+    fn new(kind: RendererKind, width: u32, height: u32, frame_limit: u64) -> Self {
+        let game = RaGame::new(MAP_SIZE, MAP_SIZE);
+        let mut camera = Camera::default();
+        camera.set_viewport(width.max(1), height.max(1));
+        camera.position = Vec2::new(
+            Fixed16_16::from_f32(game.map.width as f32 * RA_TILE_SIZE * 0.5),
+            Fixed16_16::from_f32(game.map.height as f32 * RA_TILE_SIZE * 0.5),
+        );
+        Self {
+            kind,
+            width,
+            height,
+            window: None,
+            renderer: None,
+            camera,
+            game,
+            scenario_name: "Skirmish".to_string(),
+            mode: RaMode::Setup,
+            setup: SkirmishSetup::default(),
+            lobby: NetLobby::default(),
+            lobby_error: None,
+            lan_scan: None,
+            notice: None,
+            campaign: Vec::new(),
+            campaign_index: 0,
+            campaign_active: false,
+            campaign_progress_path: default_campaign_progress_path(),
+            campaign_completed: Vec::new(),
+            campaign_best: Vec::new(),
+            campaign_difficulty: 1,
+            campaign_filter: CampaignFilter::All,
+            replay_prompt: false,
+            briefing_open: false,
+            paused: false,
+            pause_choice: 0,
+            active_scenario_path: None,
+            network: None,
+            replay: None,
+            net_replay_path: None,
+            pending_commands: Vec::new(),
+            placing: None,
+            selected_structure: None,
+            save_slot: 0,
+            shift_down: false,
+            ctrl_down: false,
+            alt_down: false,
+            bookmarks: [None; 4],
+            control_groups: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            game_speed: 1.0,
+            chat_open: false,
+            chat_input: String::new(),
+            chat_log: Vec::new(),
+            cursor: None,
+            selection_start: None,
+            panning: false,
+            last_pointer: (0.0, 0.0),
+            frame_index: 0,
+            frame_limit,
+            last_frame: Instant::now(),
+            next_frame: Instant::now() + FRAME_INTERVAL,
+            software_warning_emitted: false,
+            return_to_menu: false,
+        }
+    }
+
+    fn screen_to_world(&self, position: winit::dpi::PhysicalPosition<f64>) -> Vec2 {
+        self.camera.screen_to_world(Vec2::new(
+            Fixed16_16::from_f32(position.x as f32),
+            Fixed16_16::from_f32(position.y as f32),
+        ))
+    }
+
+    fn cursor_world(&self) -> Option<Vec2> {
+        self.cursor.map(|position| self.screen_to_world(position))
+    }
+
+    /// Map a world point from the zoomed game view into HUD space (the HUD is
+    /// drawn unzoomed, so this keeps clicks aligned with the minimap).
+    fn hud_world(&self, world: Vec2) -> Vec2 {
+        let position = self.camera.position;
+        let zoom = self.camera.zoom.to_f32().max(1.0e-6);
+        Vec2::new(
+            Fixed16_16::from_f32(
+                position.x.to_f32() + (world.x.to_f32() - position.x.to_f32()) * zoom,
+            ),
+            Fixed16_16::from_f32(
+                position.y.to_f32() + (world.y.to_f32() - position.y.to_f32()) * zoom,
+            ),
+        )
+    }
+
+    /// Zoom the RA world view by factor, anchored at the cursor.
+    fn zoom_ra(&mut self, factor: f32) {
+        let world_w = self.game.map.width as f32 * RA_TILE_SIZE;
+        let world_h = self.game.map.height as f32 * RA_TILE_SIZE;
+        let anchor = self.cursor.map(|cursor| (cursor.x as f32, cursor.y as f32));
+        zoom_camera_at(&mut self.camera, anchor, factor, world_w, world_h);
+    }
+
+    fn load_campaign_progress(&self) -> (usize, usize, Vec<usize>, Vec<(usize, i32)>) {
+        let mut mission = 0usize;
+        let mut difficulty = 1usize;
+        let mut completed = Vec::new();
+        let mut best = Vec::new();
+        if let Ok(text) = std::fs::read_to_string(&self.campaign_progress_path) {
+            for line in text.lines() {
+                let Some((key, value)) = line.split_once('=') else {
+                    continue;
+                };
+                match key.trim().to_ascii_lowercase().as_str() {
+                    "mission" => mission = value.trim().parse().unwrap_or(0),
+                    "difficulty" => difficulty = value.trim().parse().unwrap_or(1),
+                    "completed" => {
+                        completed = value
+                            .split(',')
+                            .filter_map(|index| index.trim().parse::<usize>().ok())
+                            .collect();
+                    }
+                    "besttimes" => {
+                        best = value
+                            .split(',')
+                            .filter_map(|entry| {
+                                let (index, seconds) = entry.trim().split_once(':')?;
+                                Some((
+                                    index.trim().parse::<usize>().ok()?,
+                                    seconds.trim().parse::<i32>().ok()?,
+                                ))
+                            })
+                            .collect();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        (mission, difficulty.min(2), completed, best)
+    }
+
+    fn save_campaign_progress(&self, index: usize) {
+        if let Some(parent) = self.campaign_progress_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        let completed: Vec<String> = self
+            .campaign_completed
+            .iter()
+            .enumerate()
+            .filter(|(_, completed)| **completed)
+            .map(|(index, _)| index.to_string())
+            .collect();
+        let best: Vec<String> = self
+            .campaign_best
+            .iter()
+            .enumerate()
+            .filter_map(|(index, seconds)| seconds.map(|seconds| format!("{index}:{seconds}")))
+            .collect();
+        if let Err(error) = std::fs::write(
+            &self.campaign_progress_path,
+            format!(
+                "[Campaign]\nMission={index}\nDifficulty={}\nCompleted={}\nBestTimes={}\n",
+                self.campaign_difficulty,
+                completed.join(","),
+                best.join(",")
+            ),
+        ) {
+            tracing::warn!(%error, "failed to save campaign progress");
+        }
+    }
+
+    /// Populate the campaign list from every scenario INI in a directory.
+    fn load_campaign(&mut self, dir: &Path) -> usize {
+        self.campaign.clear();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            tracing::warn!(dir = %dir.display(), "campaign directory not found");
+            self.mode = RaMode::Setup;
+            return 0;
+        };
+        let mut paths: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("ini"))
+            })
+            .collect();
+        paths.sort();
+        for path in paths {
+            match cnc_red_alert::Scenario::from_file(&path) {
+                Ok(scenario) => self.campaign.push(CampaignEntry {
+                    path,
+                    width: scenario.width,
+                    height: scenario.height,
+                    terrain: scenario.terrain,
+                    ore: scenario.ore,
+                    objectives: scenario.objectives,
+                    triggers: scenario.triggers.len(),
+                    name: scenario.name,
+                    briefing: scenario.briefing,
+                    player: scenario.player,
+                }),
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), %error, "skipping invalid mission");
+                }
+            }
+        }
+        if self.campaign.is_empty() {
+            tracing::warn!(dir = %dir.display(), "campaign has no missions");
+            self.mode = RaMode::Setup;
+        } else {
+            self.mode = RaMode::CampaignSelect;
+            let (mission, difficulty, completed, best) = self.load_campaign_progress();
+            self.campaign_index = mission.min(self.campaign.len() - 1);
+            self.campaign_difficulty = difficulty.min(DIFFICULTY_NAMES.len() - 1);
+            self.campaign_completed = vec![false; self.campaign.len()];
+            for index in completed {
+                if let Some(slot) = self.campaign_completed.get_mut(index) {
+                    *slot = true;
+                }
+            }
+            self.campaign_best = vec![None; self.campaign.len()];
+            for (index, seconds) in best {
+                if let Some(slot) = self.campaign_best.get_mut(index) {
+                    *slot = Some(seconds);
+                }
+            }
+            self.campaign_active = true;
+            tracing::info!(
+                mission = self.campaign_index + 1,
+                total = self.campaign.len(),
+                difficulty = DIFFICULTY_NAMES[self.campaign_difficulty],
+                completed = self.campaign_completed.iter().filter(|done| **done).count(),
+                "campaign progress loaded"
+            );
+        }
+        self.campaign.len()
+    }
+
+    /// Mission indices matching the active completion filter.
+    fn campaign_visible(&self) -> Vec<usize> {
+        (0..self.campaign.len())
+            .filter(|index| match self.campaign_filter {
+                CampaignFilter::All => true,
+                CampaignFilter::Incomplete => {
+                    !self.campaign_completed.get(*index).copied().unwrap_or(false)
+                }
+                CampaignFilter::Completed => {
+                    self.campaign_completed.get(*index).copied().unwrap_or(false)
+                }
+            })
+            .collect()
+    }
+
+    fn cycle_campaign(&mut self, delta: i32) {
+        let visible = self.campaign_visible();
+        if visible.is_empty() {
+            return;
+        }
+        let position = visible
+            .iter()
+            .position(|index| *index == self.campaign_index)
+            .unwrap_or(0);
+        let len = visible.len() as i32;
+        let next = (((position as i32 + delta) % len) + len) % len;
+        self.campaign_index = visible[next as usize];
+    }
+
+    fn cycle_campaign_filter(&mut self) {
+        self.campaign_filter = self.campaign_filter.next();
+        let visible = self.campaign_visible();
+        if !visible.is_empty() && !visible.contains(&self.campaign_index) {
+            self.campaign_index = visible[0];
+        }
+    }
+
+    fn show_campaign_stats(&mut self) {
+        self.mode = RaMode::CampaignStats;
+    }
+
+    fn dismiss_campaign_stats(&mut self) {
+        self.mode = RaMode::CampaignSelect;
+    }
+
+    fn start_campaign_mission(&mut self, index: usize) -> bool {
+        let Some(entry) = self.campaign.get(index).cloned() else {
+            return false;
+        };
+        match cnc_red_alert::Scenario::from_file(&entry.path) {
+            Ok(scenario) => {
+                tracing::info!(
+                    mission = %scenario.name,
+                    path = %entry.path.display(),
+                    "campaign mission loaded"
+                );
+                self.game = RaGame::from_scenario(&scenario);
+                let (queue, attack) = self.campaign_tempo();
+                self.game.set_ai_tempo(queue, attack);
+                self.scenario_name = scenario.name;
+                self.campaign_index = index;
+                self.campaign_active = true;
+                self.active_scenario_path = Some(entry.path);
+                self.mode = RaMode::Playing;
+                self.placing = None;
+                self.briefing_open = !scenario.briefing.is_empty();
+                self.paused = false;
+                self.save_campaign_progress(index);
+                self.center_camera();
+                true
+            }
+            Err(error) => {
+                tracing::warn!(path = %entry.path.display(), %error, "failed to load mission");
+                false
+            }
+        }
+    }
+
+    /// Mark the current mission complete and advance (or finish the campaign).
+    fn advance_campaign(&mut self) {
+        if !self.campaign_active || !self.outcome_is_victory() {
+            return;
+        }
+        if let Some(slot) = self.campaign_completed.get_mut(self.campaign_index) {
+            *slot = true;
+        }
+        let time = self.game.elapsed.int();
+        if let Some(slot) = self.campaign_best.get_mut(self.campaign_index) {
+            if slot.is_none_or(|best| time < best) {
+                *slot = Some(time);
+            }
+        }
+        self.save_campaign_progress(self.campaign_index);
+        if let Some(next) = next_incomplete(&self.campaign_completed, self.campaign_index) {
+            self.start_campaign_mission(next);
+        } else {
+            tracing::info!("campaign complete");
+            self.mode = RaMode::CampaignComplete;
+        }
+    }
+
+    fn dismiss_campaign_complete(&mut self) {
+        self.campaign_index = 0;
+        self.mode = RaMode::CampaignSelect;
+    }
+
+    fn request_campaign_mission(&mut self, index: usize) {
+        self.campaign_index = index;
+        if self.campaign_completed.get(index).copied().unwrap_or(false) {
+            self.replay_prompt = true;
+        } else {
+            self.start_campaign_mission(index);
+        }
+    }
+
+    fn confirm_replay(&mut self) {
+        self.replay_prompt = false;
+        self.start_campaign_mission(self.campaign_index);
+    }
+
+    fn cancel_replay(&mut self) {
+        self.replay_prompt = false;
+    }
+
+    fn campaign_tempo(&self) -> (i32, i32) {
+        match self.campaign_difficulty {
+            0 => (18, 40),
+            2 => (7, 15),
+            _ => (12, 25),
+        }
+    }
+
+    /// Apply queued gameplay commands (the seam a network session will feed).
+    fn drain_pending_commands(&mut self) -> usize {
+        let commands: Vec<GameCommand> = self.pending_commands.drain(..).collect();
+        let count = commands.len();
+        for command in commands {
+            self.game.apply_command(&command);
+        }
+        count
+    }
+
+    /// Start a two-player RA skirmish wired to a UDP lockstep session.
+    fn enable_network(&mut self, setup: &NetworkSetup) -> Result<()> {
+        let config = NetworkConfig {
+            bind_address: setup.bind.clone(),
+            port: setup.port,
+            advertised: setup.advertised.clone(),
+            max_players: 2,
+        };
+        config.validate().map_err(|error| anyhow!(error))?;
+        let local_player: u8 = match setup.role.as_str() {
+            "host" => 0,
+            "join" => 1,
+            other => return Err(anyhow!("unknown --net-role '{}' (host|join)", other)),
+        };
+        let bind = format!("{}:{}", setup.bind.trim(), setup.port);
+        let socket = UdpSocket::bind(&bind).with_context(|| format!("failed to bind {bind}"))?;
+        socket
+            .set_nonblocking(true)
+            .context("failed to make the network socket non-blocking")?;
+        // Hosts advertise themselves to the LAN lobby via broadcast beacons.
+        let _ = socket.set_broadcast(true);
+        let local_address = socket.local_addr().ok();
+        let mut session = LiveSession::new(local_player, 2, local_address)
+            .map_err(|error| anyhow!("network session setup failed: {error:?}"))?;
+        if local_player == 0 {
+            let mut index = 0usize;
+            for peer in setup.peers.iter().filter(|peer| !peer.trim().is_empty()) {
+                let address = peer
+                    .parse::<SocketAddr>()
+                    .with_context(|| format!("invalid --net-peer '{peer}'"))?;
+                session.register_peer((1 + index) as u8, address);
+                index += 1;
+            }
+        } else {
+            let host = setup
+                .join
+                .clone()
+                .ok_or_else(|| anyhow!("--net-role join requires --net-join HOST:PORT"))?;
+            let address = host
+                .parse::<SocketAddr>()
+                .with_context(|| format!("invalid --net-join '{host}'"))?;
+            session.register_peer(0, address);
+            let mut index = 0usize;
+            for peer in setup.peers.iter().filter(|peer| !peer.trim().is_empty()) {
+                let address = peer
+                    .parse::<SocketAddr>()
+                    .with_context(|| format!("invalid --net-peer '{peer}'"))?;
+                session.register_peer((2 + index) as u8, address);
+                index += 1;
+            }
+        }
+        if local_player == 1 {
+            if let Some(host) = session.peers.get(&0).copied() {
+                let text = format!("{JOIN_HANDSHAKE_PREFIX} {local_player}\n");
+                let _ = socket.send_to(text.as_bytes(), host);
+            }
+        }
+
+        self.start_skirmish();
+        self.campaign_active = false;
+        self.game.set_player_owner(local_player as usize);
+        self.game.disable_ai();
+        self.scenario_name = format!("Network {}", setup.role);
+        println!(
+            "net role={} local_player={} addr={:?} peers={}",
+            setup.role,
+            local_player,
+            local_address,
+            session.peers.len()
+        );
+        let last_seen = session
+            .peers
+            .keys()
+            .map(|player| (*player, Instant::now()))
+            .collect();
+        self.network = Some(RaNetwork {
+            socket,
+            session,
+            last_tick: Instant::now(),
+            sent: 0,
+            applied: 0,
+            seen: HashSet::new(),
+            role: setup.role.clone(),
+            last_beacon: Instant::now(),
+            last_handshake: Instant::now(),
+            last_seen,
+            reported: HashSet::new(),
+            migrations: 0,
+            losses: 0,
+            rejoined: 0,
+            replay_commands: Vec::new(),
+        });
+        Ok(())
+    }
+
+    /// Start replaying a recorded network match.
+    fn start_replay(&mut self, replay: cnc_tiberian_dawn::network::Replay) {
+        self.start_skirmish();
+        self.game.disable_ai();
+        self.game.set_player_owner(0);
+        self.mode = RaMode::Playing;
+        self.briefing_open = false;
+        self.paused = false;
+        self.scenario_name = format!("Replay ({} commands)", replay.commands.len());
+        self.center_camera();
+        self.replay = Some(ReplayState {
+            commands: replay.commands,
+            next: 0,
+            frame: 0,
+            last_tick: Instant::now(),
+            paused: false,
+            done: false,
+        });
+    }
+
+    /// Apply every command due in the next replay frame.
+    fn step_replay_frame(&mut self) -> usize {
+        let Some(state) = self.replay.as_mut() else {
+            return 0;
+        };
+        let frame = state.frame;
+        state.frame = state.frame.wrapping_add(1);
+        let mut applied = 0;
+        loop {
+            let Some(command) = state.commands.get(state.next).cloned() else {
+                break;
+            };
+            if command.frame > frame {
+                break;
+            }
+            state.next += 1;
+            if apply_net_command(&mut self.game, &command) {
+                applied += 1;
+            }
+        }
+        state.done = state.next >= state.commands.len();
+        applied
+    }
+
+    /// Advance playback on the same 250 ms cadence used for live packets.
+    fn poll_replay(&mut self) {
+        let due = self.replay.as_ref().is_some_and(|state| {
+            !state.paused && !state.done && state.last_tick.elapsed() >= Duration::from_millis(250)
+        });
+        if due {
+            if let Some(state) = self.replay.as_mut() {
+                state.last_tick = Instant::now();
+            }
+            self.step_replay_frame();
+        }
+    }
+
+    /// Open the host/join lobby from the skirmish setup screen.
+    fn open_lobby(&mut self) {
+        self.mode = RaMode::NetworkLobby;
+        self.lobby_error = None;
+        self.lan_scan = None;
+        self.lobby.focus = 0;
+    }
+
+    /// Start or stop listening for host beacons on the LAN discovery port.
+    fn toggle_lan_scan(&mut self) {
+        toggle_lan_scan(&mut self.lan_scan, &mut self.lobby_error);
+    }
+
+    /// Collect every beacon that arrived since the last poll.
+    fn poll_lan_scan(&mut self) {
+        poll_lan_scan_socket(&mut self.lan_scan);
+    }
+
+    /// Start the match current lobby settings describe (called from the UI).
+    fn start_lobby(&mut self) -> Result<()> {
+        let role = self.lobby.role;
+        let setup = match role {
+            NetRole::Host => NetworkSetup {
+                role: "host".to_string(),
+                join: None,
+                port: self.lobby.host_port,
+                peers: vec![self.lobby.peer_address.trim().to_string()],
+                bind: "0.0.0.0".to_string(),
+                advertised: None,
+            },
+            NetRole::Join => NetworkSetup {
+                role: "join".to_string(),
+                join: Some(self.lobby.join_address.trim().to_string()),
+                port: self.lobby.join_port,
+                peers: Vec::new(),
+                bind: "0.0.0.0".to_string(),
+                advertised: None,
+            },
+        };
+        self.lobby_error = None;
+        match self.enable_network(&setup) {
+            Ok(()) => {
+                self.lan_scan = None;
+                self.mode = RaMode::Playing;
+                Ok(())
+            }
+            Err(error) => {
+                self.lobby_error = Some(error.to_string());
+                Ok(())
+            }
+        }
+    }
+
+    /// Drain incoming datagrams and advance/emit one lockstep frame on a timer.
+    fn poll_network(&mut self) {
+        let Some(net) = self.network.as_mut() else {
+            return;
+        };
+        let mut buffer = [0u8; 2048];
+        loop {
+            match net.socket.recv_from(&mut buffer) {
+                Ok((size, source)) => {
+                    if let Some((player, message)) = parse_chat_line(&buffer[..size]) {
+                        self.chat_log.push((player, message));
+                        if self.chat_log.len() > 20 {
+                            self.chat_log.remove(0);
+                        }
+                        continue;
+                    }
+                    if let Some(player) = parse_join_handshake(&buffer[..size]) {
+                        let before = net.rejoined;
+                        register_join_peer(net, source, player);
+                        if net.rejoined > before {
+                            self.notice = Some((
+                                format!("Peer {player} reconnected"),
+                                Instant::now(),
+                            ));
+                        }
+                        continue;
+                    }
+                    let event = net.session.handle_datagram(source, &buffer[..size]);
+                    // A host that was started without --net-peer learns the peer
+                    // from its first packet; a lost peer may also come back from
+                    // a new port, in which case the packet's player id wins.
+                    let mut seen_player = net
+                        .session
+                        .peers
+                        .iter()
+                        .find(|(_, address)| **address == source)
+                        .map(|(player, _)| *player);
+                    if seen_player.is_none() {
+                        // Decode directly (not via the relay event) so a packet
+                        // whose bytes were seen before a reconnect still counts.
+                        let packet = NetPacket::decode(&buffer[..size])
+                            .ok()
+                            .filter(NetPacket::verify);
+                        if let Some(packet) = packet {
+                            let local = net.session.local_player;
+                            let players = net.session.players;
+                            let claimed = packet
+                                .commands
+                                .iter()
+                                .map(|command| command.player)
+                                .find(|player| *player != local && *player < players);
+                            let rejoining = claimed.and_then(|player| {
+                                (net.reported.contains(&player)
+                                    || !net.session.migration.alive.contains(&player))
+                                .then_some(player)
+                            });
+                            let player = rejoining.or_else(|| {
+                                let taken: Vec<u8> =
+                                    net.session.peers.keys().copied().collect();
+                                (0..players)
+                                    .find(|player| *player != local && !taken.contains(player))
+                            });
+                            if let Some(player) = player {
+                                net.session.register_peer(player, source);
+                                seen_player = Some(player);
+                            }
+                        }
+                    }
+                    if let Some(player) = seen_player {
+                        net.last_seen.insert(player, Instant::now());
+                        let was_lost = net.reported.remove(&player);
+                        if was_lost || !net.session.migration.alive.contains(&player) {
+                            net.session.migration.alive.insert(player);
+                            // A reconnecting peer restarts its sequence numbers;
+                            // drop stale relay hashes so its new packets pass.
+                            net.session.relay.clear();
+                            if was_lost {
+                                net.rejoined += 1;
+                                self.notice = Some((
+                                    format!("Peer {player} reconnected"),
+                                    Instant::now(),
+                                ));
+                                tracing::info!(player, "network peer reconnected");
+                            }
+                        }
+                    }
+                    match event {
+                        LiveEvent::Commands(packet) => {
+                            for command in &packet.commands {
+                                // Mesh relay/echoes can deliver the same command
+                                // twice; apply each command exactly once.
+                                if !net.seen.insert(command.hash()) {
+                                    continue;
+                                }
+                                if apply_net_command(&mut self.game, command) {
+                                    net.applied += 1;
+                                }
+                            }
+                        }
+                        LiveEvent::Migration(message) => {
+                            net.migrations += 1;
+                            self.notice =
+                                Some(("Network host migration".to_string(), Instant::now()));
+                            tracing::info!(?message, "network host migration");
+                            if let Some((claim, targets)) = net.session.maybe_claim() {
+                                let bytes = claim.encode();
+                                for target in targets {
+                                    let _ = net.socket.send_to(&bytes, target);
+                                }
+                                net.migrations += 1;
+                            }
+                        }
+                        LiveEvent::Duplicate | LiveEvent::Invalid => {}
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => {
+                    tracing::warn!(%error, "network receive failed");
+                    break;
+                }
+            }
+        }
+
+        let now = Instant::now();
+        let lost: Vec<u8> = net
+            .last_seen
+            .iter()
+            .filter(|(player, seen)| {
+                **player != net.session.local_player
+                    && now.duration_since(**seen) > PEER_TIMEOUT
+                    && !net.reported.contains(player)
+            })
+            .map(|(player, _)| *player)
+            .collect();
+        for player in lost {
+            net.losses += 1;
+            net.reported.insert(player);
+            self.notice = Some((
+                format!("Peer {player} lost - election started"),
+                Instant::now(),
+            ));
+            if let Some(message) = net.session.report_loss(player) {
+                net.migrations += 1;
+                let bytes = message.encode();
+                for target in net.session.peers.values().copied() {
+                    let _ = net.socket.send_to(&bytes, target);
+                }
+                tracing::info!(player, "network peer timed out; migration started");
+                if let Some((claim, targets)) = net.session.maybe_claim() {
+                    let bytes = claim.encode();
+                    for target in targets {
+                        let _ = net.socket.send_to(&bytes, target);
+                    }
+                    net.migrations += 1;
+                }
+            } else {
+                tracing::warn!(player, "network peer timed out");
+            }
+        }
+
+        if net.role == "join" && net.last_handshake.elapsed() >= Duration::from_secs(2) {
+            net.last_handshake = Instant::now();
+            if let Some(host) = net.session.peers.get(&0).copied() {
+                let text = format!(
+                    "{JOIN_HANDSHAKE_PREFIX} {}\n",
+                    net.session.local_player
+                );
+                let _ = net.socket.send_to(text.as_bytes(), host);
+            }
+        }
+
+        if net.role == "host" && net.last_beacon.elapsed() >= Duration::from_secs(2) {
+            net.last_beacon = Instant::now();
+            if let Ok(local) = net.socket.local_addr() {
+                let beacon = lan_beacon_text(local.port(), "RA");
+                // Limited broadcast reaches the LAN; the loopback subnet
+                // broadcast also reaches a lobby on the same machine.
+                for address in [
+                    std::net::Ipv4Addr::BROADCAST,
+                    std::net::Ipv4Addr::new(127, 255, 255, 255),
+                ] {
+                    let _ = net
+                        .socket
+                        .send_to(beacon.as_bytes(), (address, LAN_DISCOVERY_PORT));
+                }
+            }
+        }
+
+        if net.last_tick.elapsed() < Duration::from_millis(250) {
+            return;
+        }
+        net.last_tick = Instant::now();
+        match net.session.advance() {
+            Ok((commands, bytes, targets)) => {
+                net.replay_commands.extend(commands.iter().cloned());
+                for target in targets {
+                    if net.socket.send_to(&bytes, target).is_ok() {
+                        net.sent += 1;
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(?error, "network packet encoding failed"),
+        }
+    }
+
+    /// Queue a unit locally and broadcast the same order in a network game.
+    fn produce_unit(&mut self, class_id: cnc_core::ClassId) {
+        let player = self.game.player_owner;
+        self.pending_commands.push(GameCommand::Produce {
+            owner: player,
+            class_id,
+            seconds: ra_unit_build_seconds(class_id),
+        });
+        if let Some(net) = self.network.as_mut() {
+            // RA derives the build time from the class, so factory stays unused.
+            net.session.queue_local(NetCommandKind::Produce {
+                factory: 0,
+                unit_type: class_id,
+            });
+        }
+    }
+
+    /// Cancel the front production item (locally and over the network).
+    fn cancel_production(&mut self) {
+        if let Some(net) = self.network.as_mut() {
+            net.session.queue_local(NetCommandKind::CancelProduction);
+        }
+        self.pending_commands.push(GameCommand::CancelProduction {
+            owner: self.game.player_owner,
+        });
+        self.notice = Some(("Production cancelled".to_string(), Instant::now()));
+    }
+
+    /// Scatter the selected units to deterministic nearby cells.
+    fn scatter_selected_units(&mut self) {
+        let player = self.game.player_owner;
+        let ids: Vec<u32> = self
+            .game
+            .units
+            .iter()
+            .filter(|unit| unit.selected && unit.owner == player && unit.is_alive())
+            .map(|unit| unit.id)
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let targets = self.game.scatter_targets(player, &ids);
+        let count = targets.len();
+        for (id, target) in targets {
+            if let Some(net) = self.network.as_mut() {
+                net.session.queue_local(NetCommandKind::Move {
+                    units: vec![id],
+                    target,
+                });
+            }
+            self.pending_commands.push(GameCommand::Move {
+                owner: player,
+                units: vec![id],
+                target,
+            });
+        }
+        self.notice = Some((format!("Scattered {count} units"), Instant::now()));
+        tracing::debug!(count, "RA scatter order queued");
+    }
+
+    /// Toggle power on the selected structure (locally and over the network).
+    fn toggle_selected_power(&mut self) {
+        let Some(id) = self.selected_structure else {
+            return;
+        };
+        let player = self.game.player_owner;
+        let Some(current) = self
+            .game
+            .structures
+            .iter()
+            .find(|structure| structure.id == id && structure.owner == player)
+            .map(|structure| structure.powered)
+        else {
+            return;
+        };
+        let on = !current;
+        if let Some(net) = self.network.as_mut() {
+            net.session
+                .queue_local(NetCommandKind::Power { building: id, on });
+        }
+        self.pending_commands.push(GameCommand::Power {
+            owner: player,
+            building: id,
+            on,
+        });
+        self.notice = Some((
+            format!("Structure power {}", if on { "on" } else { "off" }),
+            Instant::now(),
+        ));
+    }
+
+    /// Repair the selected structure (locally and over the network).
+    fn repair_selected_structure(&mut self) {
+        let Some(id) = self.selected_structure else {
+            return;
+        };
+        let player = self.game.player_owner;
+        let valid = self.game.structures.iter().any(|structure| {
+            structure.id == id
+                && structure.owner == player
+                && structure.is_alive()
+                && structure.health < structure.max_health
+        });
+        if !valid {
+            self.notice = Some(("No repair needed".to_string(), Instant::now()));
+            return;
+        }
+        if let Some(net) = self.network.as_mut() {
+            net.session
+                .queue_local(NetCommandKind::RepairStructure { building: id });
+        }
+        self.pending_commands.push(GameCommand::Repair {
+            owner: player,
+            building: id,
+        });
+        self.notice = Some(("Repair queued".to_string(), Instant::now()));
+        tracing::info!(building = id, "RA structure repair queued");
+    }
+
+    /// Stop the selected units (locally and over the network).
+    fn stop_selected_units(&mut self) {
+        let player = self.game.player_owner;
+        let units: Vec<u32> = self
+            .game
+            .units
+            .iter()
+            .filter(|unit| unit.selected && unit.owner == player && unit.is_alive())
+            .map(|unit| unit.id)
+            .collect();
+        if units.is_empty() {
+            return;
+        }
+        if let Some(net) = self.network.as_mut() {
+            net.session.queue_local(NetCommandKind::Stop {
+                units: units.clone(),
+            });
+        }
+        self.pending_commands.push(GameCommand::Stop {
+            owner: player,
+            units,
+        });
+        tracing::debug!("RA stop order queued");
+    }
+
+    /// Deploy the selected MCV (locally and over the network).
+    fn deploy_selected_mcv(&mut self) {
+        let player = self.game.player_owner;
+        let Some(id) = self
+            .game
+            .units
+            .iter()
+            .find(|unit| {
+                unit.selected
+                    && unit.owner == player
+                    && unit.is_alive()
+                    && unit.class_id == cnc_core::ClassId::VehicleE7
+            })
+            .map(|unit| unit.id)
+        else {
+            return;
+        };
+        if let Some(net) = self.network.as_mut() {
+            net.session.queue_local(NetCommandKind::Deploy { unit: id });
+        }
+        self.pending_commands.push(GameCommand::Deploy {
+            owner: player,
+            unit: id,
+        });
+        tracing::info!(unit = id, "RA MCV deploy queued");
+    }
+
+    /// Sell the structure selected by a left click (locally and over the network).
+    fn sell_selected_structure(&mut self) {
+        let Some(id) = self.selected_structure.take() else {
+            return;
+        };
+        let player = self.game.player_owner;
+        let valid = self.game.structures.iter().any(|structure| {
+            structure.id == id && structure.owner == player && structure.is_alive()
+        });
+        if !valid {
+            return;
+        }
+        if let Some(net) = self.network.as_mut() {
+            net.session.queue_local(NetCommandKind::Sell { building: id });
+        }
+        self.pending_commands.push(GameCommand::Sell {
+            owner: player,
+            building: id,
+        });
+        tracing::info!(id, "RA structure sold");
+    }
+
+    /// True once when a screen asks the shell to return to the main menu.
+    fn take_return_to_menu(&mut self) -> bool {
+        std::mem::take(&mut self.return_to_menu)
+    }
+
+    fn enter_pause(&mut self) {
+        self.paused = true;
+        self.pause_choice = 0;
+    }
+
+    fn activate_pause_choice(&mut self) {
+        match self.pause_choice {
+            0 => self.paused = false,
+            1 => self.restart_mission(),
+            2 => self.abort_mission(),
+            3 => self.save_game(),
+            4 => {
+                if self.load_game() {
+                    self.paused = false;
+                }
+            }
+            5 => self.cycle_save_slot(),
+            _ => {}
+        }
+    }
+
+    /// Cycle through the three RA save slots.
+    fn cycle_save_slot(&mut self) {
+        self.save_slot = (self.save_slot + 1) % 3;
+        self.notice = Some((
+            format!("Save slot {}/3", self.save_slot + 1),
+            Instant::now(),
+        ));
+    }
+
+    /// Save the network replay to an explicit path; false without a session.
+    fn save_network_replay_to(&mut self, path: &Path) -> bool {
+        let Some(net) = self.network.as_ref() else {
+            return false;
+        };
+        let replay = cnc_tiberian_dawn::network::Replay::new(
+            net.session.players,
+            net.replay_commands.clone(),
+        );
+        match replay.save(path) {
+            Ok(()) => {
+                self.notice = Some((
+                    format!("Replay saved to {}", path.display()),
+                    Instant::now(),
+                ));
+                tracing::info!(path = %path.display(), "network replay saved");
+                true
+            }
+            Err(error) => {
+                self.notice = Some((format!("Replay save failed: {error}"), Instant::now()));
+                false
+            }
+        }
+    }
+
+    /// Save the network replay to the configured or default path.
+    fn save_network_replay(&mut self) {
+        let path = self
+            .net_replay_path
+            .clone()
+            .unwrap_or_else(default_network_replay_path);
+        self.save_network_replay_to(&path);
+    }
+
+    /// Save the current RA game (F5 / pause menu).
+    fn save_game(&mut self) {
+        let path = ra_save_path_for(self.save_slot);
+        self.save_game_to(&path);
+    }
+
+    /// Save to an explicit path; returns true on success.
+    fn save_game_to(&mut self, path: &Path) -> bool {
+        match self.game.save_to_file(path) {
+            Ok(()) => {
+                self.notice = Some(("Game saved".to_string(), Instant::now()));
+                tracing::info!(path = %path.display(), "RA mission saved");
+                true
+            }
+            Err(error) => {
+                self.notice = Some((format!("Save failed: {error}"), Instant::now()));
+                tracing::warn!(%error, "RA mission save failed");
+                false
+            }
+        }
+    }
+
+    /// Load the saved RA game; returns true when the load succeeded.
+    fn load_game(&mut self) -> bool {
+        let path = ra_save_path_for(self.save_slot);
+        self.load_game_from(&path)
+    }
+
+    /// Load from an explicit path; returns true on success.
+    fn load_game_from(&mut self, path: &Path) -> bool {
+        match RaGame::load_from_file(path) {
+            Ok(game) => {
+                self.game = game;
+                self.mode = RaMode::Playing;
+                self.briefing_open = false;
+                self.placing = None;
+                self.center_camera();
+                self.notice = Some(("Game loaded".to_string(), Instant::now()));
+                tracing::info!(path = %path.display(), "RA mission loaded");
+                true
+            }
+            Err(error) => {
+                self.notice = Some((format!("Load failed: {error}"), Instant::now()));
+                tracing::warn!(%error, "RA mission load failed");
+                false
+            }
+        }
+    }
+
+    fn restart_mission(&mut self) {
+        self.paused = false;
+        if self.network.is_some() {
+            // The UDP session cannot be re-created from a single-player restart.
+            return;
+        }
+        if let Some(path) = self.active_scenario_path.clone() {
+            if let Ok(scenario) = cnc_red_alert::Scenario::from_file(&path) {
+                self.game = RaGame::from_scenario(&scenario);
+                if self.campaign_active {
+                    let (queue, attack) = self.campaign_tempo();
+                    self.game.set_ai_tempo(queue, attack);
+                }
+                self.scenario_name = scenario.name;
+                self.mode = RaMode::Playing;
+                self.briefing_open = false;
+                self.placing = None;
+                self.center_camera();
+                return;
+            }
+        }
+        self.start_skirmish();
+    }
+
+    fn abort_mission(&mut self) {
+        self.paused = false;
+        self.placing = None;
+        if self.network.is_some() {
+            self.save_network_replay();
+        }
+        if self.network.take().is_some() {
+            self.scenario_name = "Skirmish".to_string();
+            self.mode = RaMode::Setup;
+            return;
+        }
+        if self.campaign_active {
+            self.mode = RaMode::CampaignSelect;
+        } else {
+            self.mode = RaMode::Setup;
+        }
+    }
+
+    fn cycle_campaign_difficulty(&mut self) {
+        self.campaign_difficulty =
+            (self.campaign_difficulty + 1) % DIFFICULTY_NAMES.len();
+        self.save_campaign_progress(self.campaign_index);
+    }
+
+    fn outcome_is_victory(&self) -> bool {
+        let victory = if self.game.player_owner == 0 {
+            cnc_red_alert::ScenarioOutcome::AlliesWin
+        } else {
+            cnc_red_alert::ScenarioOutcome::SovietsWin
+        };
+        self.game.outcome == Some(victory)
+    }
+
+    fn start_skirmish(&mut self) {
+        self.game_speed = 1.0;
+        let size = self.setup.map_size;
+        let mut game = RaGame::new(size, size);
+        game.set_player_owner(self.setup.side);
+        let player_house = self.setup.side;
+        if let Some(house) = game.houses.get_mut(player_house) {
+            house.country = Some(self.setup.country);
+            house.faction = self.setup.country.faction();
+        }
+        let (queue, attack) = match self.setup.difficulty {
+            0 => (18, 40),
+            2 => (7, 15),
+            _ => (12, 25),
+        };
+        game.set_ai_tempo(queue, attack);
+        self.game = game;
+        self.scenario_name = format!(
+            "Skirmish {} ({})",
+            self.setup.country.label(),
+            DIFFICULTY_NAMES[self.setup.difficulty]
+        );
+        self.mode = RaMode::Playing;
+        self.placing = None;
+        self.briefing_open = false;
+        self.paused = false;
+        self.active_scenario_path = None;
+        self.center_camera();
+        tracing::info!(
+            map = %format!("{}x{}", size, size),
+            country = self.setup.country.label(),
+            difficulty = DIFFICULTY_NAMES[self.setup.difficulty],
+            "Red Alert skirmish started"
+        );
+    }
+
+    fn center_camera(&mut self) {
+        self.camera.set_viewport(self.width.max(1), self.height.max(1));
+        self.camera.zoom = Fixed16_16::from_f32(DEFAULT_GAME_ZOOM);
+        self.camera.position = Vec2::new(
+            Fixed16_16::from_f32(self.game.map.width as f32 * RA_TILE_SIZE * 0.5),
+            Fixed16_16::from_f32(self.game.map.height as f32 * RA_TILE_SIZE * 0.5),
+        );
+    }
+
+    fn cycle_map_size(&mut self, forward: bool) {
+        let index = RA_MAP_SIZES
+            .iter()
+            .position(|size| *size == self.setup.map_size)
+            .unwrap_or(1);
+        let next = if forward {
+            (index + 1) % RA_MAP_SIZES.len()
+        } else {
+            (index + RA_MAP_SIZES.len() - 1) % RA_MAP_SIZES.len()
+        };
+        self.setup.map_size = RA_MAP_SIZES[next];
+    }
+
+    fn cycle_country(&mut self) {
+        let countries = if self.setup.side == 0 {
+            &ALLIED_COUNTRIES[..]
+        } else {
+            &SOVIET_COUNTRIES[..]
+        };
+        let index = countries
+            .iter()
+            .position(|country| *country == self.setup.country)
+            .unwrap_or(0);
+        self.setup.country = countries[(index + 1) % countries.len()];
+    }
+
+    fn cycle_side(&mut self) {
+        self.setup.side ^= 1;
+        self.setup.country = if self.setup.side == 0 {
+            ALLIED_COUNTRIES[0]
+        } else {
+            SOVIET_COUNTRIES[0]
+        };
+    }
+
+    fn cycle_difficulty(&mut self) {
+        self.setup.difficulty = (self.setup.difficulty + 1) % DIFFICULTY_NAMES.len();
+    }
+
+    /// Enemy unit or structure under the cursor (right-click attack target).
+    fn enemy_target_at(&self, world: Vec2, player: usize) -> Option<u32> {
+        const RADIUS: f32 = 18.0;
+        let mut best: Option<(u32, f32)> = None;
+        for unit in &self.game.units {
+            if unit.owner == player || !unit.is_alive() {
+                continue;
+            }
+            let distance = unit.position.distance(world).to_f32();
+            if distance <= RADIUS && best.is_none_or(|(_, current)| distance < current) {
+                best = Some((unit.id, distance));
+            }
+        }
+        for structure in &self.game.structures {
+            if structure.owner == player || !structure.is_alive() {
+                continue;
+            }
+            let distance = structure.position.distance(world).to_f32();
+            if distance <= RADIUS && best.is_none_or(|(_, current)| distance < current) {
+                best = Some((structure.id, distance));
+            }
+        }
+        best.map(|(id, _)| id)
+    }
+
+    /// Center the RA camera when a click lands on the minimap.
+    fn ra_minimap_click(&mut self, world: Vec2) -> bool {
+        let world = self.hud_world(world);
+        let view_w = self.camera.viewport_width as f32;
+        let view_h = self.camera.viewport_height as f32;
+        let left = self.camera.position.x.to_f32() - view_w * 0.5;
+        let top = self.camera.position.y.to_f32() - view_h * 0.5;
+        let Some(cell) = minimap_cell_at(
+            world,
+            self.game.map.width,
+            self.game.map.height,
+            left,
+            top,
+            view_w,
+            view_h,
+            true,
+        ) else {
+            return false;
+        };
+        self.camera.position = Vec2::new(
+            Fixed16_16::from_f32((cell.x as f32 + 0.5) * RA_TILE_SIZE),
+            Fixed16_16::from_f32((cell.y as f32 + 0.5) * RA_TILE_SIZE),
+        );
+        true
+    }
+
+    /// Send the chat input to every known peer and log it locally.
+    fn send_chat(&mut self) {
+        let message = self.chat_input.trim().to_string();
+        self.chat_input.clear();
+        self.chat_open = false;
+        if message.is_empty() {
+            return;
+        }
+        let Some(net) = self.network.as_mut() else {
+            return;
+        };
+        let local = net.session.local_player;
+        self.chat_log.push((local, message.clone()));
+        if self.chat_log.len() > 20 {
+            self.chat_log.remove(0);
+        }
+        let line = format!("{CHAT_PREFIX} {local} {message}\n");
+        for peer in net.session.peers.values().copied() {
+            let _ = net.socket.send_to(line.as_bytes(), peer);
+        }
+    }
+
+    /// Pan the RA camera while the cursor rests near a window edge.
+    fn apply_ra_edge_pan(&mut self, delta: f32) {
+        let Some(cursor) = self.cursor else {
+            return;
+        };
+        let (dx, dy) = edge_pan_direction(
+            cursor.x as f32,
+            cursor.y as f32,
+            self.width as f32,
+            self.height as f32,
+            8.0,
+        );
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
+        let zoom = self.camera.zoom.to_f32().max(1.0e-6);
+        let step = 520.0 * delta / zoom;
+        let max_x = self.game.map.width as f32 * RA_TILE_SIZE;
+        let max_y = self.game.map.height as f32 * RA_TILE_SIZE;
+        self.camera.position = Vec2::new(
+            Fixed16_16::from_f32(
+                (self.camera.position.x.to_f32() + dx * step).clamp(0.0, max_x),
+            ),
+            Fixed16_16::from_f32(
+                (self.camera.position.y.to_f32() + dy * step).clamp(0.0, max_y),
+            ),
+        );
+    }
+
+    /// Adjust RA simulation speed; locked in network games for lockstep.
+    fn adjust_ra_speed(&mut self, delta: f32) {
+        if self.network.is_some() {
+            self.notice = Some((
+                "Speed is locked in network games".to_string(),
+                Instant::now(),
+            ));
+            return;
+        }
+        self.game_speed = (self.game_speed + delta).clamp(0.25, 3.0);
+        self.notice = Some((format!("Game speed {:.2}x", self.game_speed), Instant::now()));
+    }
+
+    /// Store the selected RA units in a control group.
+    fn store_control_group(&mut self, slot: usize) {
+        let player = self.game.player_owner;
+        let ids: Vec<u32> = self
+            .game
+            .units
+            .iter()
+            .filter(|unit| unit.selected && unit.owner == player && unit.is_alive())
+            .map(|unit| unit.id)
+            .collect();
+        if let Some(group) = self.control_groups.get_mut(slot) {
+            *group = ids;
+            self.notice = Some((format!("Group {} stored", slot + 1), Instant::now()));
+        }
+    }
+
+    /// Recall a stored RA control group; false when the slot is empty.
+    fn recall_control_group(&mut self, slot: usize) -> bool {
+        let Some(ids) = self.control_groups.get(slot).cloned() else {
+            return false;
+        };
+        if ids.is_empty() {
+            return false;
+        }
+        let player = self.game.player_owner;
+        for unit in &mut self.game.units {
+            unit.selected = unit.owner == player && unit.is_alive() && ids.contains(&unit.id);
+        }
+        self.notice = Some((format!("Group {} recalled", slot + 1), Instant::now()));
+        true
+    }
+
+    /// Store the current RA camera view in a bookmark slot.
+    fn save_ra_bookmark(&mut self, slot: usize) {
+        if let Some(bookmark) = self.bookmarks.get_mut(slot) {
+            *bookmark = Some(self.camera.position);
+            self.notice = Some((format!("View {} saved", slot + 1), Instant::now()));
+        }
+    }
+
+    /// Jump to a stored RA camera bookmark; false when the slot is empty.
+    fn jump_ra_bookmark(&mut self, slot: usize) -> bool {
+        if let Some(Some(position)) = self.bookmarks.get(slot).copied() {
+            self.camera.position = position;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn cursor_cell(&self) -> Option<Vec2i> {
+        self.cursor_world().map(|world| {
+            Vec2i::new(
+                (world.x.to_f32() / RA_TILE_SIZE).floor() as i32,
+                (world.y.to_f32() / RA_TILE_SIZE).floor() as i32,
+            )
+        })
+    }
+
+    fn draw(&mut self) {
+        let now = Instant::now();
+        let delta = (now - self.last_frame).as_secs_f32().min(0.1).max(1.0e-4);
+        self.last_frame = now;
+        if self.mode == RaMode::Playing && !self.paused && !self.briefing_open {
+            self.apply_ra_edge_pan(delta);
+        }
+
+        let placement_cell = if self.mode == RaMode::Playing {
+            self.cursor_cell()
+        } else {
+            None
+        };
+        let victory = self.outcome_is_victory();
+        if self.mode == RaMode::NetworkLobby {
+            self.poll_lan_scan();
+        }
+        if self.mode == RaMode::Playing && !self.paused && !self.briefing_open {
+            self.drain_pending_commands();
+            self.poll_network();
+            self.poll_replay();
+        }
+
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+
+        if self.mode == RaMode::Setup {
+            renderer.begin_frame();
+            renderer.set_camera(&screen_camera(self.width, self.height));
+            draw_ra_setup(renderer.as_mut(), &self.setup, self.width, self.height);
+            if let Err(error) = renderer.end_frame() {
+                tracing::warn!(%error, "setup frame presentation failed");
+            }
+            self.frame_index = self.frame_index.wrapping_add(1);
+            return;
+        }
+
+        if self.mode == RaMode::NetworkLobby {
+            renderer.begin_frame();
+            renderer.set_camera(&screen_camera(self.width, self.height));
+            draw_net_lobby(
+                renderer.as_mut(),
+                "RED ALERT",
+                &self.lobby,
+                self.lan_scan.as_ref(),
+                self.lobby_error.as_deref(),
+                self.width,
+                self.height,
+            );
+            if let Err(error) = renderer.end_frame() {
+                tracing::warn!(%error, "lobby frame presentation failed");
+            }
+            self.frame_index = self.frame_index.wrapping_add(1);
+            return;
+        }
+
+        if self.mode == RaMode::CampaignSelect {
+            renderer.begin_frame();
+            renderer.set_camera(&screen_camera(self.width, self.height));
+            draw_ra_campaign(
+                renderer.as_mut(),
+                &self.campaign,
+                self.campaign_index,
+                &self.campaign_completed,
+                &self.campaign_best,
+                self.replay_prompt,
+                self.campaign_difficulty,
+                self.campaign_filter,
+                self.width,
+                self.height,
+            );
+            if let Err(error) = renderer.end_frame() {
+                tracing::warn!(%error, "campaign frame presentation failed");
+            }
+            self.frame_index = self.frame_index.wrapping_add(1);
+            return;
+        }
+
+        if self.mode == RaMode::CampaignStats {
+            renderer.begin_frame();
+            renderer.set_camera(&screen_camera(self.width, self.height));
+            draw_ra_campaign_stats(
+                renderer.as_mut(),
+                &self.campaign,
+                &self.campaign_completed,
+                &self.campaign_best,
+                self.campaign_difficulty,
+                self.width,
+                self.height,
+            );
+            if let Err(error) = renderer.end_frame() {
+                tracing::warn!(%error, "campaign stats frame presentation failed");
+            }
+            self.frame_index = self.frame_index.wrapping_add(1);
+            return;
+        }
+
+        if self.mode == RaMode::CampaignComplete {
+            renderer.begin_frame();
+            renderer.set_camera(&screen_camera(self.width, self.height));
+            draw_ra_campaign_complete(
+                renderer.as_mut(),
+                self.campaign.len(),
+                self.game.elapsed.int(),
+                self.width,
+                self.height,
+            );
+            if let Err(error) = renderer.end_frame() {
+                tracing::warn!(%error, "campaign complete frame presentation failed");
+            }
+            self.frame_index = self.frame_index.wrapping_add(1);
+            return;
+        }
+
+        if self.briefing_open {
+            renderer.begin_frame();
+            renderer.set_camera(&screen_camera(self.width, self.height));
+            draw_ra_briefing(
+                renderer.as_mut(),
+                &self.scenario_name,
+                &self.game,
+                self.campaign_index,
+                self.width,
+                self.height,
+            );
+            if let Err(error) = renderer.end_frame() {
+                tracing::warn!(%error, "briefing frame presentation failed");
+            }
+            self.frame_index = self.frame_index.wrapping_add(1);
+            return;
+        }
+
+        if !self.paused {
+            self.game
+                .update(Fixed16_16::from_f32(delta * self.game_speed));
+        }
+
+        renderer.begin_frame();
+        renderer.set_camera(&self.camera);
+        self.game.render(renderer.as_mut());
+
+        if let Some(id) = self.selected_structure {
+            if let Some(structure) = self
+                .game
+                .structures
+                .iter()
+                .find(|structure| structure.id == id && structure.is_alive())
+            {
+                let half = RA_TILE_SIZE * 0.5;
+                let x = structure.position.x.to_f32() - half;
+                let y = structure.position.y.to_f32() - half;
+                let color = [1.0, 0.82, 0.30, 1.0];
+                for (rx, ry, rw, rh) in [
+                    (x, y, RA_TILE_SIZE, 2.0),
+                    (x, y + RA_TILE_SIZE - 2.0, RA_TILE_SIZE, 2.0),
+                    (x, y, 2.0, RA_TILE_SIZE),
+                    (x + RA_TILE_SIZE - 2.0, y, 2.0, RA_TILE_SIZE),
+                ] {
+                    renderer.draw_rect(rx, ry, rw, rh, color);
+                }
+            }
+        }
+
+        if let (Some(start), Some(end)) = (self.selection_start, self.cursor) {
+            let dx = end.x - start.x;
+            let dy = end.y - start.y;
+            if dx * dx + dy * dy > 36.0 {
+                let a = self.camera.screen_to_world(Vec2::new(
+                    Fixed16_16::from_f32(start.x as f32),
+                    Fixed16_16::from_f32(start.y as f32),
+                ));
+                let b = self.camera.screen_to_world(Vec2::new(
+                    Fixed16_16::from_f32(end.x as f32),
+                    Fixed16_16::from_f32(end.y as f32),
+                ));
+                let x = a.x.to_f32().min(b.x.to_f32());
+                let y = a.y.to_f32().min(b.y.to_f32());
+                let w = (a.x.to_f32() - b.x.to_f32()).abs();
+                let h = (a.y.to_f32() - b.y.to_f32()).abs();
+                let color = [0.20, 0.80, 1.00, 1.0];
+                renderer.draw_rect(x, y, w, 1.5, color);
+                renderer.draw_rect(x, y + h - 1.5, w, 1.5, color);
+                renderer.draw_rect(x, y, 1.5, h, color);
+                renderer.draw_rect(x + w - 1.5, y, 1.5, h, color);
+            }
+        }
+
+        if self.placing.is_some() {
+            if let Some(cell) = placement_cell {
+                let blocked = self
+                    .game
+                    .structures
+                    .iter()
+                    .any(|structure| structure.cell == cell && structure.is_alive())
+                    || self
+                        .game
+                        .units
+                        .iter()
+                        .any(|unit| unit.cell == cell && unit.is_alive());
+                let color = if blocked {
+                    [1.0, 0.35, 0.30, 1.0]
+                } else {
+                    [0.40, 1.0, 0.50, 1.0]
+                };
+                let x = cell.x as f32 * RA_TILE_SIZE;
+                let y = cell.y as f32 * RA_TILE_SIZE;
+                renderer.draw_rect(x, y, RA_TILE_SIZE, 1.0, color);
+                renderer.draw_rect(x, y + RA_TILE_SIZE - 1.0, RA_TILE_SIZE, 1.0, color);
+                renderer.draw_rect(x, y, 1.0, RA_TILE_SIZE, color);
+                renderer.draw_rect(x + RA_TILE_SIZE - 1.0, y, 1.0, RA_TILE_SIZE, color);
+            }
+        }
+
+        // HUD. Its own layer, drawn with an unzoomed camera so status text,
+        // objectives and the minimap keep a constant pixel size while the map
+        // zooms underneath.
+        renderer.begin_layer();
+        renderer.set_camera(&hud_camera(&self.camera));
+        let zoom = self.camera.zoom.to_f32().max(1.0e-6);
+        let half_w = self.camera.viewport_width as f32 * 0.5;
+        let half_h = self.camera.viewport_height as f32 * 0.5;
+        let left = self.camera.position.x.to_f32() - half_w;
+        let top = self.camera.position.y.to_f32() - half_h;
+        let status = self.game.status();
+
+        renderer.draw_text(
+            &format!("RED ALERT {} - {}", self.scenario_name, self.game.summary()),
+            left + 16.0,
+            top + 16.0,
+            14.0,
+            [0.95, 0.90, 0.85, 1.0],
+        );
+        let queue_label = self
+            .game
+            .houses
+            .get(self.game.player_owner)
+            .and_then(|house| house.production_queue.front())
+            .map(|item| {
+                format!(
+                    "{:?} {}%",
+                    item.class_id,
+                    production_percent(item.progress, item.total_time)
+                )
+            })
+            .unwrap_or_else(|| "empty".to_string());
+        renderer.draw_text(
+            &format!(
+                "Allies {}u {}b {}cr pwr {} | Soviets {}u {}b {}cr pwr {} | selected {} | shots {} | chrono {}% | queue {queue_label}",
+                status.allied_units,
+                status.allied_structures,
+                status.allied_credits,
+                status.allied_power,
+                status.soviet_units,
+                status.soviet_structures,
+                status.soviet_credits,
+                status.soviet_power,
+                self.game.selected_count(self.game.player_owner),
+                status.shots,
+                self.game
+                    .superweapons
+                    .iter()
+                    .find(|weapon| weapon.class_id == cnc_core::ClassId::Chronosphere)
+                    .map_or(0, |weapon| (weapon.charge_fraction() * 100.0) as i32),
+            ),
+            left + 16.0,
+            top + 40.0,
+            8.0,
+            [0.85, 0.88, 0.95, 1.0],
+        );
+        let chat_hint = if self.network.is_some() { "  Y chat" } else { "" };
+        renderer.draw_text(
+            &format!("LMB select / drag box  RMB move/attack  MMB drag pan  wheel zoom / edge-scroll  Ctrl+1-4 view  Ctrl+Shift+1-4 mark  1 rifle 2 tank 3 ship  Space light tank  A all  P/B/W/T build  LMB struct X sell R repair O power G scatter  Bksp cancel  S stop  Alt+1-4 group  D deploy MCV  C chrono  I curtain  F5/F9 save/load  +/- or wheel zoom  F6/F7 speed {:.2}x  ESC quit{chat_hint}", self.game_speed),
+            left + 16.0,
+            top + 56.0,
+            8.0,
+            [0.65, 0.72, 0.82, 1.0],
+        );
+        let mut info_y = top + 72.0;
+        if !self.game.objectives.is_empty() {
+            renderer.draw_text(
+                "OBJECTIVES",
+                left + 16.0,
+                info_y,
+                9.0,
+                [0.60, 0.75, 0.95, 1.0],
+            );
+            info_y += 11.0;
+            for objective in self.game.objectives.iter().take(4) {
+                let mark = if objective.completed { "[x]" } else { "[ ]" };
+                let color = if objective.completed {
+                    [0.55, 0.85, 0.60, 1.0]
+                } else {
+                    [0.82, 0.88, 0.96, 1.0]
+                };
+                renderer.draw_text(
+                    &format!("{mark} {}", objective.text),
+                    left + 16.0,
+                    info_y,
+                    9.0,
+                    color,
+                );
+                info_y += 10.0;
+            }
+            info_y += 4.0;
+        }
+        if self.game.elapsed.int() < 12 && !self.game.briefing.is_empty() {
+            renderer.draw_text(
+                &format!("BRIEFING: {}", self.game.briefing),
+                left + 16.0,
+                info_y,
+                9.0,
+                [0.95, 0.86, 0.55, 1.0],
+            );
+            info_y += 14.0;
+        }
+        if let Some(class_id) = self.placing {
+            renderer.draw_text(
+                &format!("PLACING {class_id:?} - LMB place, Esc cancel"),
+                left + 16.0,
+                info_y,
+                9.0,
+                [1.0, 0.85, 0.40, 1.0],
+            );
+            info_y += 14.0;
+        }
+        if let Some(net) = &self.network {
+            renderer.draw_text(
+                &format!(
+                    "NET {} | applied {} sent {} | peers {} | lost {} mig {} rej {}",
+                    net.role,
+                    net.applied,
+                    net.sent,
+                    net.session.peers.len(),
+                    net.losses,
+                    net.migrations,
+                    net.rejoined
+                ),
+                left + 16.0,
+                info_y,
+                8.0,
+                [0.60, 0.90, 0.95, 1.0],
+            );
+            info_y += 11.0;
+        }
+        if let Some((notice, at)) = &self.notice {
+            if at.elapsed() < Duration::from_secs(4) {
+                renderer.draw_text(
+                    notice,
+                    left + 16.0,
+                    info_y,
+                    9.0,
+                    [1.0, 0.76, 0.35, 1.0],
+                );
+                info_y += 12.0;
+            }
+        }
+        if let Some(state) = &self.replay {
+            let status_text = if state.done {
+                "END - Esc quits"
+            } else if state.paused {
+                "PAUSED - Space resumes"
+            } else {
+                "Space pauses, Esc quits"
+            };
+            renderer.draw_text(
+                &format!(
+                    "REPLAY frame {} / {} commands - {status_text}",
+                    state.frame,
+                    state.commands.len()
+                ),
+                left + 16.0,
+                info_y,
+                9.0,
+                [0.95, 0.82, 0.35, 1.0],
+            );
+            info_y += 12.0;
+        }
+        if self.game.outcome.is_some() {
+            let (text, color) = if victory {
+                ("MISSION COMPLETE - Enter: continue", [0.45, 1.0, 0.55, 1.0])
+            } else {
+                ("MISSION FAILED - Enter: continue", [1.0, 0.45, 0.45, 1.0])
+            };
+            renderer.draw_text(text, left + 16.0, info_y, 10.0, color);
+            info_y += 14.0;
+        }
+        if let Some(message) = self.game.messages.last() {
+            renderer.draw_text(message, left + 16.0, info_y, 8.0, [0.85, 0.9, 0.95, 1.0]);
+        }
+
+        if !self.chat_log.is_empty() {
+            let shown: Vec<&(u8, String)> = self.chat_log.iter().rev().take(4).collect();
+            let mut chat_y = top + half_h * 2.0 - 40.0;
+            for (player, text) in shown.iter().rev() {
+                renderer.draw_text(
+                    &format!("P{player}: {text}"),
+                    left + 16.0,
+                    chat_y,
+                    9.0,
+                    [0.90, 0.92, 0.98, 1.0],
+                );
+                chat_y += 12.0;
+            }
+            if self.chat_open {
+                renderer.draw_text(
+                    &format!("say> {}", self.chat_input),
+                    left + 16.0,
+                    chat_y,
+                    9.0,
+                    [1.0, 0.85, 0.35, 1.0],
+                );
+            }
+        }
+
+        draw_ra_minimap(
+            renderer.as_mut(),
+            &self.game,
+            self.game.player_owner,
+            self.camera.position,
+            self.camera.viewport_width as f32 / zoom,
+            self.camera.viewport_height as f32 / zoom,
+            left,
+            top,
+            self.camera.viewport_width as f32,
+            self.camera.viewport_height as f32,
+        );
+
+        if self.paused {
+            renderer.begin_layer();
+            renderer.set_camera(&screen_camera(self.width, self.height));
+            let slot_label = save_slot_label(&ra_save_path_for(self.save_slot));
+            draw_ra_pause(
+                renderer.as_mut(),
+                &self.game,
+                self.pause_choice,
+                self.save_slot,
+                &slot_label,
+                self.width,
+                self.height,
+            );
+        }
+
+        if let Err(error) = renderer.end_frame() {
+            tracing::warn!(%error, "frame presentation failed");
+        }
+        self.frame_index = self.frame_index.wrapping_add(1);
+        if self.kind == RendererKind::Software && !self.software_warning_emitted {
+            tracing::warn!(
+                "software renderer draws offscreen only; use --renderer wgpu to present frames"
+            );
+            self.software_warning_emitted = true;
+        }
+        if self.frame_index % 120 == 0 {
+            tracing::info!("RA {}", self.game.summary());
+        }
+    }
+}
+
+impl ApplicationHandler for RaLauncherApp {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+        let attributes = Window::default_attributes()
+            .with_title("C&C Red Alert - Rust skirmish")
+            .with_inner_size(LogicalSize::new(self.width, self.height));
+        let window = match event_loop.create_window(attributes) {
+            Ok(window) => Arc::new(window),
+            Err(error) => {
+                tracing::error!(%error, "failed to create window");
+                event_loop.exit();
+                return;
+            }
+        };
+        let size = window.inner_size();
+        self.width = size.width.max(1);
+        self.height = size.height.max(1);
+        self.camera.set_viewport(self.width, self.height);
+        self.camera.position = Vec2::new(
+            Fixed16_16::from_f32(self.game.map.width as f32 * RA_TILE_SIZE * 0.5),
+            Fixed16_16::from_f32(self.game.map.height as f32 * RA_TILE_SIZE * 0.5),
+        );
+        self.renderer = Some(create_renderer(self.kind, self.width, self.height, window.clone()));
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_camera(&self.camera);
+        }
+        self.window = Some(window);
+        self.last_frame = Instant::now();
+        self.next_frame = Instant::now() + FRAME_INTERVAL;
+        tracing::info!(
+            "Red Alert window ready at {}x{} - mode {:?}, {} units, {} structures, frame limit {}",
+            self.width,
+            self.height,
+            self.mode,
+            self.game.units.len(),
+            self.game.structures.len(),
+            self.frame_limit
+        );
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        if self.replay.is_some() {
+            match &event {
+                WindowEvent::CloseRequested => event_loop.exit(),
+                WindowEvent::KeyboardInput { event, .. }
+                    if event.state == ElementState::Pressed =>
+                {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => event_loop.exit(),
+                        Key::Named(NamedKey::Space) => {
+                            if let Some(state) = self.replay.as_mut() {
+                                state.paused = !state.paused;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                WindowEvent::RedrawRequested => self.draw(),
+                _ => {}
+            }
+            return;
+        }
+        match event {
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.shift_down = modifiers.state().shift_key();
+                self.ctrl_down = modifiers.state().control_key();
+                self.alt_down = modifiers.state().alt_key();
+            }
+            WindowEvent::Resized(size) => {
+                let width = size.width.max(1);
+                let height = size.height.max(1);
+                self.width = width;
+                self.height = height;
+                self.camera.set_viewport(width, height);
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.resize(width, height);
+                    renderer.set_camera(&self.camera);
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = Some(position);
+                if self.panning {
+                    let dx = position.x - self.last_pointer.0;
+                    let dy = position.y - self.last_pointer.1;
+                    let zoom = self.camera.zoom.to_f32().max(1.0e-6);
+                    self.camera.pan(Vec2::new(
+                        Fixed16_16::from_f32(-dx as f32 / zoom),
+                        Fixed16_16::from_f32(-dy as f32 / zoom),
+                    ));
+                }
+                self.last_pointer = (position.x, position.y);
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                use winit::event::MouseScrollDelta;
+                let amount = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(position) => position.y as f32 / 40.0,
+                };
+                if amount.abs() > f32::EPSILON {
+                    self.zoom_ra(wheel_zoom_factor(amount));
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => match (state, button) {
+                (ElementState::Pressed, MouseButton::Left) => {
+                    if self.mode == RaMode::Setup {
+                        return;
+                    }
+                    if let Some(class_id) = self.placing {
+                        if let Some(cell) = self.cursor_cell() {
+                            match self
+                                .game
+                                .place_structure(self.game.player_owner, class_id, cell)
+                            {
+                                Ok(id) => {
+                                    let location = Vec2::new(
+                                        Fixed16_16::from_f32(
+                                            (cell.x as f32 + 0.5) * RA_TILE_SIZE,
+                                        ),
+                                        Fixed16_16::from_f32(
+                                            (cell.y as f32 + 0.5) * RA_TILE_SIZE,
+                                        ),
+                                    );
+                                    if let Some(net) = self.network.as_mut() {
+                                        net.session.queue_local(NetCommandKind::Build {
+                                            building: class_id,
+                                            location,
+                                        });
+                                    }
+                                    self.placing = None;
+                                    tracing::info!(?class_id, id, "RA structure placed");
+                                }
+                                Err(error) => {
+                                    tracing::warn!(?error, ?class_id, "RA placement rejected");
+                                }
+                            }
+                        }
+                        return;
+                    }
+                    if let Some(world) = self.cursor_world() {
+                        if self.ra_minimap_click(world) {
+                            return;
+                        }
+                        let owner = self.game.player_owner;
+                        let picked = self.game.select_at_owned(world, owner);
+                        if picked.is_some() {
+                            self.selected_structure = None;
+                        } else if let Some(cell) = self.cursor_cell() {
+                            self.selected_structure = self
+                                .game
+                                .structures
+                                .iter()
+                                .find(|structure| {
+                                    structure.owner == owner
+                                        && structure.is_alive()
+                                        && structure.cell == cell
+                                })
+                                .map(|structure| structure.id);
+                        }
+                        tracing::debug!(?picked, "RA selection");
+                    }
+                    self.selection_start = self.cursor;
+                }
+                (ElementState::Released, MouseButton::Left) => {
+                    if let (Some(start), Some(end)) = (self.selection_start.take(), self.cursor) {
+                        let dx = end.x - start.x;
+                        let dy = end.y - start.y;
+                        if dx * dx + dy * dy > 36.0 {
+                            let a = self.screen_to_world(start);
+                            let b = self.screen_to_world(end);
+                            let player = self.game.player_owner;
+                            let count = self.game.select_in_rect(player, a, b, self.shift_down);
+                            tracing::debug!(count, "RA box selection");
+                        }
+                    }
+                }
+                (ElementState::Pressed, MouseButton::Right) => {
+                    if let Some(world) = self.cursor_world() {
+                        let player = self.game.player_owner;
+                        if self.game.selected_count(player) == 0 {
+                            self.game.select_all_owned(player);
+                        }
+                        let units: Vec<u32> = self
+                            .game
+                            .units
+                            .iter()
+                            .filter(|unit| unit.selected && unit.owner == player && unit.is_alive())
+                            .map(|unit| unit.id)
+                            .collect();
+                        if !units.is_empty() {
+                            if let Some(target) = self.enemy_target_at(world, player) {
+                                if let Some(net) = self.network.as_mut() {
+                                    net.session.queue_local(NetCommandKind::Attack {
+                                        units: units.clone(),
+                                        target,
+                                    });
+                                }
+                                self.pending_commands.push(GameCommand::Attack {
+                                    owner: player,
+                                    units,
+                                    target,
+                                });
+                                tracing::debug!(target, "RA attack command queued");
+                            } else {
+                                if let Some(net) = self.network.as_mut() {
+                                    net.session.queue_local(NetCommandKind::Move {
+                                        units: units.clone(),
+                                        target: world,
+                                    });
+                                }
+                                self.pending_commands.push(GameCommand::Move {
+                                    owner: player,
+                                    units,
+                                    target: world,
+                                });
+                                tracing::debug!("RA move command queued");
+                            }
+                        }
+                    }
+                }
+                (ElementState::Pressed, MouseButton::Middle) => {
+                    self.panning = true;
+                    if let Some(position) = self.cursor {
+                        self.last_pointer = (position.x, position.y);
+                    }
+                }
+                (ElementState::Released, MouseButton::Middle) => self.panning = false,
+                _ => {}
+            },
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state != ElementState::Pressed {
+                    return;
+                }
+                if self.mode == RaMode::Setup {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => self.return_to_menu = true,
+                        Key::Named(NamedKey::Enter) => self.start_skirmish(),
+                        Key::Named(NamedKey::Tab) => self.cycle_country(),
+                        Key::Character(text) => match text.as_str() {
+                            "+" | "=" => self.cycle_map_size(true),
+                            "-" | "_" => self.cycle_map_size(false),
+                            "d" | "D" => self.cycle_difficulty(),
+                            "s" | "S" => self.cycle_side(),
+                            "n" | "N" => self.open_lobby(),
+                            _ => {}
+                        },
+                        _ => {}
+                    }
+                    return;
+                }
+                if self.mode == RaMode::NetworkLobby {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => {
+                            if self.lan_scan.take().is_none() {
+                                self.mode = RaMode::Setup;
+                                self.lobby_error = None;
+                            }
+                        }
+                        Key::Named(NamedKey::Enter) => {
+                            let selected_host = self
+                                .lan_scan
+                                .as_ref()
+                                .and_then(|scan| scan.hosts.get(scan.selected))
+                                .map(|host| host.address.clone());
+                            if let Some(address) = selected_host {
+                                self.lobby.role = NetRole::Join;
+                                self.lobby.join_address = address;
+                            }
+                            let _ = self.start_lobby();
+                        }
+                        Key::Named(NamedKey::Tab) => {
+                            self.lobby.focus = (self.lobby.focus + 1) % 2;
+                        }
+                        Key::Named(NamedKey::Backspace) => self.lobby.backspace(),
+                        Key::Named(NamedKey::ArrowUp) => {
+                            if let Some(scan) = self.lan_scan.as_mut() {
+                                if !scan.hosts.is_empty() {
+                                    scan.selected =
+                                        (scan.selected + scan.hosts.len() - 1) % scan.hosts.len();
+                                }
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowDown) => {
+                            if let Some(scan) = self.lan_scan.as_mut() {
+                                if !scan.hosts.is_empty() {
+                                    scan.selected = (scan.selected + 1) % scan.hosts.len();
+                                }
+                            }
+                        }
+                        Key::Character(text) => match text.as_str() {
+                            "r" | "R" => self.lobby.toggle_role(),
+                            "l" | "L" => self.toggle_lan_scan(),
+                            "[" => self.lobby.adjust_port(-1),
+                            "]" => self.lobby.adjust_port(1),
+                            other => {
+                                for character in other.chars() {
+                                    self.lobby.push_char(character);
+                                }
+                            }
+                        },
+                        _ => {}
+                    }
+                    return;
+                }
+                if self.mode == RaMode::CampaignStats {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) | Key::Named(NamedKey::Enter) => {
+                            self.dismiss_campaign_stats()
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+                if self.mode == RaMode::CampaignComplete {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => self.return_to_menu = true,
+                        Key::Named(NamedKey::Enter) => self.dismiss_campaign_complete(),
+                        _ => {}
+                    }
+                    return;
+                }
+                if self.mode == RaMode::CampaignSelect {
+                    if self.replay_prompt {
+                        match &event.logical_key {
+                            Key::Named(NamedKey::Enter) => self.confirm_replay(),
+                            Key::Named(NamedKey::Escape) => self.cancel_replay(),
+                            _ => {}
+                        }
+                        return;
+                    }
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => self.return_to_menu = true,
+                        Key::Named(NamedKey::Enter) => {
+                            self.request_campaign_mission(self.campaign_index);
+                        }
+                        Key::Named(NamedKey::ArrowUp) => self.cycle_campaign(-1),
+                        Key::Named(NamedKey::ArrowDown) => self.cycle_campaign(1),
+                        Key::Character(text) => match text.as_str() {
+                            "+" | "=" => self.cycle_campaign(1),
+                            "-" | "_" => self.cycle_campaign(-1),
+                            "d" | "D" => self.cycle_campaign_difficulty(),
+                            "f" | "F" => self.cycle_campaign_filter(),
+                            "s" | "S" => self.show_campaign_stats(),
+                            _ => {}
+                        },
+                        _ => {}
+                    }
+                    return;
+                }
+                if self.briefing_open {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => self.return_to_menu = true,
+                        Key::Named(NamedKey::Enter) => self.briefing_open = false,
+                        _ => {}
+                    }
+                    return;
+                }
+                if self.paused {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => self.paused = false,
+                        Key::Named(NamedKey::Enter) => self.activate_pause_choice(),
+                        Key::Named(NamedKey::ArrowUp) => {
+                            self.pause_choice = (self.pause_choice + 5) % 6;
+                        }
+                        Key::Named(NamedKey::ArrowDown) => {
+                            self.pause_choice = (self.pause_choice + 1) % 6;
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+                if self.ctrl_down {
+                    if let Key::Character(text) = &event.logical_key {
+                        if let Some(slot) = bookmark_slot(text) {
+                            if self.shift_down {
+                                self.save_ra_bookmark(slot);
+                            } else {
+                                self.jump_ra_bookmark(slot);
+                            }
+                            return;
+                        }
+                    }
+                }
+                if self.alt_down {
+                    if let Key::Character(text) = &event.logical_key {
+                        if let Some(slot) = bookmark_slot(text) {
+                            if self.shift_down {
+                                self.store_control_group(slot);
+                            } else {
+                                self.recall_control_group(slot);
+                            }
+                            return;
+                        }
+                    }
+                }
+                if let Key::Named(NamedKey::Enter) = &event.logical_key {
+                    if self.game.outcome.is_some() {
+                        if self.campaign_active && self.outcome_is_victory() {
+                            self.advance_campaign();
+                        } else {
+                            self.abort_mission();
+                        }
+                        return;
+                    }
+                }
+                if self.network.is_some() {
+                    if self.chat_open {
+                        match &event.logical_key {
+                            Key::Named(NamedKey::Escape) => {
+                                self.chat_open = false;
+                                self.chat_input.clear();
+                            }
+                            Key::Named(NamedKey::Enter) => self.send_chat(),
+                            Key::Named(NamedKey::Backspace) => {
+                                self.chat_input.pop();
+                            }
+                            Key::Character(text) => {
+                                for character in text.chars() {
+                                    if !character.is_control() && self.chat_input.len() < 120 {
+                                        self.chat_input.push(character);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        return;
+                    }
+                    if let Key::Character(text) = &event.logical_key {
+                        if text.eq_ignore_ascii_case("y") {
+                            self.chat_open = true;
+                            self.chat_input.clear();
+                            return;
+                        }
+                    }
+                }
+                match &event.logical_key {
+                    Key::Named(NamedKey::Escape) => {
+                        if self.placing.take().is_none() {
+                            self.enter_pause();
+                        }
+                    }
+                    Key::Named(NamedKey::F5) => self.save_game(),
+                    Key::Named(NamedKey::F9) => {
+                        self.load_game();
+                    }
+                    Key::Named(NamedKey::Space) => {
+                        self.produce_unit(cnc_core::ClassId::VehicleE1);
+                    }
+                    Key::Named(NamedKey::Backspace) => self.cancel_production(),
+                    Key::Named(NamedKey::F6) => self.adjust_ra_speed(-0.25),
+                    Key::Named(NamedKey::F7) => self.adjust_ra_speed(0.25),
+                    Key::Character(text) => {
+                        let player = self.game.player_owner;
+                        match text.to_ascii_lowercase().as_str() {
+                            "a" => {
+                                let count = self.game.select_all_owned(player);
+                                tracing::debug!(count, "RA select all");
+                            }
+                            "1" => self.produce_unit(cnc_core::ClassId::InfantryE1),
+                            "2" => self.produce_unit(cnc_core::ClassId::VehicleE2),
+                            "3" => self.produce_unit(cnc_core::ClassId::ShipE1),
+                            "+" | "=" => self.zoom_ra(KEY_ZOOM_STEP),
+                            "-" | "_" => self.zoom_ra(1.0 / KEY_ZOOM_STEP),
+                            "g" => self.scatter_selected_units(),
+                            "o" => self.toggle_selected_power(),
+                            "r" => self.repair_selected_structure(),
+                            "s" => self.stop_selected_units(),
+                            "x" => self.sell_selected_structure(),
+                            "d" => self.deploy_selected_mcv(),
+                            "p" => self.placing = Some(cnc_core::ClassId::PowerPlant),
+                            "b" => self.placing = Some(cnc_core::ClassId::Barracks),
+                            "w" => self.placing = Some(cnc_core::ClassId::WarFactory),
+                            "t" => self.placing = Some(cnc_core::ClassId::TeslaCoil),
+                            "c" => {
+                                if let Some(cell) = self.cursor_cell() {
+                                    match self.game.fire_chronosphere(player, cell) {
+                                        Ok(count) => tracing::info!(count, "RA chronoshift"),
+                                        Err(error) => {
+                                            tracing::warn!(%error, "RA chronoshift failed")
+                                        }
+                                    }
+                                }
+                            }
+                            "i" => match self.game.fire_iron_curtain(player) {
+                                Ok(count) => tracing::info!(count, "RA iron curtain"),
+                                Err(error) => tracing::warn!(%error, "RA iron curtain failed"),
+                            },
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            WindowEvent::RedrawRequested => self.draw(),
+            _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        if self.frame_limit > 0 && self.frame_index >= self.frame_limit {
+            self.save_network_replay();
+            if let Some(net) = &self.network {
+                println!(
+                    "net exit role={} applied={} sent={} peers={} frame={} lost={} mig={} rej={}",
+                    net.role,
+                    net.applied,
+                    net.sent,
+                    net.session.peers.len(),
+                    net.session.frame,
+                    net.losses,
+                    net.migrations,
+                    net.rejoined
+                );
+            }
+            event_loop.exit();
+            return;
+        }
+        if now >= self.next_frame {
+            self.next_frame = now + FRAME_INTERVAL;
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
+    }
+}
+
+/// The active owner of the window: the menu or one of the two game engines.
+enum ShellSession {
+    Menu,
+    Td(Box<LauncherApp>),
+    Ra(Box<RaLauncherApp>),
+}
+
+impl ShellSession {
+    fn window(&self) -> Option<&Arc<Window>> {
+        match self {
+            Self::Menu => None,
+            Self::Td(app) => app.window.as_ref(),
+            Self::Ra(app) => app.window.as_ref(),
+        }
+    }
+}
+
+/// What a menu window event still needs to do after the session borrow ends.
+enum MenuAction {
+    None,
+    Resize(u32, u32),
+    Redraw,
+}
+
+/// Front-end shell: shows the main menu, then hands the window to the chosen
+/// engine. The menu window is kept alive (hidden) while a game runs so that
+/// returning to the menu is instant and never recreates a surface.
+struct LauncherShell {
+    kind: RendererKind,
+    width: u32,
+    height: u32,
+    frame_limit: u64,
+    rules_path: Option<PathBuf>,
+    menu: MainMenu,
+    menu_window: Option<Arc<Window>>,
+    menu_renderer: Option<Box<dyn Renderer>>,
+    menu_cursor: (f32, f32),
+    session: ShellSession,
+}
+
+impl LauncherShell {
+    fn new(
+        kind: RendererKind,
+        width: u32,
+        height: u32,
+        frame_limit: u64,
+        rules_path: Option<PathBuf>,
+    ) -> Self {
+        let menu = MainMenu::discover();
+        tracing::info!(
+            td_scenarios = menu.campaign(GameChoice::TiberianDawn).scenarios,
+            ra_scenarios = menu.campaign(GameChoice::RedAlert).scenarios,
+            "main menu campaign libraries discovered"
+        );
+        Self {
+            kind,
+            width,
+            height,
+            frame_limit,
+            rules_path,
+            menu,
+            menu_window: None,
+            menu_renderer: None,
+            menu_cursor: (0.0, 0.0),
+            session: ShellSession::Menu,
+        }
+    }
+
+    fn create_menu_window(&mut self, event_loop: &ActiveEventLoop) {
+        if self.menu_window.is_some() {
+            return;
+        }
+        let attributes = Window::default_attributes()
+            .with_title("C&C Remastered Collection - Rust Clone")
+            .with_inner_size(LogicalSize::new(self.width, self.height));
+        let window = match event_loop.create_window(attributes) {
+            Ok(window) => Arc::new(window),
+            Err(error) => {
+                tracing::error!(%error, "failed to create the main menu window");
+                event_loop.exit();
+                return;
+            }
+        };
+        let size = window.inner_size();
+        self.width = size.width.max(1);
+        self.height = size.height.max(1);
+        self.menu_renderer = Some(create_renderer(
+            self.kind,
+            self.width,
+            self.height,
+            window.clone(),
+        ));
+        if let Some(renderer) = self.menu_renderer.as_mut() {
+            renderer.set_camera(&screen_camera(self.width, self.height));
+        }
+        self.menu_window = Some(window);
+        tracing::info!(
+            "main menu window ready at {}x{} (renderer={})",
+            self.width,
+            self.height,
+            self.kind.label()
+        );
+    }
+
+    fn resize_menu(&mut self, width: u32, height: u32) {
+        self.width = width.max(1);
+        self.height = height.max(1);
+        if let Some(renderer) = self.menu_renderer.as_mut() {
+            renderer.resize(self.width, self.height);
+            renderer.set_camera(&screen_camera(self.width, self.height));
+        }
+    }
+
+    fn draw_menu(&mut self) {
+        let Some(renderer) = self.menu_renderer.as_mut() else {
+            return;
+        };
+        renderer.begin_frame();
+        renderer.set_camera(&screen_camera(self.width, self.height));
+        self.menu
+            .draw(renderer.as_mut(), self.width, self.height);
+        if let Err(error) = renderer.end_frame() {
+            tracing::warn!(%error, "menu frame presentation failed");
+        }
+    }
+
+    /// Build the game session for a menu launch request.
+    fn build_session(&self, target: &LaunchTarget) -> Result<ShellSession> {
+        match target {
+            LaunchTarget::Campaign(game) => {
+                let dir = self.menu.campaign(*game).dir.clone();
+                match game {
+                    GameChoice::TiberianDawn => {
+                        let mut app = self.build_td()?;
+                        let count = app.load_mission_dir(&dir)?;
+                        if count == 0 {
+                            return Err(anyhow!(
+                                "no Tiberian Dawn scenarios found in {}",
+                                dir.display()
+                            ));
+                        }
+                        Ok(ShellSession::Td(Box::new(app)))
+                    }
+                    GameChoice::RedAlert => {
+                        let mut app = RaLauncherApp::new(
+                            self.kind,
+                            self.width,
+                            self.height,
+                            self.frame_limit,
+                        );
+                        let count = app.load_campaign(&dir);
+                        if count == 0 {
+                            return Err(anyhow!(
+                                "no Red Alert scenarios found in {}",
+                                dir.display()
+                            ));
+                        }
+                        Ok(ShellSession::Ra(Box::new(app)))
+                    }
+                }
+            }
+            LaunchTarget::Local(game) => match game {
+                GameChoice::TiberianDawn => {
+                    Ok(ShellSession::Td(Box::new(self.build_td()?)))
+                }
+                GameChoice::RedAlert => Ok(ShellSession::Ra(Box::new(
+                    RaLauncherApp::new(self.kind, self.width, self.height, self.frame_limit),
+                ))),
+            },
+            LaunchTarget::Online(game) => match game {
+                GameChoice::RedAlert => {
+                    let mut app = RaLauncherApp::new(
+                        self.kind,
+                        self.width,
+                        self.height,
+                        self.frame_limit,
+                    );
+                    app.open_lobby();
+                    Ok(ShellSession::Ra(Box::new(app)))
+                }
+                GameChoice::TiberianDawn => {
+                    Err(anyhow!("Tiberian Dawn network play is not available"))
+                }
+            },
+        }
+    }
+
+    fn build_td(&self) -> Result<LauncherApp> {
+        let rules = match &self.rules_path {
+            Some(path) => RulesDatabase::load(path)
+                .with_context(|| format!("failed to load rules from {}", path.display()))?,
+            None => RulesDatabase::default(),
+        };
+        LauncherApp::new(self.kind, self.width, self.height, rules)
+    }
+
+    fn start_game(&mut self, event_loop: &ActiveEventLoop, target: LaunchTarget) {
+        if let Some(window) = &self.menu_window {
+            window.set_visible(false);
+        }
+        match self.build_session(&target) {
+            Ok(mut session) => {
+                match &mut session {
+                    ShellSession::Td(app) => app.resumed(event_loop),
+                    ShellSession::Ra(app) => app.resumed(event_loop),
+                    ShellSession::Menu => {}
+                }
+                self.session = session;
+                if let Some(window) = self.session.window() {
+                    window.focus_window();
+                }
+                tracing::info!(target = ?target, "main menu launched a game session");
+            }
+            Err(error) => {
+                tracing::warn!(%error, "main menu launch failed");
+                self.menu.set_notice(format!("{error}"));
+                self.session = ShellSession::Menu;
+                if let Some(window) = &self.menu_window {
+                    window.set_visible(true);
+                    window.focus_window();
+                    window.request_redraw();
+                }
+                event_loop.set_control_flow(ControlFlow::Wait);
+            }
+        }
+    }
+
+    fn open_menu(&mut self, event_loop: &ActiveEventLoop) {
+        tracing::info!("returning to the main menu");
+        self.session = ShellSession::Menu;
+        self.menu.reset();
+        if let Some(window) = &self.menu_window {
+            window.set_visible(true);
+            window.focus_window();
+            window.request_redraw();
+        }
+        event_loop.set_control_flow(ControlFlow::Wait);
+    }
+
+    fn handle_menu_command(&mut self, event_loop: &ActiveEventLoop, command: MenuCommand) {
+        match command {
+            MenuCommand::Quit => event_loop.exit(),
+            MenuCommand::Launch(target) => self.start_game(event_loop, target),
+        }
+    }
+}
+
+impl ApplicationHandler for LauncherShell {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if matches!(self.session, ShellSession::Menu) {
+            self.create_menu_window(event_loop);
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let mut command = None;
+        let mut action = MenuAction::None;
+        let mut return_to_menu = false;
+        match &mut self.session {
+            ShellSession::Menu => {
+                if self.menu_window.as_ref().map(|window| window.id()) != Some(window_id) {
+                    return;
+                }
+                match event {
+                    WindowEvent::CloseRequested => {
+                        event_loop.exit();
+                        return;
+                    }
+                    WindowEvent::Resized(size) => {
+                        action = MenuAction::Resize(size.width, size.height);
+                    }
+                    WindowEvent::CursorMoved { position, .. } => {
+                        self.menu_cursor = (position.x as f32, position.y as f32);
+                        if self
+                            .menu
+                            .on_pointer(self.menu_cursor.0, self.menu_cursor.1, self.width)
+                        {
+                            action = MenuAction::Redraw;
+                        }
+                    }
+                    WindowEvent::MouseInput {
+                        state: ElementState::Pressed,
+                        button: MouseButton::Left,
+                        ..
+                    } => {
+                        command =
+                            self.menu
+                                .on_click(self.menu_cursor.0, self.menu_cursor.1, self.width);
+                    }
+                    WindowEvent::KeyboardInput { event, .. }
+                        if event.state == ElementState::Pressed =>
+                    {
+                        command = self.menu.on_key(&event.logical_key);
+                        action = MenuAction::Redraw;
+                    }
+                    WindowEvent::RedrawRequested => action = MenuAction::Redraw,
+                    _ => {}
+                }
+            }
+            ShellSession::Td(app) => {
+                if app.window.as_ref().map(|window| window.id()) != Some(window_id) {
+                    return;
+                }
+                app.window_event(event_loop, window_id, event);
+                return_to_menu = app.take_return_to_menu();
+            }
+            ShellSession::Ra(app) => {
+                if app.window.as_ref().map(|window| window.id()) != Some(window_id) {
+                    return;
+                }
+                app.window_event(event_loop, window_id, event);
+                return_to_menu = app.take_return_to_menu();
+            }
+        }
+
+        match action {
+            MenuAction::None => {}
+            MenuAction::Resize(width, height) => {
+                self.resize_menu(width, height);
+                if let Some(window) = &self.menu_window {
+                    window.request_redraw();
+                }
+            }
+            MenuAction::Redraw => self.draw_menu(),
+        }
+        if let Some(command) = command {
+            self.handle_menu_command(event_loop, command);
+        } else if return_to_menu {
+            self.open_menu(event_loop);
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        match &mut self.session {
+            ShellSession::Menu => event_loop.set_control_flow(ControlFlow::Wait),
+            ShellSession::Td(app) => app.about_to_wait(event_loop),
+            ShellSession::Ra(app) => app.about_to_wait(event_loop),
+        }
+    }
+}
+
+fn list_ra_campaign(dir: &Path) -> Result<()> {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("failed to read campaign directory {}", dir.display()))?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("ini"))
+        })
+        .collect();
+    paths.sort();
+    let mut count = 0;
+    for path in &paths {
+        let scenario = cnc_red_alert::Scenario::from_file(path)
+            .with_context(|| format!("invalid scenario {}", path.display()))?;
+        println!(
+            "{} - {} (player {}, {}x{}, {} starts, {} objectives, {} triggers)",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            scenario.name,
+            if scenario.player == 0 {
+                "Allies"
+            } else {
+                "Soviet"
+            },
+            scenario.width,
+            scenario.height,
+            scenario.starts.len(),
+            scenario.objectives.len(),
+            scenario.triggers.len()
+        );
+        count += 1;
+    }
+    println!(
+        "listed {count} RA campaign scenario(s) from {}",
+        dir.display()
+    );
+    Ok(())
+}
+
+fn list_td_missions(dir: &Path) -> Result<()> {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("failed to read mission directory {}", dir.display()))?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("ini"))
+        })
+        .collect();
+    paths.sort();
+    let mut count = 0;
+    for path in &paths {
+        let mission = Mission::from_file(path)
+            .with_context(|| format!("invalid mission {}", path.display()))?;
+        println!(
+            "{} - {} (player {}, {} objectives, {} triggers)",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            mission.name,
+            mission.player,
+            mission.objectives.len(),
+            mission.triggers.len()
+        );
+        count += 1;
+    }
+    println!("listed {count} TD mission(s) from {}", dir.display());
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     tracing_subscriber::fmt::init();
 
     let kind = RendererKind::parse(&args.renderer)?;
+    let game_kind = GameKind::parse(args.game.as_deref().unwrap_or("td"))?;
+
+    if let Some(dir) = &args.list_missions {
+        return list_td_missions(dir);
+    }
+    if let Some(dir) = &args.list_campaign {
+        return list_ra_campaign(dir);
+    }
+
+    // A frame-capped run is the headless harness path and keeps its old
+    // straight-to-game behaviour; otherwise the menu is the default entry point.
+    let wants_menu = args.menu
+        || (args.game.is_none()
+            && args.frames == 0
+            && args.mission.is_none()
+            && args.mission_dir.is_none()
+            && args.scenario.is_none()
+            && args.campaign.is_none()
+            && args.net_role.is_none()
+            && !args.net_lobby
+            && args.replay.is_none());
+    if wants_menu {
+        tracing::info!(
+            "starting main menu (renderer={}, {}x{})",
+            kind.label(),
+            args.width,
+            args.height
+        );
+        let mut shell = LauncherShell::new(
+            kind,
+            args.width.max(1),
+            args.height.max(1),
+            args.frames,
+            args.rules.clone(),
+        );
+        let event_loop = EventLoop::new().context("failed to create the winit event loop")?;
+        event_loop.set_control_flow(ControlFlow::Wait);
+        return event_loop
+            .run_app(&mut shell)
+            .context("event loop terminated with an error");
+    }
+
+    if game_kind == GameKind::RedAlert {
+        tracing::info!(
+            "starting Red Alert launcher mode (renderer={}, {}x{})",
+            kind.label(),
+            args.width,
+            args.height
+        );
+        let mut app = RaLauncherApp::new(
+            kind,
+            args.width.max(1),
+            args.height.max(1),
+            args.frames,
+        );
+        if let Some(dir) = &args.campaign {
+            let count = app.load_campaign(dir);
+            tracing::info!(
+                count,
+                dir = %dir.display(),
+                "Red Alert campaign missions loaded"
+            );
+        }
+        if let Some(path) = &args.scenario {
+            let scenario = cnc_red_alert::Scenario::from_file(path).with_context(|| {
+                format!("failed to load scenario from {}", path.display())
+            })?;
+            tracing::info!(
+                name = %scenario.name,
+                map = %format!("{}x{}", scenario.width, scenario.height),
+                objects = scenario.objects.len(),
+                triggers = scenario.triggers.len(),
+                "Red Alert scenario loaded"
+            );
+            app.scenario_name = scenario.name.clone();
+            app.game = cnc_red_alert::Game::from_scenario(&scenario);
+            app.mode = RaMode::Playing;
+            app.campaign_active = false;
+            app.active_scenario_path = Some(path.clone());
+            app.briefing_open = !scenario.briefing.is_empty();
+        }
+        if let Some(path) = &args.replay {
+            let replay = cnc_tiberian_dawn::network::Replay::load(path)
+                .with_context(|| format!("failed to load replay {}", path.display()))?;
+            tracing::info!(path = %path.display(), commands = replay.commands.len(), "RA replay loaded");
+            app.start_replay(replay);
+        } else if let Some(role) = &args.net_role {
+            if args.scenario.is_some() {
+                tracing::warn!("--net-role replaces --scenario with a network skirmish");
+            }
+            let setup = NetworkSetup {
+                role: role.clone(),
+                join: args.net_join.clone(),
+                port: args.net_port,
+                peers: args.net_peers.clone(),
+                bind: args.net_bind.clone(),
+                advertised: args.net_advertised.clone(),
+            };
+            app.net_replay_path = args.net_replay.clone();
+            app.enable_network(&setup)?;
+        } else if args.net_lobby {
+            app.open_lobby();
+        }
+        let event_loop = EventLoop::new().context("failed to create the winit event loop")?;
+        event_loop.set_control_flow(ControlFlow::Wait);
+        return event_loop
+            .run_app(&mut app)
+            .context("event loop terminated with an error");
+    }
+
     let rules = match &args.rules {
         Some(path) => RulesDatabase::load(path)
             .with_context(|| format!("failed to load rules from {}", path.display()))?,
@@ -796,6 +7537,24 @@ fn main() -> Result<()> {
         rules.weapons.len()
     );
     let mut app = LauncherApp::new(kind, args.width.max(1), args.height.max(1), rules)?;
+    if let Some(dir) = &args.mission_dir {
+        let count = app.load_mission_dir(dir)?;
+        tracing::info!(count, dir = %dir.display(), "TD mission directory loaded");
+    }
+    if let Some(path) = &args.mission {
+        app.game
+            .load_mission(path)
+            .with_context(|| format!("failed to load mission from {}", path.display()))?;
+        app.selecting_mission = false;
+        app.td_briefing_open = !app.game.mission.briefing.is_empty()
+            || !app.game.mission.objectives.is_empty();
+        tracing::info!(
+            mission = %app.game.mission.name,
+            triggers = app.game.mission.triggers.len(),
+            objectives = app.game.mission.objectives.len(),
+            "campaign mission loaded"
+        );
+    }
 
     tracing::info!(
         "starting launcher (renderer={}, {}x{})",
@@ -810,3 +7569,1844 @@ fn main() -> Result<()> {
         .run_app(&mut app)
         .context("event loop terminated with an error")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::menu::{scenario_count, CampaignInfo, Screen};
+
+    fn menu_test_campaign(dir: &str, scenarios: usize) -> CampaignInfo {
+        CampaignInfo {
+            dir: PathBuf::from(dir),
+            scenarios,
+        }
+    }
+
+    fn menu_test_row(index: usize, width: u32) -> (f32, f32, f32, f32) {
+        // Mirrors the layout constants used by MainMenu::draw.
+        let item_width = (width as f32 - 120.0).clamp(320.0, 560.0);
+        (
+            60.0,
+            224.0 + index as f32 * (48.0 + 10.0),
+            item_width,
+            48.0,
+        )
+    }
+
+    #[test]
+    fn game_kind_accepts_td_and_ra_aliases() {
+        assert_eq!(GameKind::parse("td").unwrap(), GameKind::TiberianDawn);
+        assert_eq!(
+            GameKind::parse("tiberian-dawn").unwrap(),
+            GameKind::TiberianDawn
+        );
+        assert_eq!(GameKind::parse("RA").unwrap(), GameKind::RedAlert);
+        assert_eq!(
+            GameKind::parse("red-alert").unwrap(),
+            GameKind::RedAlert
+        );
+        assert!(GameKind::parse("dune").is_err());
+    }
+
+    #[test]
+    fn ra_finished_match_aborts_to_the_right_screen() {
+        let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        app.start_skirmish();
+        app.game.outcome = Some(cnc_red_alert::ScenarioOutcome::AlliesWin);
+        app.abort_mission();
+        assert_eq!(app.mode, RaMode::Setup, "skirmish returns to setup");
+
+        app.start_skirmish();
+        app.campaign_active = true;
+        app.game.outcome = Some(cnc_red_alert::ScenarioOutcome::SovietsWin);
+        app.abort_mission();
+        assert_eq!(
+            app.mode,
+            RaMode::CampaignSelect,
+            "campaign returns to mission select"
+        );
+    }
+
+    #[test]
+    fn ra_launcher_bootstraps_a_skirmish_without_a_window() {
+        let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 30);
+        assert_eq!(app.frame_limit, 30);
+        assert_eq!(app.mode, RaMode::Setup);
+
+        app.setup.map_size = 48;
+        app.cycle_country();
+        app.cycle_difficulty();
+        app.start_skirmish();
+        assert_eq!(app.mode, RaMode::Playing);
+        assert_eq!(app.game.map.width, 48);
+        assert_eq!(app.game.houses[0].country, Some(Country::Germany));
+        assert_eq!(app.game.ai.queue_timer, Fixed16_16::from_int(7));
+        assert_eq!(app.game.houses.len(), 2);
+        assert!(!app.game.units.is_empty());
+        assert!(!app.game.structures.is_empty());
+        assert!(app.game.status().allied_power > 0);
+    }
+
+    #[test]
+    fn campaign_select_loads_and_advances_missions() {
+        let dir = std::env::temp_dir().join(format!("ra-campaign-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let maps = Path::new(env!("CARGO_MANIFEST_DIR")).join("../maps");
+        std::fs::copy(maps.join("ra_campaign/01.ini"), dir.join("01.ini")).unwrap();
+        std::fs::copy(maps.join("ra_campaign/02.ini"), dir.join("02.ini")).unwrap();
+
+        let progress = dir.join("progress.ini");
+        let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        app.campaign_progress_path = progress.clone();
+        assert_eq!(app.load_campaign(&dir), 2);
+        assert_eq!(app.mode, RaMode::CampaignSelect);
+        assert_eq!(app.campaign[0].name, "01 - Holding the Line");
+        assert_eq!(app.campaign[1].name, "02 - Counterstrike");
+        assert_eq!(app.campaign[0].width, 24);
+        assert_eq!(app.campaign[0].terrain.len(), 24 * 20);
+        assert!(app.campaign[0].ore.iter().any(|amount| *amount > 0));
+        assert_eq!(app.campaign[0].objectives.len(), 3);
+        assert!(app.campaign[0].triggers >= 5);
+
+        app.cycle_campaign(1);
+        assert_eq!(app.campaign_index, 1);
+        app.cycle_campaign(1);
+        assert_eq!(app.campaign_index, 0);
+
+        assert_eq!(app.campaign_completed.len(), 2);
+        app.cycle_campaign_difficulty();
+        assert_eq!(app.campaign_difficulty, 2);
+
+        assert!(app.start_campaign_mission(0));
+        assert_eq!(app.mode, RaMode::Playing);
+        assert!(app.briefing_open, "missions with briefings open the overlay");
+        assert_eq!(app.game.map.width, 24);
+        assert_eq!(app.game.ai.queue_timer, Fixed16_16::from_int(7));
+        let saved = std::fs::read_to_string(&progress).unwrap();
+        assert!(saved.contains("Mission=0"), "{saved}");
+
+        app.game.outcome = Some(cnc_red_alert::ScenarioOutcome::AlliesWin);
+        app.advance_campaign();
+        assert_eq!(app.campaign_index, 1);
+        assert_eq!(app.game.map.width, 26);
+        assert_eq!(app.game.player_owner, 1);
+        assert!(app.campaign_completed[0]);
+        let saved = std::fs::read_to_string(&progress).unwrap();
+        assert!(saved.contains("Mission=1"), "{saved}");
+        assert!(saved.contains("Difficulty=2"), "{saved}");
+        assert!(saved.contains("Completed=0"), "{saved}");
+
+        // A fresh launch resumes at the saved mission.
+        let mut resumed = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        resumed.campaign_progress_path = progress.clone();
+        assert_eq!(resumed.load_campaign(&dir), 2);
+        assert_eq!(resumed.campaign_index, 1);
+        assert_eq!(resumed.campaign_difficulty, 2);
+        assert!(resumed.campaign_completed[0]);
+
+        resumed.start_campaign_mission(1);
+        resumed.game.outcome = Some(cnc_red_alert::ScenarioOutcome::SovietsWin);
+        resumed.advance_campaign();
+        assert_eq!(resumed.mode, RaMode::CampaignComplete);
+        assert!(resumed.campaign_completed.iter().all(|done| *done));
+        let saved = std::fs::read_to_string(&progress).unwrap();
+        assert!(saved.contains("Completed=0,1"), "{saved}");
+        assert!(saved.contains("BestTimes=0:0,1:0"), "{saved}");
+        assert!(resumed.campaign_best.iter().all(|time| time.is_some()));
+
+        resumed.dismiss_campaign_complete();
+        assert_eq!(resumed.mode, RaMode::CampaignSelect);
+        assert_eq!(resumed.campaign_index, 0);
+        assert!(
+            resumed.campaign_completed.iter().all(|done| *done),
+            "completion marks persist for replay"
+        );
+        assert!(progress.exists(), "best times/completion persist");
+
+        // Replaying a cleared mission asks for confirmation first.
+        resumed.request_campaign_mission(0);
+        assert!(resumed.replay_prompt);
+        assert_eq!(resumed.mode, RaMode::CampaignSelect);
+        resumed.cancel_replay();
+        assert!(!resumed.replay_prompt);
+        resumed.request_campaign_mission(0);
+        resumed.confirm_replay();
+        assert_eq!(resumed.mode, RaMode::Playing);
+        assert_eq!(resumed.campaign_index, 0);
+
+        // Filtering and the stats screen operate on the completion set.
+        resumed.mode = RaMode::CampaignSelect;
+        resumed.campaign_filter = CampaignFilter::Completed;
+        assert_eq!(resumed.campaign_visible(), vec![0, 1]);
+        resumed.campaign_index = 1;
+        resumed.cycle_campaign(1);
+        assert_eq!(resumed.campaign_index, 0);
+        resumed.cycle_campaign_filter();
+        assert_eq!(resumed.campaign_filter, CampaignFilter::All);
+        resumed.show_campaign_stats();
+        assert_eq!(resumed.mode, RaMode::CampaignStats);
+        resumed.dismiss_campaign_stats();
+        assert_eq!(resumed.mode, RaMode::CampaignSelect);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn network_move_command_orders_remote_units() {
+        let mut game = RaGame::new(32, 32);
+        game.set_player_owner(1);
+        let Some(unit) = game
+            .units
+            .iter()
+            .find(|unit| unit.owner == 1 && unit.is_alive())
+        else {
+            return;
+        };
+        let id = unit.id;
+        let cell = unit.cell;
+        let target = Vec2::new(
+            Fixed16_16::from_f32((cell.x as f32 + 3.0) * RA_TILE_SIZE),
+            Fixed16_16::from_f32((cell.y as f32 + 3.0) * RA_TILE_SIZE),
+        );
+        apply_net_move(&mut game, 1, &[id], target);
+        let unit = game.units.iter().find(|unit| unit.id == id).unwrap();
+        assert!(
+            !unit.path.is_empty() || unit.cell != cell,
+            "a remote move command should order a path for the unit"
+        );
+    }
+
+    #[test]
+    fn enemy_target_picks_enemy_units_only() {
+        let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        app.start_skirmish();
+        let enemy = app
+            .game
+            .units
+            .iter()
+            .find(|unit| unit.owner == 1 && unit.is_alive())
+            .map(|unit| (unit.id, unit.position));
+        let Some((enemy_id, enemy_position)) = enemy else {
+            return;
+        };
+        assert_eq!(
+            app.enemy_target_at(enemy_position, 0),
+            Some(enemy_id),
+            "enemy under the cursor is a target"
+        );
+        let own = app
+            .game
+            .units
+            .iter()
+            .find(|unit| unit.owner == 0 && unit.is_alive())
+            .map(|unit| (unit.id, unit.position));
+        if let Some((own_id, own_position)) = own {
+            assert_ne!(
+                app.enemy_target_at(own_position, 0),
+                Some(own_id),
+                "own units are never attack targets"
+            );
+        }
+    }
+
+    #[test]
+    fn network_peer_timeout_reports_loss_once() {
+        fn free_port() -> u16 {
+            let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+            socket.local_addr().unwrap().port()
+        }
+        let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        app.enable_network(&NetworkSetup {
+            role: "host".to_string(),
+            join: None,
+            port: free_port(),
+            peers: vec!["127.0.0.1:9".to_string()],
+            bind: "127.0.0.1".to_string(),
+            advertised: None,
+        })
+        .unwrap();
+        {
+            let net = app.network.as_mut().unwrap();
+            net.last_seen
+                .insert(1, Instant::now() - Duration::from_secs(30));
+        }
+        app.poll_network();
+        let net = app.network.as_ref().unwrap();
+        assert_eq!(net.losses, 1);
+        assert!(net.reported.contains(&1));
+        assert_eq!(net.session.migration.host, 0, "host stays host");
+        assert!(
+            app.notice
+                .as_ref()
+                .is_some_and(|(text, _)| text.contains("lost")),
+            "a loss shows an on-screen notice"
+        );
+        app.poll_network();
+        assert_eq!(
+            app.network.as_ref().unwrap().losses,
+            1,
+            "the same peer is not reported twice"
+        );
+    }
+
+    #[test]
+    fn network_join_claims_host_after_timeout() {
+        fn free_port() -> u16 {
+            let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+            socket.local_addr().unwrap().port()
+        }
+        let host_port = free_port();
+        let join_port = free_port();
+        let mut host = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        host.enable_network(&NetworkSetup {
+            role: "host".to_string(),
+            join: None,
+            port: host_port,
+            peers: vec![format!("127.0.0.1:{join_port}")],
+            bind: "127.0.0.1".to_string(),
+            advertised: None,
+        })
+        .unwrap();
+        let mut join = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        join.enable_network(&NetworkSetup {
+            role: "join".to_string(),
+            join: Some(format!("127.0.0.1:{host_port}")),
+            port: join_port,
+            peers: Vec::new(),
+            bind: "127.0.0.1".to_string(),
+            advertised: None,
+        })
+        .unwrap();
+        {
+            let net = join.network.as_mut().unwrap();
+            net.last_seen
+                .insert(0, Instant::now() - Duration::from_secs(30));
+        }
+        join.poll_network();
+        let net = join.network.as_ref().unwrap();
+        assert_eq!(net.losses, 1);
+        assert_eq!(net.session.migration.host, 1, "join wins the election");
+        assert!(net.migrations >= 1);
+        assert!(net.session.host_address.is_some());
+        assert_eq!(host.game.player_owner, 0);
+    }
+
+    #[test]
+    fn network_lost_peer_rejoins_from_a_new_port() {
+        fn free_port() -> u16 {
+            let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+            socket.local_addr().unwrap().port()
+        }
+        let host_port = free_port();
+        let old_port = free_port();
+        let mut host = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        host.enable_network(&NetworkSetup {
+            role: "host".to_string(),
+            join: None,
+            port: host_port,
+            peers: vec![format!("127.0.0.1:{old_port}")],
+            bind: "127.0.0.1".to_string(),
+            advertised: None,
+        })
+        .unwrap();
+        {
+            let net = host.network.as_mut().unwrap();
+            net.last_seen
+                .insert(1, Instant::now() - Duration::from_secs(30));
+        }
+        host.poll_network();
+        {
+            let net = host.network.as_ref().unwrap();
+            assert!(net.reported.contains(&1));
+            assert!(!net.session.migration.alive.contains(&1));
+        }
+
+        // The same player returns from a fresh local port.
+        let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let packet = NetPacket::new(
+            0,
+            0,
+            vec![NetCommand::new(
+                0,
+                1,
+                NetCommandKind::Stop { units: Vec::new() },
+            )],
+        );
+        let bytes = packet.encode().unwrap();
+        peer.send_to(&bytes, ("127.0.0.1", host_port)).unwrap();
+        for _ in 0..100 {
+            host.poll_network();
+            if host.network.as_ref().unwrap().rejoined > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let net = host.network.as_ref().unwrap();
+        assert_eq!(net.rejoined, 1);
+        assert!(!net.reported.contains(&1));
+        assert!(net.session.migration.alive.contains(&1));
+        assert_eq!(
+            net.session.peers.get(&1).map(|address| address.port()),
+            Some(peer.local_addr().unwrap().port()),
+            "the peer address is replaced by the new port"
+        );
+
+        // The join handshake also revives a lost slot (this is what a real
+        // reconnecting client sends before it has any command to transmit).
+        assert_eq!(parse_join_handshake(b"CNCRAJOIN 1 1\n"), Some(1));
+        assert_eq!(parse_join_handshake(b"CNCRAJOIN 2 1"), None);
+        assert_eq!(parse_join_handshake(b"hello"), None);
+        {
+            let net = host.network.as_mut().unwrap();
+            net.last_seen
+                .insert(1, Instant::now() - Duration::from_secs(30));
+        }
+        host.poll_network();
+        assert!(host.network.as_ref().unwrap().reported.contains(&1));
+        let peer2 = UdpSocket::bind("127.0.0.1:0").unwrap();
+        peer2
+            .send_to(b"CNCRAJOIN 1 1\n", ("127.0.0.1", host_port))
+            .unwrap();
+        for _ in 0..100 {
+            host.poll_network();
+            if host.network.as_ref().unwrap().rejoined > 1 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let net = host.network.as_ref().unwrap();
+        assert_eq!(net.rejoined, 2);
+        assert_eq!(
+            net.session.peers.get(&1).map(|address| address.port()),
+            Some(peer2.local_addr().unwrap().port())
+        );
+        assert!(
+            host.notice
+                .as_ref()
+                .is_some_and(|(text, _)| text.contains("reconnected")),
+            "a reconnect shows an on-screen notice"
+        );
+    }
+
+    #[test]
+    fn lan_beacons_parse_and_deduplicate() {
+        assert_eq!(
+            parse_lan_beacon(b"CNCRALAN 1 47870 RA"),
+            Some((47870, "RA".to_string()))
+        );
+        assert_eq!(
+            parse_lan_beacon(b"CNCRALAN 1 47871"),
+            Some((47871, "RA".to_string()))
+        );
+        assert_eq!(
+            lan_beacon_text(47870, "RA").as_bytes(),
+            b"CNCRALAN 1 47870 RA"
+        );
+        assert_eq!(parse_lan_beacon(b"hello"), None);
+        assert_eq!(parse_lan_beacon(b"CNCRALAN 2 47870 RA"), None);
+        assert_eq!(parse_lan_beacon(b"CNCRALAN 1 notaport"), None);
+
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut scan = LanScan {
+            socket,
+            hosts: Vec::new(),
+            selected: 0,
+        };
+        let first: SocketAddr = "192.168.1.5:5000".parse().unwrap();
+        scan.ingest(first, b"CNCRALAN 1 47870 RA");
+        scan.ingest(first, b"CNCRALAN 1 47870 RA");
+        assert_eq!(scan.hosts.len(), 1, "duplicate beacons are ignored");
+        assert_eq!(scan.hosts[0].address, "192.168.1.5:47870");
+        let second: SocketAddr = "192.168.1.6:5000".parse().unwrap();
+        scan.ingest(second, b"CNCRALAN 1 47871 Bob");
+        assert_eq!(scan.hosts.len(), 2);
+        assert!(scan.hosts.iter().any(|host| host.label.contains("Bob")));
+        scan.selected = 1;
+        scan.ingest(first, b"CNCRALAN 1 47872");
+        assert_eq!(scan.selected, 1, "selection survives new arrivals");
+        assert_eq!(scan.hosts.len(), 3);
+    }
+
+    #[test]
+    fn network_peers_exchange_move_commands() {
+        fn free_port() -> u16 {
+            let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+            socket.local_addr().unwrap().port()
+        }
+        let host_port = free_port();
+        let join_port = free_port();
+        let mut host = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        host.enable_network(&NetworkSetup {
+            role: "host".to_string(),
+            join: None,
+            port: host_port,
+            // No --net-peer: the host must learn the joiner dynamically.
+            peers: Vec::new(),
+            bind: "127.0.0.1".to_string(),
+            advertised: None,
+        })
+        .unwrap();
+        let mut join = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        assert!(join
+            .enable_network(&NetworkSetup {
+                role: "join".to_string(),
+                join: Some(format!("127.0.0.1:{host_port}")),
+                port: join_port,
+                peers: Vec::new(),
+                bind: "127.0.0.1".to_string(),
+                advertised: None,
+            })
+            .is_ok());
+        assert_eq!(host.game.player_owner, 0);
+        assert_eq!(join.game.player_owner, 1);
+        assert_eq!(host.game.ai.owner, usize::MAX, "AI disabled for network play");
+
+        let unit = join
+            .game
+            .units
+            .iter()
+            .find(|unit| unit.owner == 1 && unit.is_alive())
+            .map(|unit| (unit.id, unit.cell));
+        let Some((id, cell)) = unit else {
+            return;
+        };
+        let target = Vec2::new(
+            Fixed16_16::from_f32((cell.x as f32 + 3.0) * RA_TILE_SIZE),
+            Fixed16_16::from_f32((cell.y as f32 + 3.0) * RA_TILE_SIZE),
+        );
+        let net = join.network.as_mut().unwrap();
+        net.session
+            .queue_local(NetCommandKind::Move {
+                units: vec![id],
+                target,
+            });
+        let (_commands, bytes, targets) = net.session.advance().unwrap();
+        assert_eq!(targets.len(), 1, "join knows the host address");
+        for peer in targets {
+            net.socket.send_to(&bytes, peer).unwrap();
+            // Mesh relay/echoes can repeat a packet; it must apply once.
+            net.socket.send_to(&bytes, peer).unwrap();
+        }
+        for _ in 0..100 {
+            host.poll_network();
+            if host.network.as_ref().unwrap().applied > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        host.poll_network();
+        assert_eq!(host.network.as_ref().unwrap().applied, 1);
+        let learned = host
+            .network
+            .as_ref()
+            .unwrap()
+            .session
+            .peers
+            .get(&1)
+            .copied();
+        assert_eq!(
+            learned.map(|address| address.port()),
+            Some(join_port),
+            "the host registers a peer that dialled in"
+        );
+        let moved = host.game.units.iter().find(|unit| unit.id == id);
+        assert!(
+            moved.is_some_and(|unit| !unit.path.is_empty() || unit.cell != cell),
+            "host applied the remote move order"
+        );
+    }
+
+    #[test]
+    fn network_build_command_places_remote_structure() {
+        let mut game = RaGame::new(32, 32);
+        let cell = Vec2i::new(8, 8);
+        let location = Vec2::new(
+            Fixed16_16::from_f32((cell.x as f32 + 0.5) * RA_TILE_SIZE),
+            Fixed16_16::from_f32((cell.y as f32 + 0.5) * RA_TILE_SIZE),
+        );
+        assert!(apply_net_build(
+            &mut game,
+            0,
+            cnc_core::ClassId::PowerPlant,
+            location
+        ));
+        assert!(game.structures.iter().any(|structure| structure.owner == 0
+            && structure.class_id == cnc_core::ClassId::PowerPlant
+            && structure.cell == cell));
+        assert!(
+            !apply_net_build(&mut game, 0, cnc_core::ClassId::PowerPlant, location),
+            "the same cell cannot be built on twice"
+        );
+        assert!(!apply_net_build(
+            &mut game,
+            0,
+            cnc_core::ClassId::VehicleE1,
+            location
+        ));
+    }
+
+    #[test]
+    fn scatter_orders_selected_units() {
+        let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        app.start_skirmish();
+        let player = app.game.player_owner;
+        let mut selected = 0;
+        for unit in &mut app.game.units {
+            let pick = unit.owner == player && unit.is_alive() && selected < 3;
+            unit.selected = pick;
+            if pick {
+                selected += 1;
+            }
+        }
+        assert!(selected > 0);
+        app.scatter_selected_units();
+        assert_eq!(app.pending_commands.len(), selected);
+        assert!(app
+            .notice
+            .as_ref()
+            .is_some_and(|(text, _)| text.contains("Scattered")));
+        assert_eq!(app.drain_pending_commands(), selected);
+        assert!(app
+            .game
+            .units
+            .iter()
+            .filter(|unit| unit.selected)
+            .any(|unit| !unit.path.is_empty()));
+    }
+
+    #[test]
+    fn network_power_command_toggles_remote_structure() {
+        let mut game = RaGame::new(32, 32);
+        let id = game
+            .place_structure(0, cnc_core::ClassId::PowerPlant, Vec2i::new(8, 8))
+            .unwrap();
+        assert!(apply_net_power(&mut game, 0, id, false));
+        assert!(!game
+            .structures
+            .iter()
+            .find(|structure| structure.id == id)
+            .unwrap()
+            .powered);
+        assert!(apply_net_power(&mut game, 0, id, true));
+        assert!(game
+            .structures
+            .iter()
+            .find(|structure| structure.id == id)
+            .unwrap()
+            .powered);
+        assert!(!apply_net_power(&mut game, 1, id, false), "wrong owner");
+    }
+
+    #[test]
+    fn network_repair_command_heals_remote_structure() {
+        let mut game = RaGame::new(32, 32);
+        let id = game
+            .place_structure(0, cnc_core::ClassId::PowerPlant, Vec2i::new(8, 8))
+            .unwrap();
+        let max = game
+            .structures
+            .iter()
+            .find(|structure| structure.id == id)
+            .unwrap()
+            .max_health;
+        if let Some(structure) = game.structures.iter_mut().find(|s| s.id == id) {
+            structure.health = max / Fixed16_16::from_int(2);
+        }
+        assert!(apply_net_repair(&mut game, 0, id));
+        assert_eq!(
+            game.structures
+                .iter()
+                .find(|structure| structure.id == id)
+                .unwrap()
+                .health,
+            max
+        );
+        assert!(!apply_net_repair(&mut game, 0, id), "already repaired");
+        assert!(!apply_net_repair(&mut game, 1, id), "wrong owner");
+    }
+
+    #[test]
+    fn network_deploy_command_replaces_remote_mcv() {
+        let mut game = RaGame::new(32, 32);
+        let cell = Vec2i::new(25, 25);
+        let mcv = game.spawn_unit(0, cnc_core::ClassId::VehicleE7, cell);
+        assert!(apply_net_deploy(&mut game, 0, mcv));
+        assert!(game.unit(mcv).is_none());
+        assert!(game.structures.iter().any(|structure| {
+            structure.class_id == cnc_core::ClassId::ConstructionYard
+                && structure.cell == cell
+                && structure.owner == 0
+        }));
+        assert!(!apply_net_deploy(&mut game, 0, mcv), "already deployed");
+    }
+
+    #[test]
+    fn deploy_selected_mcv_queues_locally() {
+        let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        app.start_skirmish();
+        let cell = Vec2i::new(26, 26);
+        let mcv = app
+            .game
+            .spawn_unit(0, cnc_core::ClassId::VehicleE7, cell);
+        for unit in &mut app.game.units {
+            unit.selected = unit.id == mcv;
+        }
+        app.deploy_selected_mcv();
+        assert_eq!(app.pending_commands.len(), 1);
+        assert_eq!(app.drain_pending_commands(), 1);
+        assert!(app.game.unit(mcv).is_none());
+        assert!(app.game.structures.iter().any(|structure| {
+            structure.class_id == cnc_core::ClassId::ConstructionYard
+                && structure.cell == cell
+        }));
+    }
+
+    #[test]
+    fn network_sell_command_removes_remote_structure() {
+        let mut game = RaGame::new(32, 32);
+        let id = game
+            .place_structure(0, cnc_core::ClassId::PowerPlant, Vec2i::new(8, 8))
+            .unwrap();
+        assert!(apply_net_sell(&mut game, 0, id));
+        assert!(!game.structures.iter().any(|structure| structure.id == id));
+        assert!(!apply_net_sell(&mut game, 0, id), "already sold");
+    }
+
+    #[test]
+    fn selected_structure_sells_locally() {
+        let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        app.start_skirmish();
+        let id = app
+            .game
+            .structures
+            .iter()
+            .find(|structure| structure.owner == 0 && structure.is_alive())
+            .map(|structure| structure.id)
+            .unwrap();
+        app.selected_structure = Some(id);
+        app.sell_selected_structure();
+        assert_eq!(app.pending_commands.len(), 1);
+        assert!(app
+            .game
+            .structures
+            .iter()
+            .any(|structure| structure.id == id));
+        assert_eq!(app.drain_pending_commands(), 1);
+        assert!(!app
+            .game
+            .structures
+            .iter()
+            .any(|structure| structure.id == id));
+        assert!(app.selected_structure.is_none());
+    }
+
+    #[test]
+    fn network_produce_command_queues_remote_unit() {
+        let mut game = RaGame::new(32, 32);
+        let before = game.houses[0].production_queue.len();
+        assert!(apply_net_produce(
+            &mut game,
+            0,
+            cnc_core::ClassId::VehicleE2
+        ));
+        assert_eq!(game.houses[0].production_queue.len(), before + 1);
+        assert_eq!(
+            game.houses[0].production_queue.back().unwrap().class_id,
+            cnc_core::ClassId::VehicleE2
+        );
+        assert_eq!(ra_unit_build_seconds(cnc_core::ClassId::InfantryE1), 4);
+        assert_eq!(ra_unit_build_seconds(cnc_core::ClassId::VehicleE1), 6);
+        assert_eq!(ra_unit_build_seconds(cnc_core::ClassId::VehicleE2), 8);
+        assert_eq!(ra_unit_build_seconds(cnc_core::ClassId::ShipE1), 9);
+        assert!(!apply_net_produce(
+            &mut game,
+            9,
+            cnc_core::ClassId::InfantryE1
+        ));
+    }
+
+    #[test]
+    fn ra_produce_unit_queues_locally() {
+        let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        app.start_skirmish();
+        let before = app.game.houses[0].production_queue.len();
+        app.produce_unit(cnc_core::ClassId::InfantryE1);
+        assert_eq!(app.pending_commands.len(), 1);
+        assert_eq!(app.drain_pending_commands(), 1);
+        assert_eq!(app.game.houses[0].production_queue.len(), before + 1);
+        assert!(app.network.is_none());
+    }
+
+    #[test]
+    fn network_lobby_edits_and_starts_both_roles() {
+        let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        app.open_lobby();
+        assert_eq!(app.mode, RaMode::NetworkLobby);
+        assert_eq!(app.lobby.role, NetRole::Host);
+        app.lobby.toggle_role();
+        assert_eq!(app.lobby.role, NetRole::Join);
+        app.lobby.toggle_role();
+
+        let original = app.lobby.peer_address.clone();
+        app.lobby.backspace();
+        assert_eq!(app.lobby.peer_address.len(), original.len() - 1);
+        app.lobby.push_char('7');
+        assert!(app.lobby.peer_address.ends_with('7'));
+        app.lobby.push_char('x');
+        assert!(app.lobby.peer_address.ends_with('7'), "letters are ignored");
+        let port = app.lobby.host_port;
+        app.lobby.adjust_port(1);
+        assert_eq!(app.lobby.host_port, port + 1);
+
+        // A bad address keeps the lobby open with an inline error.
+        app.lobby.peer_address = "not-an-address".to_string();
+        let _ = app.start_lobby();
+        assert_eq!(app.mode, RaMode::NetworkLobby);
+        assert!(app.lobby_error.is_some());
+
+        // A host with an ephemeral port starts a network game with house 0.
+        app.lobby.peer_address = String::new();
+        app.lobby.host_port = 0;
+        app.lobby_error = None;
+        let _ = app.start_lobby();
+        assert_eq!(app.mode, RaMode::Playing);
+        assert_eq!(app.game.player_owner, 0);
+        assert_eq!(app.game.ai.owner, usize::MAX);
+        assert!(app.network.is_some());
+        app.abort_mission();
+        assert_eq!(app.mode, RaMode::Setup);
+        assert!(app.network.is_none());
+
+        // Joining starts house 1 and remembers the host address.
+        app.open_lobby();
+        app.lobby.toggle_role();
+        app.lobby.join_address = "127.0.0.1:9".to_string();
+        app.lobby.join_port = 0;
+        let _ = app.start_lobby();
+        assert_eq!(app.mode, RaMode::Playing);
+        assert_eq!(app.game.player_owner, 1);
+        let net = app.network.as_ref().unwrap();
+        assert_eq!(net.session.local_player, 1);
+        assert_eq!(
+            net.session.peers.get(&0).unwrap().ip().to_string(),
+            "127.0.0.1"
+        );
+    }
+
+    #[test]
+    fn td_pause_menu_resumes_and_returns_to_selector() {
+        let mut app = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+        )
+        .unwrap();
+        let maps = Path::new(env!("CARGO_MANIFEST_DIR")).join("../maps/td_campaign");
+        app.load_mission_dir(&maps).unwrap();
+        assert!(app.activate_selected_mission().unwrap());
+        assert!(!app.selecting_mission);
+
+        app.enter_td_pause();
+        assert!(app.td_paused);
+        app.td_pause_choice = 0;
+        app.activate_td_pause_choice();
+        assert!(!app.td_paused);
+
+        app.enter_td_pause();
+        app.td_pause_choice = 3;
+        app.activate_td_pause_choice();
+        assert!(!app.td_paused);
+        assert!(app.selecting_mission);
+    }
+
+    #[test]
+    fn td_campaign_completion_shows_final_screen() {
+        let progress = std::env::temp_dir().join(format!("td-done-{}.dat", std::process::id()));
+        let _ = std::fs::remove_file(&progress);
+        let mut app = LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default())
+            .unwrap();
+        app.td_progress_path = progress.clone();
+        let maps = Path::new(env!("CARGO_MANIFEST_DIR")).join("../maps/td_campaign");
+        assert_eq!(app.load_mission_dir(&maps).unwrap(), 9);
+        app.td_completed = vec![true; 9];
+        app.td_completed[8] = false;
+        app.mission_index = 8;
+        assert!(app.activate_selected_mission().unwrap());
+        app.game.mission.outcome = Some(MissionOutcome::Victory);
+        app.game.elapsed = Fixed16_16::from_int(42);
+        app.finish_td_mission();
+        assert!(app.td_complete, "last victory opens the campaign screen");
+        assert!(!app.selecting_mission);
+        assert!(app.td_completed.iter().all(|done| *done));
+        app.dismiss_td_campaign_complete();
+        assert!(!app.td_complete);
+        assert!(app.selecting_mission);
+        let _ = std::fs::remove_file(&progress);
+    }
+
+    #[test]
+    fn td_mission_finish_returns_to_selector_and_advances() {
+        let progress = std::env::temp_dir().join(format!("td-finish-{}.dat", std::process::id()));
+        let _ = std::fs::remove_file(&progress);
+        let mut app = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+        )
+        .unwrap();
+        app.td_progress_path = progress.clone();
+        let maps = Path::new(env!("CARGO_MANIFEST_DIR")).join("../maps/td_campaign");
+        assert_eq!(app.load_mission_dir(&maps).unwrap(), 9);
+        app.mission_index = 0;
+        assert!(app.activate_selected_mission().unwrap());
+        app.game.mission.outcome = Some(MissionOutcome::Victory);
+        app.game.elapsed = Fixed16_16::from_int(30);
+        app.finish_td_mission();
+        assert!(app.selecting_mission);
+        assert_eq!(app.mission_index, 1, "a win advances to the next mission");
+        assert!(app.td_completed[0]);
+        assert_eq!(app.td_best[0], Some(30));
+
+        assert!(app.activate_selected_mission().unwrap());
+        app.game.mission.outcome = Some(MissionOutcome::Defeat);
+        app.finish_td_mission();
+        assert!(app.selecting_mission);
+        assert_eq!(app.mission_index, 1, "a loss retries the same mission");
+        assert!(!app.td_completed[1]);
+        let _ = std::fs::remove_file(&progress);
+    }
+
+    #[test]
+    fn td_mission_select_lists_and_loads() {
+        let dir = std::env::temp_dir().join(format!("td-select-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let maps = Path::new(env!("CARGO_MANIFEST_DIR")).join("../maps/td_campaign");
+        std::fs::copy(maps.join("01.ini"), dir.join("01.ini")).unwrap();
+        std::fs::copy(maps.join("02.ini"), dir.join("02.ini")).unwrap();
+
+        let progress = dir.join("td_progress.dat");
+        let mut app = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+        )
+        .unwrap();
+        app.td_progress_path = progress.clone();
+        assert_eq!(app.load_mission_dir(&dir).unwrap(), 2);
+        assert!(app.selecting_mission);
+        assert_eq!(app.mission_choices[0].name, "GDI 01 - Holding the Line");
+        assert!(!app.mission_choices[0].spawns.is_empty());
+        assert!(app.mission_choices[0]
+            .spawns
+            .iter()
+            .all(|spawn| spawn.cell.x >= 0 && spawn.cell.x < 64));
+        assert!(app.mission_choices[0]
+            .spawns
+            .iter()
+            .any(|spawn| spawn.owner == 1 && !spawn.structure));
+        assert!(app.mission_choices[0].objectives >= 2);
+        app.cycle_mission(1);
+        assert_eq!(app.mission_index, 1);
+        assert!(app.activate_selected_mission().unwrap());
+        assert!(!app.selecting_mission);
+        assert!(app.td_briefing_open, "missions open the briefing overlay");
+        assert_eq!(app.game.mission.name, "Nod 01 - Breakout");
+        assert_eq!(app.game.player_owner, 1, "Nod mission controls Nod");
+        assert!(
+            app.game.select_all_owned(1) > 0,
+            "Nod units are selectable in a Nod mission"
+        );
+
+        // Winning records completion + best time, keeping the faster run.
+        app.game.mission.outcome = Some(MissionOutcome::Victory);
+        app.game.elapsed = cnc_core::Fixed16_16::from_int(80);
+        app.record_mission_result();
+        assert!(app.td_completed[1]);
+        assert_eq!(app.td_best[1], Some(80));
+        app.td_recorded = false;
+        app.game.elapsed = cnc_core::Fixed16_16::from_int(60);
+        app.record_mission_result();
+        assert_eq!(app.td_best[1], Some(60));
+        app.td_recorded = false;
+        app.game.elapsed = cnc_core::Fixed16_16::from_int(90);
+        app.record_mission_result();
+        assert_eq!(app.td_best[1], Some(60));
+        let saved = std::fs::read_to_string(&progress).unwrap();
+        assert!(saved.contains("Completed=1"), "{saved}");
+        assert!(saved.contains("1:60"), "{saved}");
+
+        // A fresh launcher resumes the saved completion/best time.
+        let mut resumed = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+        )
+        .unwrap();
+        resumed.td_progress_path = progress.clone();
+        assert_eq!(resumed.load_mission_dir(&dir).unwrap(), 2);
+        assert!(resumed.td_completed[1]);
+        assert_eq!(resumed.td_best[1], Some(60));
+
+        resumed.td_filter = CampaignFilter::Completed;
+        assert_eq!(resumed.td_visible(), vec![1]);
+        resumed.td_filter = CampaignFilter::Incomplete;
+        assert_eq!(resumed.td_visible(), vec![0]);
+        resumed.cycle_td_filter();
+        assert_eq!(resumed.td_filter, CampaignFilter::Completed);
+        resumed.cycle_td_filter();
+        assert_eq!(resumed.td_filter, CampaignFilter::All);
+        resumed.td_stats_open = true;
+        assert!(resumed.td_stats_open);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn queued_game_commands_are_routed_into_the_game() {
+        let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        app.start_skirmish();
+        let player = app.game.player_owner;
+        let (id, cell) = app
+            .game
+            .units
+            .iter()
+            .find(|unit| unit.owner == player)
+            .map(|unit| (unit.id, unit.cell))
+            .unwrap();
+        let target = Vec2::new(
+            Fixed16_16::from_f32((cell.x as f32 + 3.5) * RA_TILE_SIZE),
+            Fixed16_16::from_f32((cell.y as f32 + 0.5) * RA_TILE_SIZE),
+        );
+        app.pending_commands.push(GameCommand::Move {
+            owner: player,
+            units: vec![id],
+            target,
+        });
+        assert_eq!(app.drain_pending_commands(), 1);
+        assert!(app.pending_commands.is_empty());
+        assert!(
+            !app.game.unit(id).unwrap().path.is_empty(),
+            "command should set a movement path"
+        );
+    }
+
+    #[test]
+    fn pause_menu_restarts_and_aborts() {
+        let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        app.start_skirmish();
+        assert_eq!(app.mode, RaMode::Playing);
+        let scenario = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../maps/ra_campaign/01.ini");
+        app.active_scenario_path = Some(scenario);
+        app.campaign_active = false;
+
+        app.enter_pause();
+        assert!(app.paused);
+        app.pause_choice = 1;
+        app.activate_pause_choice();
+        assert!(!app.paused);
+        assert_eq!(app.mode, RaMode::Playing);
+        assert_eq!(app.game.map.width, 24, "restart reloaded the scenario");
+
+        app.enter_pause();
+        app.pause_choice = 2;
+        app.activate_pause_choice();
+        assert_eq!(app.mode, RaMode::Setup);
+        assert!(!app.paused);
+    }
+
+    #[test]
+    fn pause_menu_saves_and_loads_the_game() {
+        let dir = std::env::temp_dir().join(format!("ra-pause-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("slot.sav");
+        let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        app.start_skirmish();
+        let width = app.game.map.width;
+        let units = app.game.units.len();
+        assert!(app.save_game_to(&path));
+        assert!(path.exists());
+        assert!(app
+            .notice
+            .as_ref()
+            .is_some_and(|(text, _)| text.contains("saved")));
+
+        app.game = RaGame::new(32, 32);
+        assert!(app.load_game_from(&path));
+        assert_eq!(app.mode, RaMode::Playing);
+        assert_eq!(app.game.map.width, width);
+        assert_eq!(app.game.units.len(), units);
+        assert!(app
+            .notice
+            .as_ref()
+            .is_some_and(|(text, _)| text.contains("loaded")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn chat_lines_parse_and_log() {
+        assert_eq!(
+            parse_chat_line(b"CNCCHAT 1 1 hello there"),
+            Some((1, "hello there".to_string()))
+        );
+        assert_eq!(parse_chat_line(b"CNCCHAT 1 1 "), None, "empty text");
+        assert_eq!(parse_chat_line(b"CNCCHAT 1 x hi"), None, "bad player");
+        assert_eq!(parse_chat_line(b"hello"), None);
+
+        let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        app.enable_network(&NetworkSetup {
+            role: "host".to_string(),
+            join: None,
+            port: 0,
+            peers: Vec::new(),
+            bind: "127.0.0.1".to_string(),
+            advertised: None,
+        })
+        .unwrap();
+        app.chat_open = true;
+        app.chat_input = "  rally north  ".to_string();
+        app.send_chat();
+        assert!(!app.chat_open);
+        assert!(app.chat_input.is_empty());
+        assert_eq!(
+            app.chat_log.last(),
+            Some(&(0, "rally north".to_string()))
+        );
+        let len = app.chat_log.len();
+        app.chat_input.clear();
+        app.send_chat();
+        assert_eq!(app.chat_log.len(), len, "empty messages are ignored");
+    }
+
+    #[test]
+    fn td_repair_selected_building_costs_and_notices() {
+        let mut app = LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default())
+            .unwrap();
+        let player = app.game.player_owner;
+        let index = app
+            .game
+            .buildings
+            .iter()
+            .position(|building| building.owner == player && building.is_alive())
+            .unwrap();
+        let max = app.game.buildings[index].max_health;
+        app.game.buildings[index].health = max / Fixed16_16::from_int(2);
+        let credits = app.game.houses[player as usize].credits;
+        app.selected_building = Some(index);
+        app.repair_selected_building();
+        assert_eq!(app.game.buildings[index].health, max);
+        assert!(app.game.houses[player as usize].credits < credits);
+        assert!(app
+            .td_notice
+            .as_ref()
+            .is_some_and(|(text, _)| text.contains("repaired")));
+        // Repairing a full building is a no-op.
+        app.repair_selected_building();
+        assert!(app
+            .td_notice
+            .as_ref()
+            .is_some_and(|(text, _)| text.contains("No repair")));
+    }
+
+    #[test]
+    fn td_sell_selected_building_refunds_and_notices() {
+        let mut app = LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default())
+            .unwrap();
+        let player = app.game.player_owner;
+        let index = app
+            .game
+            .buildings
+            .iter()
+            .position(|building| building.owner == player && building.is_alive())
+            .unwrap();
+        let credits = app.game.houses[player as usize].credits;
+        app.selected_building = Some(index);
+        app.sell_selected_building();
+        assert!(app.selected_building.is_none());
+        assert!(app.game.houses[player as usize].credits > credits);
+        assert!(!app.game.buildings[index].is_alive());
+        assert!(app
+            .td_notice
+            .as_ref()
+            .is_some_and(|(text, _)| text.contains("sold")));
+    }
+
+    #[test]
+    fn control_groups_store_and_recall() {
+        let mut ra = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        ra.start_skirmish();
+        let player = ra.game.player_owner;
+        let id = ra
+            .game
+            .units
+            .iter()
+            .find(|unit| unit.owner == player && unit.is_alive())
+            .map(|unit| unit.id)
+            .unwrap();
+        for unit in &mut ra.game.units {
+            unit.selected = unit.id == id;
+        }
+        ra.store_control_group(0);
+        for unit in &mut ra.game.units {
+            unit.selected = false;
+        }
+        assert!(ra.recall_control_group(0));
+        assert_eq!(ra.game.selected_count(player), 1);
+        assert!(ra.game.unit(id).unwrap().selected);
+        assert!(!ra.recall_control_group(1), "empty group");
+
+        let mut td = LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default())
+            .unwrap();
+        let player = td.game.player_owner;
+        let index = td
+            .game
+            .units
+            .iter()
+            .enumerate()
+            .find(|(_, unit)| unit.owner == player && unit.is_alive())
+            .map(|(index, _)| index)
+            .unwrap();
+        for (i, unit) in td.game.units.iter_mut().enumerate() {
+            unit.is_selected = i == index;
+        }
+        td.store_td_control_group(2);
+        for unit in &mut td.game.units {
+            unit.is_selected = false;
+        }
+        assert!(td.recall_td_control_group(2));
+        assert!(td.game.units[index].is_selected);
+        assert!(!td.recall_td_control_group(0));
+    }
+
+    #[test]
+    fn edge_pan_detects_edges_and_moves_camera() {
+        assert_eq!(
+            edge_pan_direction(2.0, 300.0, 800.0, 600.0, 8.0),
+            (-1.0, 0.0)
+        );
+        assert_eq!(
+            edge_pan_direction(400.0, 598.0, 800.0, 600.0, 8.0),
+            (0.0, 1.0)
+        );
+        assert_eq!(
+            edge_pan_direction(400.0, 300.0, 800.0, 600.0, 8.0),
+            (0.0, 0.0)
+        );
+        assert_eq!(
+            edge_pan_direction(-5.0, 300.0, 800.0, 600.0, 8.0),
+            (0.0, 0.0),
+            "outside the window"
+        );
+
+        let mut ra = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        ra.start_skirmish();
+        let before = ra.camera.position.x;
+        ra.cursor = Some(winit::dpi::PhysicalPosition::new(2.0, 120.0));
+        ra.apply_ra_edge_pan(0.1);
+        assert!(ra.camera.position.x < before);
+
+        let mut td = LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default())
+            .unwrap();
+        let before = td.camera.position.x;
+        td.cursor = Some(winit::dpi::PhysicalPosition::new(318.0, 120.0));
+        td.apply_td_edge_pan(0.1);
+        assert!(td.camera.position.x > before);
+    }
+
+    #[test]
+    fn save_slot_label_reports_age_and_empty() {
+        let dir = std::env::temp_dir().join(format!("slot-label-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("slot.sav");
+        assert_eq!(save_slot_label(&path), "empty");
+        std::fs::write(&path, b"save").unwrap();
+        let label = save_slot_label(&path);
+        assert!(
+            label.ends_with("s ago") || label.ends_with("m ago"),
+            "{label}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn next_incomplete_skips_and_wraps() {
+        let completed = [true, false, true, false];
+        assert_eq!(next_incomplete(&completed, 0), Some(1));
+        assert_eq!(next_incomplete(&completed, 1), Some(3));
+        assert_eq!(next_incomplete(&completed, 3), Some(1));
+        assert_eq!(next_incomplete(&[true; 3], 0), None);
+        assert_eq!(next_incomplete(&[], 0), None);
+    }
+
+    #[test]
+    fn production_percent_handles_progress() {
+        assert_eq!(
+            production_percent(Fixed16_16::from_int(5), Fixed16_16::from_int(10)),
+            50
+        );
+        assert_eq!(
+            production_percent(Fixed16_16::from_int(10), Fixed16_16::from_int(10)),
+            100
+        );
+        assert_eq!(
+            production_percent(Fixed16_16::from_int(20), Fixed16_16::from_int(10)),
+            100,
+            "clamped"
+        );
+        assert_eq!(production_percent(Fixed16_16::ZERO, Fixed16_16::ZERO), 0);
+    }
+
+    #[test]
+    fn health_bars_report_fraction_and_color() {
+        assert_eq!(
+            health_fraction(Fixed16_16::from_int(50), Fixed16_16::from_int(100)),
+            0.5
+        );
+        assert_eq!(
+            health_fraction(Fixed16_16::from_int(0), Fixed16_16::from_int(100)),
+            0.0
+        );
+        assert_eq!(
+            health_fraction(Fixed16_16::from_int(10), Fixed16_16::ZERO),
+            0.0,
+            "zero maximum is treated as empty"
+        );
+        assert_eq!(health_bar_color(0.7), [0.35, 0.90, 0.45, 1.0]);
+        assert_eq!(health_bar_color(0.3), [0.95, 0.82, 0.30, 1.0]);
+        assert_eq!(health_bar_color(0.1), [0.95, 0.35, 0.30, 1.0]);
+    }
+
+    #[test]
+    fn replay_playback_applies_frames_in_order() {
+        let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        app.start_replay(cnc_tiberian_dawn::network::Replay::new(2, Vec::new()));
+        assert_eq!(app.mode, RaMode::Playing);
+        assert_eq!(app.game.player_owner, 0);
+        assert!(app.replay.is_some());
+        let unit = app
+            .game
+            .units
+            .iter()
+            .find(|unit| unit.owner == 0 && unit.is_alive())
+            .map(|unit| unit.id)
+            .unwrap();
+        app.replay.as_mut().unwrap().commands = vec![
+            NetCommand::new(0, 0, NetCommandKind::Stop { units: vec![unit] }),
+            NetCommand::new(3, 0, NetCommandKind::Stop { units: vec![unit] }),
+        ];
+        assert_eq!(app.step_replay_frame(), 1, "frame 0 applies");
+        assert_eq!(app.replay.as_ref().unwrap().frame, 1);
+        assert!(!app.replay.as_ref().unwrap().done);
+        assert_eq!(app.step_replay_frame(), 0);
+        assert_eq!(app.step_replay_frame(), 0);
+        assert_eq!(app.step_replay_frame(), 1, "frame 3 applies");
+        assert!(app.replay.as_ref().unwrap().done);
+    }
+
+    #[test]
+    fn network_replay_saves_command_log() {
+        let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        app.enable_network(&NetworkSetup {
+            role: "host".to_string(),
+            join: None,
+            port: 0,
+            peers: Vec::new(),
+            bind: "127.0.0.1".to_string(),
+            advertised: None,
+        })
+        .unwrap();
+        {
+            let net = app.network.as_mut().unwrap();
+            net.session.queue_local(NetCommandKind::Stop { units: Vec::new() });
+            net.last_tick = Instant::now() - Duration::from_secs(1);
+        }
+        app.poll_network();
+        let path = std::env::temp_dir().join(format!("cnc-replay-{}.rep", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        assert!(app.save_network_replay_to(&path));
+        assert!(path.exists());
+        let replay = cnc_tiberian_dawn::network::Replay::load(&path).unwrap();
+        assert_eq!(replay.players, 2);
+        assert_eq!(replay.commands.len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_slots_cycle_and_use_distinct_paths() {
+        let zero = ra_save_path_for(0);
+        let one = ra_save_path_for(1);
+        let two = ra_save_path_for(2);
+        assert_ne!(zero, one);
+        assert_ne!(one, two);
+        assert!(zero.to_string_lossy().ends_with("ra_mission.sav"));
+        assert!(one.to_string_lossy().ends_with("ra_mission2.sav"));
+
+        let mut ra = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        ra.start_skirmish();
+        assert_eq!(ra.save_slot, 0);
+        ra.cycle_save_slot();
+        assert_eq!(ra.save_slot, 1);
+        assert!(ra
+            .notice
+            .as_ref()
+            .is_some_and(|(text, _)| text.contains("Save slot 2/3")));
+        ra.cycle_save_slot();
+        ra.cycle_save_slot();
+        assert_eq!(ra.save_slot, 0, "wraps around");
+        ra.enter_pause();
+        ra.pause_choice = 5;
+        ra.activate_pause_choice();
+        assert_eq!(ra.save_slot, 1, "pause menu cycles the slot");
+
+        let mut td = LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default())
+            .unwrap();
+        assert_eq!(td.save_slot, 0);
+        td.cycle_td_save_slot();
+        assert_eq!(td.save_slot, 1);
+        assert!(td
+            .td_notice
+            .as_ref()
+            .is_some_and(|(text, _)| text.contains("Save slot 2/3")));
+        td.enter_td_pause();
+        td.td_pause_choice = 4;
+        td.activate_td_pause_choice();
+        assert_eq!(td.save_slot, 2);
+    }
+
+    #[test]
+    fn game_speed_adjusts_and_clamps() {
+        let mut ra = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        ra.start_skirmish();
+        assert_eq!(ra.game_speed, 1.0);
+        ra.adjust_ra_speed(0.25);
+        assert_eq!(ra.game_speed, 1.25);
+        ra.adjust_ra_speed(10.0);
+        assert_eq!(ra.game_speed, 3.0);
+        ra.adjust_ra_speed(-10.0);
+        assert_eq!(ra.game_speed, 0.25);
+
+        // Network games keep speed locked (lockstep).
+        ra.enable_network(&NetworkSetup {
+            role: "host".to_string(),
+            join: None,
+            port: 0,
+            peers: Vec::new(),
+            bind: "127.0.0.1".to_string(),
+            advertised: None,
+        })
+        .unwrap();
+        assert_eq!(ra.game_speed, 1.0, "network start resets speed");
+        ra.adjust_ra_speed(0.25);
+        assert_eq!(ra.game_speed, 1.0, "speed is locked in network games");
+        assert!(ra
+            .notice
+            .as_ref()
+            .is_some_and(|(text, _)| text.contains("locked")));
+
+        let mut td = LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default())
+            .unwrap();
+        td.adjust_td_speed(0.5);
+        assert_eq!(td.game_speed, 1.5);
+        td.adjust_td_speed(10.0);
+        assert_eq!(td.game_speed, 3.0);
+    }
+
+    #[test]
+    fn camera_bookmarks_save_and_jump() {
+        assert_eq!(bookmark_slot("1"), Some(0));
+        assert_eq!(bookmark_slot("4"), Some(3));
+        assert_eq!(bookmark_slot("5"), None);
+
+        let mut ra = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        ra.start_skirmish();
+        let saved = Vec2::new(Fixed16_16::from_int(300), Fixed16_16::from_int(400));
+        ra.camera.position = saved;
+        ra.save_ra_bookmark(0);
+        ra.camera.position = Vec2::new(Fixed16_16::from_int(10), Fixed16_16::from_int(10));
+        assert!(ra.jump_ra_bookmark(0));
+        assert_eq!(ra.camera.position, saved);
+        assert!(!ra.jump_ra_bookmark(1), "empty slot");
+
+        let mut td = LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default())
+            .unwrap();
+        let saved = Vec2::new(Fixed16_16::from_int(120), Fixed16_16::from_int(240));
+        td.camera.position = saved;
+        td.save_td_bookmark(2);
+        td.camera.position = Vec2::new(Fixed16_16::from_int(1), Fixed16_16::from_int(1));
+        assert!(td.jump_td_bookmark(2));
+        assert_eq!(td.camera.position, saved);
+        assert!(!td.jump_td_bookmark(0));
+    }
+
+    #[test]
+    fn minimap_clicks_center_the_camera() {
+        let mut ra = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        ra.start_skirmish();
+        // The minimap is laid out in unzoomed HUD space; pin the zoom so the
+        // expected origin math below is readable.
+        ra.camera.zoom = Fixed16_16::ONE;
+        let zoom = ra.camera.zoom.to_f32().max(1.0e-6);
+        let view_w = ra.camera.viewport_width as f32 / zoom;
+        let view_h = ra.camera.viewport_height as f32 / zoom;
+        let left = ra.camera.position.x.to_f32() - view_w * 0.5;
+        let top = ra.camera.position.y.to_f32() - view_h * 0.5;
+        let (_, scale) = minimap_layout(ra.game.map.width, ra.game.map.height, 150.0);
+        let (x, y, _, _) = minimap_origin(
+            ra.game.map.width,
+            ra.game.map.height,
+            left,
+            top,
+            view_w,
+            view_h,
+            true,
+        );
+        let target = Vec2::new(
+            Fixed16_16::from_f32(x + 5.5 * scale),
+            Fixed16_16::from_f32(y + 6.5 * scale),
+        );
+        assert!(ra.ra_minimap_click(target));
+        assert!((ra.camera.position.x.to_f32() - 5.5 * RA_TILE_SIZE).abs() < 0.01);
+        assert!((ra.camera.position.y.to_f32() - 6.5 * RA_TILE_SIZE).abs() < 0.01);
+        assert!(!ra.ra_minimap_click(Vec2::new(Fixed16_16::ZERO, Fixed16_16::ZERO)));
+
+        let mut td = LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default())
+            .unwrap();
+        td.camera.zoom = Fixed16_16::ONE;
+        let zoom = td.camera.zoom.to_f32().max(1.0e-6);
+        let view_w = td.camera.viewport_width as f32 / zoom;
+        let view_h = td.camera.viewport_height as f32 / zoom;
+        let left = td.camera.position.x.to_f32() - view_w * 0.5;
+        let top = td.camera.position.y.to_f32() - view_h * 0.5;
+        let (_, scale) = minimap_layout(td.game.map.width, td.game.map.height, 150.0);
+        let (x, y, _, _) = minimap_origin(
+            td.game.map.width,
+            td.game.map.height,
+            left,
+            top,
+            view_w,
+            view_h,
+            false,
+        );
+        let target = Vec2::new(
+            Fixed16_16::from_f32(x + 3.5 * scale),
+            Fixed16_16::from_f32(y + 4.5 * scale),
+        );
+        assert!(td.td_minimap_click(target));
+        assert!((td.camera.position.x.to_f32() - 3.5 * cnc_tiberian_dawn::map::TILE_SIZE).abs() < 0.01);
+        assert!((td.camera.position.y.to_f32() - 4.5 * cnc_tiberian_dawn::map::TILE_SIZE).abs() < 0.01);
+    }
+
+    #[test]
+    fn minimap_layout_scales_to_the_panel() {
+        let (step, scale) = minimap_layout(64, 64, 150.0);
+        assert_eq!(step, 2);
+        assert!((scale * 64.0 - 150.0).abs() < 0.01);
+        let (step, scale) = minimap_layout(16, 16, 150.0);
+        assert_eq!(step, 1);
+        assert!((scale * 16.0 - 150.0).abs() < 0.01);
+        assert_eq!(minimap_layout(128, 64, 150.0).0, 3);
+        assert_eq!(minimap_layout(1, 1, 150.0).0, 1);
+    }
+
+    #[test]
+    fn ra_setup_preview_maps_are_playable() {
+        for size in RA_MAP_SIZES {
+            let map = ra_setup_preview(size);
+            assert_eq!(map.width, size);
+            assert_eq!(map.height, size);
+            assert_eq!(map.terrain.len() as u32, size * size);
+            assert_eq!(map.ore.len() as u32, size * size);
+            assert!(
+                map.terrain.iter().any(|terrain| terrain.is_water()),
+                "preview map {size} should have its river"
+            );
+            assert!(
+                map.ore.iter().any(|amount| *amount > 0),
+                "preview map {size} should have ore"
+            );
+        }
+    }
+
+    #[test]
+    fn ra_setup_cycles_sizes_and_difficulty() {
+        let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        assert_eq!(app.setup.map_size, 64);
+        app.cycle_map_size(true);
+        assert_eq!(app.setup.map_size, 96);
+        app.cycle_map_size(false);
+        app.cycle_map_size(false);
+        assert_eq!(app.setup.map_size, 48);
+        assert_eq!(app.setup.difficulty, 1);
+        app.cycle_difficulty();
+        assert_eq!(app.setup.difficulty, 2);
+
+        app.cycle_side();
+        assert_eq!(app.setup.side, 1);
+        assert_eq!(app.setup.country, Country::Russia);
+        app.start_skirmish();
+        assert_eq!(app.game.player_owner, 1);
+        assert_eq!(app.game.ai.owner, 0);
+        assert_eq!(app.game.houses[1].country, Some(Country::Russia));
+    }
+
+    #[test]
+    fn main_menu_navigates_and_launches_local_game() {
+        let mut menu = MainMenu::from_campaigns(
+            menu_test_campaign("maps/td_campaign", 9),
+            menu_test_campaign("maps/ra_campaign", 10),
+        );
+        assert_eq!(menu.screen(), Screen::Main);
+        assert_eq!(menu.cursor(), 0);
+
+        // Down moves to Local Game and Enter opens that page.
+        assert_eq!(menu.on_key(&Key::Named(NamedKey::ArrowDown)), None);
+        assert_eq!(menu.cursor(), 1);
+        assert_eq!(menu.activate(), None);
+        assert_eq!(menu.screen(), Screen::Local);
+
+        // The first local entry starts a Tiberian Dawn skirmish.
+        assert_eq!(
+            menu.activate(),
+            Some(MenuCommand::Launch(LaunchTarget::Local(
+                GameChoice::TiberianDawn
+            )))
+        );
+
+        // Down selects the Red Alert skirmish.
+        menu.on_key(&Key::Named(NamedKey::ArrowDown));
+        assert_eq!(
+            menu.activate(),
+            Some(MenuCommand::Launch(LaunchTarget::Local(
+                GameChoice::RedAlert
+            )))
+        );
+    }
+
+    #[test]
+    fn main_menu_campaign_page_lists_scenarios_for_both_games() {
+        let mut menu = MainMenu::from_campaigns(
+            menu_test_campaign("maps/td_campaign", 9),
+            menu_test_campaign("maps/ra_campaign", 10),
+        );
+        // Campaign is the first row on the main page.
+        assert_eq!(menu.activate(), None);
+        assert_eq!(menu.screen(), Screen::Campaign);
+        assert_eq!(
+            menu.activate(),
+            Some(MenuCommand::Launch(LaunchTarget::Campaign(
+                GameChoice::TiberianDawn
+            )))
+        );
+
+        menu.on_key(&Key::Named(NamedKey::ArrowDown));
+        assert_eq!(
+            menu.activate(),
+            Some(MenuCommand::Launch(LaunchTarget::Campaign(
+                GameChoice::RedAlert
+            )))
+        );
+    }
+
+    #[test]
+    fn campaign_without_scenarios_reports_how_to_fix_it() {
+        let mut menu = MainMenu::from_campaigns(
+            CampaignInfo {
+                dir: PathBuf::from("maps/td_campaign"),
+                scenarios: 0,
+            },
+            menu_test_campaign("maps/ra_campaign", 10),
+        );
+        assert_eq!(menu.activate(), None);
+        assert_eq!(menu.screen(), Screen::Campaign);
+        assert_eq!(menu.activate(), None, "missing scenarios must not launch");
+        let notice = menu.notice().unwrap();
+        assert!(notice.contains("CNC_TD_CAMPAIGN"), "{notice}");
+    }
+
+    #[test]
+    fn online_page_offers_red_alert_and_marks_td_unavailable() {
+        let mut menu = MainMenu::from_campaigns(
+            menu_test_campaign("maps/td_campaign", 9),
+            menu_test_campaign("maps/ra_campaign", 10),
+        );
+        menu.on_key(&Key::Named(NamedKey::ArrowDown));
+        menu.on_key(&Key::Named(NamedKey::ArrowDown));
+        assert_eq!(menu.activate(), None);
+        assert_eq!(menu.screen(), Screen::Online);
+
+        assert_eq!(
+            menu.activate(),
+            Some(MenuCommand::Launch(LaunchTarget::Online(
+                GameChoice::RedAlert
+            )))
+        );
+
+        menu.on_key(&Key::Named(NamedKey::ArrowDown));
+        assert_eq!(menu.activate(), None, "TD online stays disabled");
+        assert!(menu.notice().unwrap().contains("not available"));
+    }
+
+    #[test]
+    fn menu_escape_backs_out_and_quits_from_main() {
+        let mut menu = MainMenu::from_campaigns(
+            menu_test_campaign("maps/td_campaign", 9),
+            menu_test_campaign("maps/ra_campaign", 10),
+        );
+        menu.activate();
+        assert_eq!(menu.screen(), Screen::Campaign);
+        assert_eq!(menu.on_key(&Key::Named(NamedKey::Escape)), None);
+        assert_eq!(menu.screen(), Screen::Main);
+        assert_eq!(
+            menu.on_key(&Key::Named(NamedKey::Escape)),
+            Some(MenuCommand::Quit)
+        );
+
+        // Up wraps to the Quit row.
+        assert_eq!(menu.cursor(), 0);
+        menu.on_key(&Key::Named(NamedKey::ArrowUp));
+        assert_eq!(menu.cursor(), 3);
+        assert_eq!(menu.activate(), Some(MenuCommand::Quit));
+    }
+
+    #[test]
+    fn menu_mouse_click_selects_rows() {
+        let mut menu = MainMenu::from_campaigns(
+            menu_test_campaign("maps/td_campaign", 9),
+            menu_test_campaign("maps/ra_campaign", 10),
+        );
+        let (x, y, w, h) = menu_test_row(1, 1024);
+        assert!(menu.on_pointer(x + 10.0, y + h * 0.5, 1024));
+        assert_eq!(menu.on_click(x + 10.0, y + h * 0.5, 1024), None);
+        assert_eq!(menu.screen(), Screen::Local);
+        assert_eq!(menu.cursor(), 0);
+        let _ = w;
+
+        let (x, y, _, h) = menu_test_row(0, 1024);
+        assert_eq!(
+            menu.on_click(x + 10.0, y + h * 0.5, 1024),
+            Some(MenuCommand::Launch(LaunchTarget::Local(
+                GameChoice::TiberianDawn
+            )))
+        );
+    }
+
+    #[test]
+    fn scenario_count_ignores_non_ini_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "cnc-menu-scenarios-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("01.ini"), b"[Basic]\nName=One\n").unwrap();
+        std::fs::write(dir.join("02.INI"), b"[Basic]\nName=Two\n").unwrap();
+        std::fs::write(dir.join("readme.txt"), b"not a scenario").unwrap();
+        assert_eq!(scenario_count(&dir), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(scenario_count(Path::new("definitely-not-a-directory")), 0);
+    }
+
+    #[test]
+    fn main_menu_draws_every_page_without_a_window() {
+        let mut menu = MainMenu::from_campaigns(
+            menu_test_campaign("maps/td_campaign", 9),
+            menu_test_campaign("maps/ra_campaign", 10),
+        );
+        let mut renderer = SoftwareRenderer::new(1024, 768);
+        for (row, page) in [
+            (0usize, Screen::Campaign),
+            (1, Screen::Local),
+            (2, Screen::Online),
+        ] {
+            menu.reset();
+            for _ in 0..row {
+                menu.on_key(&Key::Named(NamedKey::ArrowDown));
+            }
+            menu.activate();
+            assert_eq!(menu.screen(), page);
+            renderer.begin_frame();
+            renderer.set_camera(&screen_camera(1024, 768));
+            menu.draw(&mut renderer, 1024, 768);
+            renderer.end_frame().unwrap();
+            assert!(
+                renderer.buffer().iter().any(|pixel| *pixel != 0),
+                "page {page:?} should draw pixels"
+            );
+        }
+    }
+
+    #[test]
+    fn return_to_menu_flag_is_consumed_once() {
+        let mut td = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+        )
+        .unwrap();
+        assert!(!td.take_return_to_menu());
+        td.return_to_menu = true;
+        assert!(td.take_return_to_menu());
+        assert!(!td.take_return_to_menu(), "flag is reset after the shell sees it");
+
+        let mut ra = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        assert!(!ra.take_return_to_menu());
+        ra.return_to_menu = true;
+        assert!(ra.take_return_to_menu());
+        assert!(!ra.take_return_to_menu());
+    }
+
+    #[test]
+    fn zoom_defaults_clamp_and_pin_the_world_under_the_cursor() {
+        let mut td = LauncherApp::new(RendererKind::Software, 1024, 768, RulesDatabase::default())
+            .unwrap();
+        assert!((td.camera.zoom.to_f32() - DEFAULT_GAME_ZOOM).abs() < 1.0e-3);
+
+        td.camera.position = Vec2::new(Fixed16_16::from_int(600), Fixed16_16::from_int(600));
+        td.cursor = Some(winit::dpi::PhysicalPosition::new(820.0, 190.0));
+        let before = td.cursor_world().unwrap();
+        td.zoom_td(2.0);
+        let after = td.cursor_world().unwrap();
+        assert!((before.x.to_f32() - after.x.to_f32()).abs() < 1.0);
+        assert!((before.y.to_f32() - after.y.to_f32()).abs() < 1.0);
+
+        for _ in 0..20 {
+            td.zoom_td(2.0);
+        }
+        assert!(td.camera.zoom.to_f32() <= MAX_GAME_ZOOM + 1.0e-4);
+        for _ in 0..40 {
+            td.zoom_td(0.5);
+        }
+        assert!(td.camera.zoom.to_f32() >= MIN_GAME_ZOOM - 1.0e-4);
+
+        let mut ra = RaLauncherApp::new(RendererKind::Software, 1024, 768, 0);
+        ra.start_skirmish();
+        assert!((ra.camera.zoom.to_f32() - DEFAULT_GAME_ZOOM).abs() < 1.0e-3);
+    }
+
+    #[test]
+    fn hud_world_maps_zoomed_clicks_to_the_same_screen_point() {
+        let mut td = LauncherApp::new(RendererKind::Software, 1024, 768, RulesDatabase::default())
+            .unwrap();
+        td.camera.zoom = Fixed16_16::from_f32(2.5);
+        let screen = winit::dpi::PhysicalPosition::new(700.0, 300.0);
+        let hud = td.hud_world(td.screen_to_world(screen));
+        let expected_x = td.camera.position.x.to_f32() + 700.0 - 1024.0 * 0.5;
+        let expected_y = td.camera.position.y.to_f32() + 300.0 - 768.0 * 0.5;
+        assert!((hud.x.to_f32() - expected_x).abs() < 0.5);
+        assert!((hud.y.to_f32() - expected_y).abs() < 0.5);
+    }
+}
+

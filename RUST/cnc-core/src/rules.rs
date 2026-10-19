@@ -9,6 +9,7 @@
 //! partial Rules.ini still yields the original engine values.
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -64,7 +65,7 @@ fn get_string_list(section: &IniSection, key: &str) -> Vec<String> {
 }
 
 /// General section AI and economy tuning.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GeneralRules {
     pub base_size_add: i32,
     pub power_surplus: i32,
@@ -209,7 +210,7 @@ impl GeneralRules {
 }
 
 /// Difficulty selector used by the AI and combat biases.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum DifficultyLevel {
     Easy,
     #[default]
@@ -237,7 +238,7 @@ impl DifficultyLevel {
 }
 
 /// Per-difficulty combat and production biases (RULES.H DifficultyClass).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DifficultyRule {
     pub firepower_bias: f64,
     pub groundspeed_bias: f64,
@@ -298,7 +299,7 @@ impl DifficultyRule {
 }
 
 /// One weapon section, e.g. [Cannon105] in Rules.ini / CONST.CPP.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WeaponRule {
     pub name: String,
     pub damage: i32,
@@ -341,7 +342,7 @@ impl WeaponRule {
 }
 
 /// One warhead section, e.g. [AP] in Rules.ini / CONST.CPP.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WarheadRule {
     pub name: String,
     pub spread: i32,
@@ -379,7 +380,7 @@ impl WarheadRule {
 }
 
 /// Generic unit/building/aircraft type definition overridden by Rules.ini.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TypeRule {
     pub name: String,
     pub cost: Option<i32>,
@@ -436,7 +437,7 @@ impl TypeRule {
 }
 
 /// House/faction definition from a section listed in [Houses].
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HouseRule {
     pub name: String,
     pub display_name: Option<String>,
@@ -463,7 +464,7 @@ const META_SECTIONS: &[&str] = &[
 ];
 
 /// Fully parsed Rules.ini database shared by the game crates.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RulesDatabase {
     pub general: GeneralRules,
     pub easy: DifficultyRule,

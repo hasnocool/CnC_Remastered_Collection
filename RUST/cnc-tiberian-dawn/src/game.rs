@@ -13,7 +13,7 @@ use crate::building::Building;
 use crate::house::House;
 use crate::house::ProductionItem;
 use crate::map::{Map, TILE_SIZE};
-use crate::mission::Mission;
+use crate::mission::{Action, Mission, MissionOutcome};
 use crate::pathfind::find_path;
 use crate::td_rules::{
     default_structure_owner, default_unit_owner, leptons_to_px, owner_token_allows,
@@ -53,7 +53,7 @@ pub struct Beam {
 }
 
 /// Damage scheduled with a short delay for staggered per-cell blasts.
-struct PendingBlast {
+pub(crate) struct PendingBlast {
     position: Vec2,
     radius: f32,
     damage: i32,
@@ -85,6 +85,12 @@ pub struct GameStatus {
     pub nod_ion: i32,
     pub nod_nuke: i32,
     pub ready_buildings: usize,
+    /// Campaign objectives shown in the HUD.
+    pub objectives_total: usize,
+    pub objectives_done: usize,
+    /// True once a `win`/`lose` action resolved the mission.
+    pub mission_over: bool,
+    pub mission_victory: bool,
 }
 
 /// A type the player can put into a production queue.
@@ -133,6 +139,8 @@ pub struct SidebarOption {
 pub struct Game {
     pub map: Map,
     pub houses: Vec<House>,
+    /// House controlled by the local player (mission `Player`, default GDI).
+    pub player_owner: u8,
     pub units: Vec<Unit>,
     pub buildings: Vec<Building>,
     pub mission: Mission,
@@ -165,7 +173,7 @@ pub struct Game {
     /// Optional Rules.ini overrides. An empty database falls back to the
     /// hard-coded TD stats ported from UDATA/BDATA/CONST.CPP.
     pub rules: RulesDatabase,
-    pending_blasts: Vec<PendingBlast>,
+    pub(crate) pending_blasts: Vec<PendingBlast>,
 }
 
 impl Game {
@@ -185,6 +193,7 @@ impl Game {
         Self {
             map,
             houses: Vec::new(),
+            player_owner: 0,
             units: Vec::new(),
             buildings: Vec::new(),
             mission: Mission::new(map_name.to_string()),
@@ -422,7 +431,7 @@ impl Game {
 
         for (structure, cx, cy, owner) in structures {
             let mut building = Building::from_type(structure, Self::cell(cx, cy), owner);
-            building.set_powered(owner == 0);
+            building.set_powered(true);
             let id = self.buildings.len() as u32;
             if owner == 0 {
                 gdi.add_building(id);
@@ -667,6 +676,54 @@ impl Game {
             cost,
         });
         true
+    }
+
+    /// Cancel the front production item and refund its cost.
+    pub fn cancel_production(&mut self, owner: u8) -> Option<i32> {
+        let house = self.houses.get_mut(owner as usize)?;
+        let item = house.production_queue.pop_front()?;
+        house.add_credits(item.cost);
+        Some(item.cost)
+    }
+
+    /// Repair a damaged building to full health, paying for the missing health.
+    pub fn repair_building(&mut self, owner: u8, index: usize) -> Option<i32> {
+        let building = self.buildings.get(index)?;
+        if building.owner != owner || !building.is_alive() || building.health >= building.max_health {
+            return None;
+        }
+        let structure = building.structure_type()?;
+        let missing = (building.max_health - building.health).to_f32()
+            / building.max_health.to_f32().max(1.0);
+        let cost = ((self.building_cost(structure) as f32 * missing).ceil() as i32).max(1);
+        let house = self.houses.get_mut(owner as usize)?;
+        if !house.spend_credits(cost) {
+            return None;
+        }
+        if let Some(building) = self.buildings.get_mut(index) {
+            building.health = building.max_health;
+        }
+        Some(cost)
+    }
+
+    /// Sell a placed building: refund half its cost and mark it destroyed.
+    pub fn sell_building(&mut self, owner: u8, index: usize) -> Option<i32> {
+        let building = self.buildings.get(index)?;
+        if building.owner != owner || !building.is_alive() {
+            return None;
+        }
+        let structure = building.structure_type()?;
+        let refund = self.building_cost(structure) / 2;
+        {
+            let building = &mut self.buildings[index];
+            building.start_selling();
+            building.health = Fixed16_16::ZERO;
+        }
+        if let Some(house) = self.houses.get_mut(owner as usize) {
+            house.add_credits(refund);
+            house.remove_building(index as u32);
+        }
+        Some(refund)
     }
 
     /// Queue a structure at the Construction Yard.
@@ -1082,6 +1139,7 @@ impl Game {
         let center_x = self.patrol_center.x.to_f32();
         let center_y = self.patrol_center.y.to_f32();
         let radius = self.patrol_radius.to_f32();
+        let player_owner = self.player_owner;
 
         for (index, unit) in self.units.iter_mut().enumerate() {
             // Player move orders take priority; ordered units never go back
@@ -1102,9 +1160,9 @@ impl Game {
                 }
                 continue;
             }
-            // Harvesters run their own mission; only idle GDI combat units
+            // Harvesters run their own mission; only idle player combat units
             // drift on the patrol ring. Enemy units hold their spawn positions.
-            if unit.is_harvester || unit.is_aircraft || unit.owner != 0 {
+            if unit.is_harvester || unit.is_aircraft || unit.owner != player_owner {
                 continue;
             }
             let phase = t * 0.6 + index as f32 * 0.55;
@@ -1115,11 +1173,123 @@ impl Game {
         }
 
         self.update_projectiles(delta_time);
+        self.update_mission(delta_time);
 
         // MAP.CPP grows/spreads tiberium over time rather than every tick.
         self.tiberium_tick = self.tiberium_tick.wrapping_add(1);
         if self.tiberium_tick % 30 == 0 {
             self.map.grid.tiberium_cycle();
+        }
+    }
+
+    /// Attach a campaign mission and apply its scenario settings.
+    pub fn start_mission(&mut self, mission: Mission) {
+        self.player_owner = mission.player;
+        if let Some(credits) = mission.starting_credits {
+            if let Some(house) = self.houses.get_mut(mission.player as usize) {
+                house.credits = credits;
+            }
+        }
+        if let Some(tech) = mission.tech_level {
+            for house in &mut self.houses {
+                house.tech_level = tech;
+            }
+        }
+        self.mission = mission;
+    }
+
+    /// Load a mission INI file and start it.
+    pub fn load_mission(&mut self, path: &std::path::Path) -> anyhow::Result<()> {
+        let mission = Mission::from_file(path)?;
+        self.start_mission(mission);
+        Ok(())
+    }
+
+    /// Evaluate campaign triggers and execute their actions.
+    ///
+    /// Conditions are level-triggered and checked every simulation tick; the
+    /// trigger list is snapshotted before any action runs so a trigger cannot
+    /// observe a half-applied action list. Actions that end the mission stop
+    /// the remaining due triggers for this tick.
+    pub fn update_mission(&mut self, _delta_time: Fixed16_16) {
+        if self.mission.is_over() {
+            return;
+        }
+        let due = self.mission.due(self);
+        for id in due {
+            let actions = self.mission.fire(id);
+            for action in actions {
+                self.apply_mission_action(&action);
+                if self.mission.is_over() {
+                    return;
+                }
+            }
+        }
+    }
+
+    fn apply_mission_action(&mut self, action: &Action) {
+        match action {
+            Action::Win => self.mission.finish(MissionOutcome::Victory),
+            Action::Lose => self.mission.finish(MissionOutcome::Defeat),
+            Action::Credits { owner, amount } => {
+                if let Some(house) = self.houses.get_mut(*owner as usize) {
+                    house.add_credits(*amount);
+                }
+            }
+            Action::SpawnUnits {
+                owner,
+                unit_type,
+                count,
+                cell,
+            } => {
+                for index in 0..*count {
+                    // Spread reinforcements over a small block so they do not
+                    // all occupy exactly the same cell.
+                    let x = cell.x + (index % 3) as i32;
+                    let y = cell.y + (index / 3) as i32;
+                    let unit = Unit::new(*unit_type, Self::cell_center(x, y), *owner);
+                    let entity_id = self.units.len() as u32;
+                    if let Some(house) = self.houses.get_mut(*owner as usize) {
+                        house.add_unit(entity_id);
+                    }
+                    self.units.push(unit);
+                }
+            }
+            Action::SpawnStructure {
+                owner,
+                structure,
+                cell,
+            } => {
+                let mut building = Building::from_type(
+                    *structure,
+                    Self::cell_center(cell.x, cell.y),
+                    *owner,
+                );
+                building.set_powered(true);
+                let entity_id = self.buildings.len() as u32;
+                if let Some(house) = self.houses.get_mut(*owner as usize) {
+                    house.add_building(entity_id);
+                }
+                self.buildings.push(building);
+                self.refresh_house_power();
+            }
+            Action::Message(text) => self.mission.messages.push(text.clone()),
+            Action::SetFlag(name) => {
+                self.mission.flags.insert(name.clone());
+            }
+            Action::EnableTrigger(id) => self.mission.enable(*id),
+            Action::DisableTrigger(id) => self.mission.disable(*id),
+            Action::CompleteObjective(id) => self.mission.complete_objective(*id),
+            Action::RunScript(name) => {
+                if let Some(script) = self.mission.script(name).cloned() {
+                    for action in &script.actions {
+                        self.apply_mission_action(action);
+                        if self.mission.is_over() {
+                            return;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1687,7 +1857,7 @@ impl Game {
         const PICK_RADIUS: f32 = 22.0;
         let mut best: Option<(usize, f32)> = None;
         for (index, unit) in self.units.iter().enumerate() {
-            if unit.owner != 0 || !unit.is_alive() {
+            if unit.owner != self.player_owner || !unit.is_alive() {
                 continue;
             }
             let dx = unit.position.x.to_f32() - world.x.to_f32();
@@ -1728,7 +1898,7 @@ impl Game {
 
         let mut count = 0;
         for unit in &mut self.units {
-            if unit.owner != 0 || !unit.is_alive() {
+            if unit.owner != self.player_owner || !unit.is_alive() {
                 continue;
             }
             let x = unit.position.x.to_f32();
@@ -1752,6 +1922,11 @@ impl Game {
             .filter(|(_, unit)| unit.is_selected && unit.is_alive())
             .map(|(index, _)| index)
             .collect();
+        self.order_move_indices(&selected, world)
+    }
+
+    /// Move exactly the listed unit indices (network command application).
+    fn order_move_indices(&mut self, selected: &[usize], world: Vec2) -> usize {
         let count = selected.len();
         if count == 0 {
             return 0;
@@ -1765,7 +1940,7 @@ impl Game {
             .iter()
             .map(|cell| (cell.x, cell.y))
             .collect();
-        for &index in &selected {
+        for &index in selected {
             let (cell_x, cell_y) = self.nearby_cell(target_x, target_y, &used);
             used.push((cell_x, cell_y));
             let goal = Vec2i::new(cell_x, cell_y);
@@ -1780,6 +1955,26 @@ impl Game {
             unit.attack_target = None;
         }
         count
+    }
+
+    /// Unit indices owned by `owner` among the given stable ids.
+    fn owned_unit_indices(&self, owner: u8, unit_ids: &[u32]) -> Vec<usize> {
+        unit_ids
+            .iter()
+            .filter_map(|id| {
+                let index = *id as usize;
+                self.units
+                    .get(index)
+                    .filter(|unit| unit.owner == owner && unit.is_alive())
+                    .map(|_| index)
+            })
+            .collect()
+    }
+
+    /// Move a specific player's units by stable id (lockstep network use).
+    pub fn order_units_move(&mut self, owner: u8, unit_ids: &[u32], world: Vec2) -> usize {
+        let indices = self.owned_unit_indices(owner, unit_ids);
+        self.order_move_indices(&indices, world)
     }
 
     fn world_cell(position: Vec2) -> Vec2i {
@@ -1880,12 +2075,12 @@ impl Game {
         (cell_x.clamp(0, width - 1), cell_y.clamp(0, height - 1))
     }
 
-    /// Find the nearest enemy (non-GDI) unit under a world position.
+    /// Find the nearest enemy unit (relative to the player's house).
     pub fn enemy_at(&self, world: Vec2) -> Option<usize> {
         const PICK_RADIUS: f32 = 22.0;
         let mut best: Option<(usize, f32)> = None;
         for (index, unit) in self.units.iter().enumerate() {
-            if unit.owner == 0 || !unit.is_alive() {
+            if unit.owner == self.player_owner || !unit.is_alive() {
                 continue;
             }
             let dx = unit.position.x.to_f32() - world.x.to_f32();
@@ -1902,23 +2097,77 @@ impl Game {
 
     /// Order every selected unit to attack the given enemy unit index.
     pub fn order_attack(&mut self, target_index: usize) -> usize {
+        let selected: Vec<usize> = self
+            .units
+            .iter()
+            .enumerate()
+            .filter(|(_, unit)| unit.is_selected && unit.owner == self.player_owner && unit.is_alive())
+            .map(|(index, _)| index)
+            .collect();
+        self.order_attack_indices(self.player_owner, &selected, target_index)
+    }
+
+    /// Order the listed unit indices (owned by `owner`) onto an enemy index.
+    fn order_attack_indices(
+        &mut self,
+        owner: u8,
+        selected: &[usize],
+        target_index: usize,
+    ) -> usize {
         let valid_target = self
             .units
             .get(target_index)
-            .map_or(false, |target| target.owner != 0 && target.is_alive());
+            .map_or(false, |target| target.owner != owner && target.is_alive());
         if !valid_target {
             return 0;
         }
 
         let mut ordered = 0;
-        for unit in &mut self.units {
-            if unit.is_selected && unit.owner == 0 && unit.is_alive() && unit.weapon.is_some() {
+        for &index in selected {
+            let Some(unit) = self.units.get_mut(index) else {
+                continue;
+            };
+            if unit.owner == owner && unit.is_alive() && unit.weapon.is_some() {
                 unit.attack_target = Some(target_index);
                 unit.ordered = true;
                 ordered += 1;
             }
         }
         ordered
+    }
+
+    /// Attack for a specific player's units by stable id (lockstep network use).
+    pub fn order_units_attack(
+        &mut self,
+        owner: u8,
+        unit_ids: &[u32],
+        target_index: usize,
+    ) -> usize {
+        let indices = self.owned_unit_indices(owner, unit_ids);
+        self.order_attack_indices(owner, &indices, target_index)
+    }
+
+    /// Clear move/attack orders for one player's listed units.
+    pub fn order_units_stop(&mut self, owner: u8, unit_ids: &[u32]) -> usize {
+        let indices = self.owned_unit_indices(owner, unit_ids);
+        let mut stopped = 0;
+        for index in indices {
+            let unit = &mut self.units[index];
+            if unit.target.is_some()
+                || unit.attack_target.is_some()
+                || !unit.path.is_empty()
+                || unit.ordered
+            {
+                stopped += 1;
+            }
+            unit.target = None;
+            unit.attack_target = None;
+            unit.path.clear();
+            unit.path_index = 0;
+            unit.reserved_cell = None;
+            unit.ordered = false;
+        }
+        stopped
     }
 
     /// Select every living unit owned by the given player (0 = GDI).
@@ -1982,6 +2231,10 @@ impl Game {
                 .get(1)
                 .map_or(0, |house| (house.nuke_charge.to_f32() * 100.0) as i32),
             ready_buildings: self.ready_buildings.len(),
+            objectives_total: self.mission.objectives.len(),
+            objectives_done: self.mission.objectives_done(),
+            mission_over: self.mission.is_over(),
+            mission_victory: self.mission.outcome == Some(MissionOutcome::Victory),
         }
     }
 }
@@ -3667,5 +3920,155 @@ mod prerequisite_tests {
             Some(UnitType::MammothTank)
         );
         assert!(game.ai_queue_production(0, &ai, 0).is_some());
+    }
+
+    #[test]
+    fn cancelling_td_production_refunds_the_front_item() {
+        let mut game = Game::new("cancel", 64, 64);
+        game.setup_demo();
+        let before = game.houses[0].credits;
+        assert!(game.queue_unit(0, UnitType::InfantryE1));
+        assert!(game.houses[0].credits < before);
+        let refund = game.cancel_production(0).expect("front item");
+        assert!(refund > 0);
+        assert_eq!(game.houses[0].credits, before);
+        assert!(game.houses[0].production_queue.is_empty());
+        assert_eq!(game.cancel_production(0), None);
+    }
+
+    #[test]
+    fn repairing_a_building_costs_and_heals() {
+        let mut game = Game::new("repair", 64, 64);
+        game.setup_demo();
+        let index = game
+            .buildings
+            .iter()
+            .position(|building| building.owner == 0 && building.is_alive())
+            .unwrap();
+        game.buildings[index].health = game.buildings[index].max_health / Fixed16_16::from_int(2);
+        let credits = game.houses[0].credits;
+        let cost = game.repair_building(0, index).expect("repair should succeed");
+        assert!(cost > 0);
+        assert_eq!(game.houses[0].credits, credits - cost);
+        assert_eq!(game.buildings[index].health, game.buildings[index].max_health);
+        assert_eq!(game.repair_building(0, index), None, "already full");
+        game.buildings[index].health = game.buildings[index].max_health / Fixed16_16::from_int(4);
+        assert_eq!(game.repair_building(1, index), None, "wrong owner");
+    }
+
+    #[test]
+    fn selling_a_building_refunds_half() {
+        let mut game = Game::new("sell", 64, 64);
+        game.setup_demo();
+        let index = game
+            .buildings
+            .iter()
+            .position(|building| building.owner == 0 && building.is_alive())
+            .unwrap();
+        let structure = game.buildings[index].structure_type().unwrap();
+        let cost = game.building_cost(structure);
+        let credits = game.houses[0].credits;
+        let refund = game.sell_building(0, index).unwrap();
+        assert_eq!(refund, cost / 2);
+        assert_eq!(game.houses[0].credits, credits + refund);
+        assert!(!game.buildings[index].is_alive());
+        assert!(game.buildings[index].is_selling);
+        assert_eq!(game.sell_building(0, index), None, "already sold");
+        let enemy = game
+            .buildings
+            .iter()
+            .position(|building| building.owner == 1 && building.is_alive())
+            .unwrap();
+        assert_eq!(game.sell_building(0, enemy), None, "wrong owner");
+    }
+
+    #[test]
+    fn nod_mission_controls_the_nod_house() {
+        let maps = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../maps/td_campaign");
+        let mut game = Game::new("nod-test", 64, 64);
+        game.setup_demo();
+        game.load_mission(&maps.join("02.ini")).unwrap();
+        assert_eq!(game.player_owner, 1);
+
+        let position = game
+            .units
+            .iter()
+            .find(|unit| unit.owner == 1 && unit.is_alive())
+            .map(|unit| unit.position)
+            .expect("Nod units missing");
+        assert!(
+            game.select_at_additive(position, false).is_some(),
+            "clicking a Nod unit selects it"
+        );
+        assert!(game.select_all_owned(1) > 0);
+
+        let gdi_position = game
+            .units
+            .iter()
+            .find(|unit| unit.owner == 0 && unit.is_alive())
+            .map(|unit| unit.position)
+            .expect("GDI units missing");
+        assert!(game.enemy_at(gdi_position).is_some());
+
+        let path = std::env::temp_dir().join(format!("nod-player-{}.sav", std::process::id()));
+        game.save_to_file(&path).unwrap();
+        let loaded = Game::load_from_file(&path).unwrap();
+        assert_eq!(loaded.player_owner, 1, "the save keeps the mission side");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn owner_targeted_orders_only_touch_listed_units() {
+        let mut game = Game::new("net", 32, 32);
+        game.setup_demo();
+        let (gdi_id, gdi_start) = game
+            .units
+            .iter()
+            .enumerate()
+            .find(|(_, unit)| unit.owner == 0 && unit.is_alive())
+            .map(|(index, unit)| (index as u32, unit.position))
+            .unwrap();
+        let (nod_id, nod_start) = game
+            .units
+            .iter()
+            .enumerate()
+            .find(|(_, unit)| unit.owner == 1 && unit.is_alive())
+            .map(|(index, unit)| (index as u32, unit.position))
+            .unwrap();
+        let target = Vec2::new(
+            Fixed16_16::from_f32(gdi_start.x.to_f32() + 6.0 * TILE_SIZE),
+            Fixed16_16::from_f32(gdi_start.y.to_f32() + 2.0 * TILE_SIZE),
+        );
+        assert_eq!(game.order_units_move(0, &[gdi_id], target), 1);
+        assert!(game.units[gdi_id as usize].target.is_some());
+        assert!(game.units[nod_id as usize].target.is_none(), "other owner untouched");
+
+        // A mismatched owner id is ignored.
+        assert_eq!(game.order_units_move(1, &[gdi_id], target), 0);
+
+        // Stop clears the order but not the unit.
+        assert_eq!(game.order_units_stop(0, &[gdi_id]), 1);
+        assert!(game.units[gdi_id as usize].target.is_none());
+        assert!(game.units[gdi_id as usize].path.is_empty());
+
+        // Attack only accepts an enemy of the commanding owner.
+        assert_eq!(game.order_units_attack(0, &[gdi_id], nod_id as usize), 1);
+        assert_eq!(
+            game.units[gdi_id as usize].attack_target,
+            Some(nod_id as usize)
+        );
+        assert_eq!(
+            game.order_units_attack(1, &[nod_id], nod_id as usize),
+            0,
+            "cannot attack yourself"
+        );
+
+        // A GDI id cannot be commanded by the Nod player.
+        assert_eq!(game.order_units_attack(1, &[gdi_id], nod_id as usize), 0);
+
+        // Dead units in the list are skipped.
+        let _ = nod_start;
+        game.units[gdi_id as usize].health = Fixed16_16::ZERO;
+        assert_eq!(game.order_units_stop(0, &[gdi_id]), 0);
     }
 }

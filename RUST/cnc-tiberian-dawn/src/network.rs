@@ -1,7 +1,7 @@
 //! Network/Command queue for Tiberian Dawn
 
 use cnc_core::{ClassId, Vec2};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::Path;
 use tokio::net::UdpSocket;
@@ -21,6 +21,12 @@ pub enum Command {
     Deploy { unit: u32 },
     Undeploy { unit: u32 },
     Sabotage { unit: u32, target: u32 },
+    /// Repair one owned building to full health (RA structure repair).
+    RepairStructure { building: u32 },
+    /// Cancel the front production item, refunding its cost.
+    CancelProduction,
+    /// Place the owner's front completed structure at a world location (TD).
+    PlaceBuilding { location: Vec2 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +79,9 @@ impl Command {
             Command::Deploy { .. } => 10,
             Command::Undeploy { .. } => 11,
             Command::Sabotage { .. } => 12,
+            Command::RepairStructure { .. } => 13,
+            Command::CancelProduction => 14,
+            Command::PlaceBuilding { .. } => 15,
         }
     }
 
@@ -117,6 +126,9 @@ impl Command {
                 mix(&mut hash, u64::from(*unit));
                 mix(&mut hash, u64::from(*target));
             }
+            Command::RepairStructure { building } => mix(&mut hash, u64::from(*building)),
+            Command::CancelProduction => {}
+            Command::PlaceBuilding { location } => mix_vec2(&mut hash, location),
         }
         hash
     }
@@ -535,6 +547,9 @@ impl Command {
                 push_u32(out, *unit);
                 push_u32(out, *target);
             }
+            Command::RepairStructure { building } => push_u32(out, *building),
+            Command::CancelProduction => {}
+            Command::PlaceBuilding { location } => push_vec2(out, location),
         }
         Ok(())
     }
@@ -590,6 +605,13 @@ impl Command {
             12 => Command::Sabotage {
                 unit: reader.u32()?,
                 target: reader.u32()?,
+            },
+            13 => Command::RepairStructure {
+                building: reader.u32()?,
+            },
+            14 => Command::CancelProduction,
+            15 => Command::PlaceBuilding {
+                location: reader.vec2()?,
             },
             other => return Err(PacketError::InvalidTag(other)),
         };
@@ -1355,6 +1377,473 @@ impl PeerHandshake {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Host migration and mesh relay
+// ---------------------------------------------------------------------------
+
+/// Magic for host-migration control datagrams ("CNCX").
+pub const MIGRATION_MAGIC: [u8; 4] = *b"CNCX";
+/// Host-migration protocol version.
+pub const MIGRATION_VERSION: u8 = 1;
+/// magic(4) + version(1) + kind(1) + generation(4) + player(1).
+const MIGRATION_LEN: usize = 11;
+
+/// Errors produced while encoding or decoding migration datagrams.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MigrationError {
+    #[error("migration datagram is too short (need {MIGRATION_LEN} bytes)")]
+    TooShort,
+    #[error("invalid migration magic (expected CNCX)")]
+    InvalidMagic,
+    #[error("unsupported migration version {0}")]
+    UnsupportedVersion(u8),
+    #[error("invalid migration kind {0}")]
+    InvalidKind(u8),
+}
+
+/// Control frames used to move the room host when the old host drops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MigrateMessage {
+    /// A peer reports that the host stopped responding. `generation` is the
+    /// election epoch and `reporter` proves the sender is still alive.
+    HostLost { generation: u32, reporter: u8 },
+    /// The deterministically elected peer announces itself as the new host.
+    HostClaim { generation: u32, host: u8 },
+}
+
+impl MigrateMessage {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(MIGRATION_LEN);
+        out.extend_from_slice(&MIGRATION_MAGIC);
+        out.push(MIGRATION_VERSION);
+        match *self {
+            Self::HostLost { generation, reporter } => {
+                out.push(1);
+                out.extend_from_slice(&generation.to_le_bytes());
+                out.push(reporter);
+            }
+            Self::HostClaim { generation, host } => {
+                out.push(2);
+                out.extend_from_slice(&generation.to_le_bytes());
+                out.push(host);
+            }
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, MigrationError> {
+        if bytes.len() < MIGRATION_LEN {
+            return Err(MigrationError::TooShort);
+        }
+        if bytes[..4] != MIGRATION_MAGIC {
+            return Err(MigrationError::InvalidMagic);
+        }
+        if bytes[4] != MIGRATION_VERSION {
+            return Err(MigrationError::UnsupportedVersion(bytes[4]));
+        }
+        let generation = u32::from_le_bytes(bytes[6..10].try_into().unwrap());
+        let player = bytes[10];
+        match bytes[5] {
+            1 => Ok(Self::HostLost {
+                generation,
+                reporter: player,
+            }),
+            2 => Ok(Self::HostClaim {
+                generation,
+                host: player,
+            }),
+            other => Err(MigrationError::InvalidKind(other)),
+        }
+    }
+}
+
+/// Where a peer stands during a host migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MigrationState {
+    /// The original host is alive.
+    Stable,
+    /// The host dropped; peers are agreeing on a successor.
+    AwaitingClaim,
+    /// A new host has been accepted (or this peer is the new host).
+    Migrated,
+}
+
+/// Deterministic host-election state machine.
+///
+/// Every peer keeps the same alive set and elects the **lowest player index**
+/// still alive, so no tie-break traffic is needed. A host loss bumps the
+/// generation exactly once per peer; claims from a later generation are
+/// rejected until the matching `HostLost` is observed. That prevents a
+/// split-brain where a peer that missed the loss message would crown itself.
+#[derive(Debug, Clone)]
+pub struct HostMigration {
+    pub local_player: u8,
+    pub players: u8,
+    pub generation: u32,
+    pub host: u8,
+    pub alive: BTreeSet<u8>,
+    pub state: MigrationState,
+}
+
+impl HostMigration {
+    pub fn new(local_player: u8, players: u8, host: u8) -> Result<Self, MigrationError> {
+        if players == 0 || local_player >= players || host >= players {
+            return Err(MigrationError::InvalidKind(0));
+        }
+        let alive = (0..players).collect();
+        Ok(Self {
+            local_player,
+            players,
+            generation: 0,
+            host,
+            alive,
+            state: MigrationState::Stable,
+        })
+    }
+
+    /// Lowest living player index; deterministic on every peer.
+    pub fn elected(&self) -> Option<u8> {
+        self.alive.iter().next().copied()
+    }
+
+    pub fn is_host(&self) -> bool {
+        self.local_player == self.host
+    }
+
+    /// Report that `player` stopped responding.
+    ///
+    /// Returns a `HostLost` frame only when the lost player was the host and
+    /// the loss opens a new election generation.
+    pub fn observe_loss(&mut self, player: u8) -> Option<MigrateMessage> {
+        if player >= self.players || !self.alive.remove(&player) {
+            return None;
+        }
+        if player != self.host {
+            // A non-host peer leaving does not affect the host.
+            return None;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        self.state = MigrationState::AwaitingClaim;
+        Some(MigrateMessage::HostLost {
+            generation: self.generation,
+            reporter: self.local_player,
+        })
+    }
+
+    /// If this peer won the election, announce a claim and become the host.
+    pub fn claim(&mut self) -> Option<MigrateMessage> {
+        if self.state != MigrationState::AwaitingClaim {
+            return None;
+        }
+        let elected = self.elected()?;
+        if elected != self.local_player {
+            return None;
+        }
+        self.host = elected;
+        self.state = MigrationState::Migrated;
+        Some(MigrateMessage::HostClaim {
+            generation: self.generation,
+            host: elected,
+        })
+    }
+
+    /// Apply a control frame from another peer; returns whether it was accepted.
+    pub fn handle(&mut self, message: MigrateMessage) -> bool {
+        match message {
+            MigrateMessage::HostLost {
+                generation,
+                reporter,
+            } => {
+                if reporter >= self.players || reporter == self.local_player {
+                    return false;
+                }
+                if !self.alive.contains(&reporter) {
+                    return false;
+                }
+                if generation == self.generation + 1 {
+                    // First report we see for this loss: retire the old host.
+                    if self.state == MigrationState::Stable {
+                        self.alive.remove(&self.host);
+                        self.generation = generation;
+                        self.state = MigrationState::AwaitingClaim;
+                    }
+                    true
+                } else {
+                    // Duplicate reports are harmless; future generations mean
+                    // this peer missed a loss and must resynchronise first.
+                    generation <= self.generation
+                }
+            }
+            MigrateMessage::HostClaim { generation, host } => {
+                if host >= self.players || generation != self.generation {
+                    return false;
+                }
+                if !self.alive.contains(&host) || self.elected() != Some(host) {
+                    return false;
+                }
+                self.host = host;
+                self.state = MigrationState::Migrated;
+                true
+            }
+        }
+    }
+}
+
+/// Bounded duplicate cache used when relaying mesh traffic.
+///
+/// Peers forward lockstep packets they receive in a full mesh, so the same
+/// datagram can arrive from several neighbours. The relay forwards the first
+/// copy and drops repeats, keeping the forwarding loop bounded.
+#[derive(Debug)]
+pub struct MeshRelay {
+    seen: BTreeSet<u64>,
+    order: VecDeque<u64>,
+    capacity: usize,
+}
+
+impl MeshRelay {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            seen: BTreeSet::new(),
+            order: VecDeque::new(),
+            capacity: capacity.max(1),
+        }
+    }
+
+    /// Record a datagram; true means "first copy, forward it".
+    pub fn accept(&mut self, bytes: &[u8]) -> bool {
+        let hash = fnv_bytes(bytes);
+        if !self.seen.insert(hash) {
+            return false;
+        }
+        self.order.push_back(hash);
+        while self.order.len() > self.capacity {
+            if let Some(expired) = self.order.pop_front() {
+                self.seen.remove(&expired);
+            }
+        }
+        true
+    }
+
+    pub fn len(&self) -> usize {
+        self.seen.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty()
+    }
+
+    /// Forget every remembered datagram (a reconnecting peer restarts its
+    /// sequence numbers, so old entries would suppress its first packets).
+    pub fn clear(&mut self) {
+        self.seen.clear();
+        self.order.clear();
+    }
+}
+
+impl UdpTransport {
+    /// Forward a datagram to every peer except `source`.
+    ///
+    /// Returns the number of copies sent; repeated datagrams are dropped by the
+    /// shared [`MeshRelay`] cache and report 0.
+    pub async fn relay_from(
+        &self,
+        source: SocketAddr,
+        bytes: &[u8],
+        relay: &mut MeshRelay,
+    ) -> std::io::Result<usize> {
+        if !relay.accept(bytes) {
+            return Ok(0);
+        }
+        let mut sent = 0;
+        for peer in &self.peers {
+            if *peer != source && self.socket.send_to(bytes, peer).await.is_ok() {
+                sent += 1;
+            }
+        }
+        Ok(sent)
+    }
+}
+
+/// Combined lockstep + relay + host-migration state for a live session.
+///
+/// The launcher (or a headless harness) feeds received datagrams into
+/// LiveSession::handle_datagram, calls LiveSession::maybe_claim after a host
+/// loss, and broadcasts LiveSession::advance packets to
+/// LiveSession::forward_targets. Relay duplicates are dropped and host address
+/// lookups follow the elected host after a migration.
+#[derive(Debug)]
+pub struct LiveSession {
+    pub local_player: u8,
+    pub players: u8,
+    pub local_address: Option<SocketAddr>,
+    pub host_address: Option<SocketAddr>,
+    pub peers: BTreeMap<u8, SocketAddr>,
+    pub migration: HostMigration,
+    pub relay: MeshRelay,
+    pub queue: CommandQueue,
+    pub frame: u32,
+    next_sequence: u32,
+}
+
+/// Result of feeding one datagram into a live session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveEvent {
+    Migration(MigrateMessage),
+    Commands(NetPacket),
+    Duplicate,
+    Invalid,
+}
+
+impl LiveSession {
+    pub fn new(local_player: u8, players: u8, local_address: Option<SocketAddr>) -> Result<Self, MigrationError> {
+        let migration = HostMigration::new(local_player, players, 0)?;
+        Ok(Self {
+            local_player,
+            players,
+            local_address,
+            host_address: if local_player == 0 { local_address } else { None },
+            peers: BTreeMap::new(),
+            migration,
+            relay: MeshRelay::new(256),
+            queue: CommandQueue::new(),
+            frame: 0,
+            next_sequence: 0,
+        })
+    }
+
+    pub fn register_peer(&mut self, player: u8, address: SocketAddr) {
+        self.peers.insert(player, address);
+        if self.migration.host == player {
+            self.host_address = Some(address);
+        }
+    }
+
+    /// Recompute the current host address from the migration state.
+    pub fn refresh_host_address(&mut self) {
+        self.host_address = if self.migration.host == self.local_player {
+            self.local_address
+        } else {
+            self.peers.get(&self.migration.host).copied()
+        };
+    }
+
+    /// Report that a player stopped responding; clears the remembered host
+    /// address when the host itself is the one being dropped.
+    pub fn report_loss(&mut self, player: u8) -> Option<MigrateMessage> {
+        let message = self.migration.observe_loss(player)?;
+        self.host_address = None;
+        Some(message)
+    }
+
+    /// Claim the host role if this peer won the election after a loss.
+    pub fn maybe_claim(&mut self) -> Option<(MigrateMessage, Vec<SocketAddr>)> {
+        let claim = self.migration.claim()?;
+        self.refresh_host_address();
+        Some((claim, self.peers.values().copied().collect()))
+    }
+
+    /// Queue a locally issued command for the current frame.
+    pub fn queue_local(&mut self, command: Command) -> NetCommand {
+        let command = NetCommand::new(self.frame, self.local_player, command);
+        self.queue.push(command.clone());
+        command
+    }
+
+    /// Feed one datagram received from a peer.
+    pub fn handle_datagram(&mut self, source: SocketAddr, bytes: &[u8]) -> LiveEvent {
+        if let Ok(message) = MigrateMessage::decode(bytes) {
+            if self.migration.handle(message) {
+                self.refresh_host_address();
+                return LiveEvent::Migration(message);
+            }
+            return LiveEvent::Invalid;
+        }
+        let Ok(packet) = NetPacket::decode(bytes) else {
+            return LiveEvent::Invalid;
+        };
+        if !packet.verify() {
+            return LiveEvent::Invalid;
+        }
+        if !self.relay.accept(bytes) {
+            return LiveEvent::Duplicate;
+        }
+        for command in &packet.commands {
+            self.queue.push(command.clone());
+        }
+        let _ = source;
+        LiveEvent::Commands(packet)
+    }
+
+    /// Peers that should receive a forwarded copy of a datagram from source.
+    pub fn forward_targets(&self, source: SocketAddr) -> Vec<SocketAddr> {
+        self.peers
+            .values()
+            .copied()
+            .filter(|peer| *peer != source)
+            .collect()
+    }
+
+    /// Drain this frame's commands, build the packet and advance the frame.
+    pub fn advance(&mut self) -> Result<(Vec<NetCommand>, Vec<u8>, Vec<SocketAddr>), PacketError> {
+        let commands = self.queue.pop_frame(self.frame);
+        let packet = NetPacket::new(self.next_sequence, self.frame, commands.clone());
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.frame = self.frame.wrapping_add(1);
+        let bytes = packet.encode()?;
+        Ok((commands, bytes, self.peers.values().copied().collect()))
+    }
+}
+
+/// Bind/advertise settings used by a network setup screen or CLI.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetworkConfig {
+    pub bind_address: String,
+    pub port: u16,
+    pub advertised: Option<String>,
+    pub max_players: u8,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            bind_address: "0.0.0.0".to_string(),
+            port: 0,
+            advertised: None,
+            max_players: 4,
+        }
+    }
+}
+
+impl NetworkConfig {
+    pub fn listen_address(&self) -> String {
+        format!("{}:{}", self.bind_address, self.port)
+    }
+
+    /// Validate the settings before binding. Port 0 means "ephemeral", which is
+    /// useful behind NAT or for tests.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.bind_address.trim().is_empty() {
+            return Err("bind address must not be empty".to_string());
+        }
+        if self.bind_address.trim().parse::<std::net::IpAddr>().is_err() {
+            return Err("bind address must be an IP address".to_string());
+        }
+        if !(2..=8).contains(&self.max_players) {
+            return Err("player count must be between 2 and 8".to_string());
+        }
+        if let Some(advertised) = &self.advertised {
+            if advertised.trim().is_empty() {
+                return Err("advertised address must not be empty".to_string());
+            }
+            if advertised.parse::<SocketAddr>().is_err() {
+                return Err("advertised address must be host:port".to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1398,6 +1887,9 @@ mod tests {
 
         assert_eq!(Command::Deploy { unit: 3 }.tag(), 10);
         assert_eq!(Command::Sabotage { unit: 1, target: 2 }.tag(), 12);
+        assert_eq!(Command::RepairStructure { building: 4 }.tag(), 13);
+        assert_eq!(Command::CancelProduction.tag(), 14);
+        assert_eq!(Command::PlaceBuilding { location: point(4, 6) }.tag(), 15);
     }
 
     #[test]
@@ -1641,6 +2133,9 @@ mod netcode_tests {
                     target: 14,
                 },
             ),
+            NetCommand::new(7, 0, Command::RepairStructure { building: 15 }),
+            NetCommand::new(7, 1, Command::CancelProduction),
+            NetCommand::new(8, 0, Command::PlaceBuilding { location: point(20, 24) }),
         ]
     }
 
@@ -1650,7 +2145,7 @@ mod netcode_tests {
         let bytes = packet.encode().unwrap();
         let decoded = NetPacket::decode(&bytes).unwrap();
         assert_eq!(decoded, packet);
-        assert_eq!(decoded.commands.len(), 12);
+        assert_eq!(decoded.commands.len(), 15);
     }
 
     #[test]
@@ -2117,5 +2612,185 @@ mod netcode_tests {
             })
         );
         assert!(host.peer(1).is_none());
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    #[test]
+    fn migration_message_roundtrips() {
+        for message in [
+            MigrateMessage::HostLost {
+                generation: 3,
+                reporter: 2,
+            },
+            MigrateMessage::HostClaim {
+                generation: 3,
+                host: 1,
+            },
+        ] {
+            let bytes = message.encode();
+            assert_eq!(MigrateMessage::decode(&bytes).unwrap(), message);
+        }
+        assert_eq!(
+            MigrateMessage::decode(&[0u8; 4]).unwrap_err(),
+            MigrationError::TooShort
+        );
+        let mut bad = MigrateMessage::HostLost {
+            generation: 0,
+            reporter: 1,
+        }
+        .encode();
+        bad[0] = b'X';
+        assert_eq!(
+            MigrateMessage::decode(&bad).unwrap_err(),
+            MigrationError::InvalidMagic
+        );
+    }
+
+    #[test]
+    fn host_loss_elects_lowest_alive_and_claim_is_accepted() {
+        let mut peer_one = HostMigration::new(1, 3, 0).unwrap();
+        let mut peer_two = HostMigration::new(2, 3, 0).unwrap();
+
+        let loss_one = peer_one.observe_loss(0).unwrap();
+        let loss_two = peer_two.observe_loss(0).unwrap();
+        assert_eq!(
+            loss_one,
+            MigrateMessage::HostLost {
+                generation: 1,
+                reporter: 1
+            }
+        );
+        assert_eq!(loss_two, MigrateMessage::HostLost {
+            generation: 1,
+            reporter: 2
+        });
+
+        // Only the lowest living player wins the election.
+        assert_eq!(peer_one.claim(), Some(MigrateMessage::HostClaim {
+            generation: 1,
+            host: 1
+        }));
+        assert_eq!(peer_two.claim(), None);
+        assert!(peer_one.is_host());
+        assert_eq!(peer_one.state, MigrationState::Migrated);
+
+        let claim = MigrateMessage::HostClaim {
+            generation: 1,
+            host: 1,
+        };
+        assert!(peer_two.handle(claim));
+        assert_eq!(peer_two.host, 1);
+        assert_eq!(peer_two.state, MigrationState::Migrated);
+    }
+
+    #[test]
+    fn peer_that_missed_the_loss_resynchronises_before_claiming() {
+        let mut peer_two = HostMigration::new(2, 3, 0).unwrap();
+        let loss = MigrateMessage::HostLost {
+            generation: 1,
+            reporter: 1,
+        };
+        assert!(peer_two.handle(loss));
+        assert_eq!(peer_two.generation, 1);
+        assert_eq!(peer_two.state, MigrationState::AwaitingClaim);
+        assert!(peer_two.alive.contains(&1));
+        assert!(!peer_two.alive.contains(&0));
+        assert_eq!(peer_two.elected(), Some(1));
+    }
+
+    #[test]
+    fn non_host_departure_keeps_the_host_stable() {
+        let mut peer = HostMigration::new(0, 3, 0).unwrap();
+        assert_eq!(peer.observe_loss(2), None);
+        assert_eq!(peer.state, MigrationState::Stable);
+        assert_eq!(peer.host, 0);
+        assert_eq!(peer.generation, 0);
+    }
+
+    #[test]
+    fn stale_or_illegitimate_claims_are_rejected() {
+        let mut peer = HostMigration::new(2, 3, 0).unwrap();
+        peer.observe_loss(0).unwrap();
+
+        // Wrong generation.
+        assert!(!peer.handle(MigrateMessage::HostClaim {
+            generation: 0,
+            host: 1
+        }));
+        // Not the deterministic winner.
+        assert!(!peer.handle(MigrateMessage::HostClaim {
+            generation: 1,
+            host: 2
+        }));
+        // Unknown player.
+        assert!(!peer.handle(MigrateMessage::HostClaim {
+            generation: 1,
+            host: 9
+        }));
+        assert_eq!(peer.state, MigrationState::AwaitingClaim);
+    }
+
+    #[test]
+    fn relay_cache_drops_duplicates_and_evicts() {
+        let mut relay = MeshRelay::new(2);
+        assert!(relay.accept(b"first"));
+        assert!(!relay.accept(b"first"));
+        assert!(relay.accept(b"second"));
+        assert!(relay.accept(b"third"));
+        // "first" was evicted, so it may be forwarded again.
+        assert!(relay.accept(b"first"));
+        assert_eq!(relay.len(), 2);
+    }
+
+    #[test]
+    fn relay_clear_accepts_replayed_packets() {
+        let mut relay = MeshRelay::new(2);
+        assert!(relay.accept(b"before-reconnect"));
+        assert!(!relay.accept(b"before-reconnect"));
+        relay.clear();
+        assert!(relay.is_empty());
+        assert!(relay.accept(b"before-reconnect"), "cleared hashes are gone");
+    }
+
+    #[tokio::test]
+    async fn relay_forwards_to_others_but_not_the_source() {
+        let source = UdpTransport::bind("127.0.0.1:0").await.unwrap();
+        let target = UdpTransport::bind("127.0.0.1:0").await.unwrap();
+        let mut relay = UdpTransport::bind("127.0.0.1:0").await.unwrap();
+
+        let source_addr = source.local_addr().unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        relay.add_peer(source_addr);
+        relay.add_peer(target_addr);
+
+        let mut cache = MeshRelay::new(8);
+        assert_eq!(
+            relay.relay_from(source_addr, b"payload", &mut cache).await.unwrap(),
+            1
+        );
+
+        let mut buffer = [0u8; 32];
+        let (length, from) = target.socket.recv_from(&mut buffer).await.unwrap();
+        assert_eq!(&buffer[..length], b"payload");
+        assert_eq!(from, relay_addr);
+
+        // The source never receives its own datagram back.
+        let leaked = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            source.socket.recv_from(&mut buffer),
+        )
+        .await;
+        assert!(leaked.is_err(), "relay must not echo to the source");
+
+        // Second copy is dropped by the cache.
+        assert_eq!(
+            relay.relay_from(source_addr, b"payload", &mut cache).await.unwrap(),
+            0
+        );
     }
 }

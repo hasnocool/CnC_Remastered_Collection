@@ -596,7 +596,10 @@ impl SpriteBatch {
         (self.draw_calls, self.vertices_count)
     }
 
-    /// Record the batch into an existing encoder, clearing the target first.
+    /// Record the batch into an existing encoder.
+    ///
+    /// The first layer of a frame clears the target; later layers pass
+    /// `load = true` so earlier layers survive underneath.
     pub fn flush(
         &mut self,
         device: &wgpu::Device,
@@ -604,6 +607,7 @@ impl SpriteBatch {
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
         clear: wgpu::Color,
+        load: bool,
     ) {
         self.pending.sort_by_key(|instance| instance.z_order);
         let count = self.pending.len();
@@ -623,7 +627,11 @@ impl SpriteBatch {
                 view: target,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(clear),
+                    load: if load {
+                        wgpu::LoadOp::Load
+                    } else {
+                        wgpu::LoadOp::Clear(clear)
+                    },
                     store: wgpu::StoreOp::Store,
                 },
             })],

@@ -1,10 +1,11 @@
 //! House/Faction logic for Tiberian Dawn
 
 use cnc_core::{ClassId, Fixed16_16, Vec2};
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
 /// Production queue item
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProductionItem {
     pub class_id: ClassId,
     pub progress: Fixed16_16,
@@ -13,6 +14,7 @@ pub struct ProductionItem {
 }
 
 /// House/Faction (GDI or Nod)
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct House {
     pub id: ClassId,
     pub name: String,
