@@ -850,6 +850,42 @@ impl StructureType {
     ];
 }
 
+/// True when a Rules.ini `Owner=` token list admits the given side.
+///
+/// Tokens follow RULES.CPP: `GDI`/`GOOD`, `NOD`/`BAD`, and `ANY`/`ALL`.
+/// Unknown tokens never grant ownership.
+pub fn owner_token_allows(tokens: &[String], is_gdi: bool) -> bool {
+    tokens
+        .iter()
+        .any(|token| match token.trim().to_ascii_uppercase().as_str() {
+            "GDI" | "GOOD" => is_gdi,
+            "NOD" | "BAD" => !is_gdi,
+            "ANY" | "ALL" => true,
+            _ => false,
+        })
+}
+
+/// Hard-coded TD unit ownership, used when Rules.ini omits `Owner=`.
+pub const fn default_unit_owner(unit: UnitType, is_gdi: bool) -> bool {
+    match unit {
+        UnitType::InfantryE1 | UnitType::Harvester => true,
+        UnitType::MediumTank | UnitType::MammothTank | UnitType::Jeep | UnitType::Orca => is_gdi,
+        UnitType::Buggy | UnitType::Apache => !is_gdi,
+    }
+}
+
+/// Hard-coded TD structure ownership, used when Rules.ini omits `Owner=`.
+///
+/// Both sides share the base structures; only the Ion Cannon and the Temple of
+/// Nod are faction-locked in the demo roster.
+pub const fn default_structure_owner(structure: StructureType, is_gdi: bool) -> bool {
+    match structure {
+        StructureType::IonCannon => is_gdi,
+        StructureType::TempleOfNod => !is_gdi,
+        _ => true,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProductionKind {
     Infantry,

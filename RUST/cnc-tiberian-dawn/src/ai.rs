@@ -5,7 +5,10 @@
 //! hard-coded TDATA/UDATA/BDATA values as fallback. Selection is deterministic
 //! (a caller-supplied roll), so AI decisions stay lockstep-safe.
 
-use crate::td_rules::{prerequisite_token_met, unit_class_id, StructureType, UnitType};
+use crate::td_rules::{
+    default_unit_owner, owner_token_allows, prerequisite_token_met, unit_class_id, StructureType,
+    UnitType,
+};
 use cnc_core::rules::RulesDatabase;
 use cnc_core::{ClassId, Fixed16_16, Vec2};
 use std::collections::VecDeque;
@@ -256,26 +259,9 @@ const fn base_weight(unit: UnitType) -> u32 {
 
 /// Faction ownership, preferring a rules Owner= list when present.
 fn faction_allows(unit: UnitType, owner: Option<&[String]>, is_gdi: bool) -> bool {
-    let Some(tokens) = owner.filter(|tokens| !tokens.is_empty()) else {
-        return default_owner(unit, is_gdi);
-    };
-
-    tokens
-        .iter()
-        .any(|token| match token.trim().to_ascii_uppercase().as_str() {
-            "GDI" | "GOOD" => is_gdi,
-            "NOD" | "BAD" => !is_gdi,
-            "ANY" | "ALL" => true,
-            _ => false,
-        })
-}
-
-/// Hard-coded TD ownership for rules files that omit Owner=.
-const fn default_owner(unit: UnitType, is_gdi: bool) -> bool {
-    match unit {
-        UnitType::InfantryE1 | UnitType::Harvester => true,
-        UnitType::MediumTank | UnitType::MammothTank | UnitType::Jeep | UnitType::Orca => is_gdi,
-        UnitType::Buggy | UnitType::Apache => !is_gdi,
+    match owner.filter(|tokens| !tokens.is_empty()) {
+        Some(tokens) => owner_token_allows(tokens, is_gdi),
+        None => default_unit_owner(unit, is_gdi),
     }
 }
 

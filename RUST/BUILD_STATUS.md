@@ -6,7 +6,7 @@ _Last verified: cargo 1.98.1 / rustc 1.98.1 on Linux._
 
 ~~~
 cargo check --workspace --all-targets   # clean (warnings only)
-cargo test --workspace                 # 223 passed, 0 failed
+cargo test --workspace                 # 225 passed, 0 failed
 ~~~
 
 Per-target tests:
@@ -16,7 +16,7 @@ Per-target tests:
 | cnc-core (unit + INI + Rules.ini) | 57 |
 | cnc-asset (parsers + converters + Ogg) | 26 |
 | cnc-asset-cli (end-to-end integration) | 8 |
-| cnc-tiberian-dawn (game logic + rules + lockstep + netcode + sidebar/AI) | 127 |
+| cnc-tiberian-dawn (game logic + rules + lockstep + netcode + sidebar/AI + faction Owner=) | 129 |
 | cnc-renderer (camera + sprite batch) | 3 |
 | cnc-renderer (GPU smoke, ignored unless adapter present) | 2 |
 
@@ -115,6 +115,10 @@ Details:
 - All dependencies in workspace Cargo.toml
 
 ## Next Steps
-1. Phase 6: expand Tiberian Dawn game logic (houses, missions, command execution).
-2. Lockstep mesh relay and host migration.
-3. Faction `Owner=` filtering for sidebar and AI production.
+1. Phase 6: campaign missions and triggers (`mission.rs` is still a stub).
+2. Save/load of live game state (Code_Pointers fixup exists; Game serialization
+   is missing; only replays and rules load today).
+3. Lockstep mesh relay and host migration (network.rs has ordering, checksums
+   and replay; UDP broadcast/multi-peer is missing).
+4. Red Alert parity: `cnc-red-alert` is ~107 lines of stubs.
+5. Map editor: `cnc-map-editor` is ~126 lines of stubs.

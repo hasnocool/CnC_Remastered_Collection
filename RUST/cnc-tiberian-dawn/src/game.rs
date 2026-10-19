@@ -16,9 +16,10 @@ use crate::map::{Map, TILE_SIZE};
 use crate::mission::Mission;
 use crate::pathfind::find_path;
 use crate::td_rules::{
-    leptons_to_px, prerequisite_token_met, production_seconds, px_to_leptons, tiberium_stage,
-    unit_class_id, unit_type_for_class, ProductionKind, StructureType, UnitType, WarheadType,
-    WeaponType, EXPLOSION_RANGE_LEPTONS, HARVESTER_STEP_COUNT, HARVESTER_STEP_CREDITS,
+    default_structure_owner, default_unit_owner, leptons_to_px, owner_token_allows,
+    prerequisite_token_met, production_seconds, px_to_leptons, tiberium_stage, unit_class_id,
+    unit_type_for_class, ProductionKind, StructureType, UnitType, WarheadType, WeaponType,
+    EXPLOSION_RANGE_LEPTONS, HARVESTER_STEP_COUNT, HARVESTER_STEP_CREDITS,
 };
 use crate::unit::Unit;
 use crate::weapon::{Projectile, Warhead, Weapon};
@@ -347,6 +348,24 @@ impl Game {
             .unwrap_or(unit_type.stats().tech_level)
     }
 
+    /// Rules.ini `Owner=` gate for a unit, with TD fallback when omitted.
+    pub fn unit_owned_by_faction(&self, owner: u8, unit_type: UnitType) -> bool {
+        let is_gdi = self.is_gdi(owner);
+        match self.rules.type_rule(unit_type.ini_name()) {
+            Some(rule) if !rule.owner.is_empty() => owner_token_allows(&rule.owner, is_gdi),
+            _ => default_unit_owner(unit_type, is_gdi),
+        }
+    }
+
+    /// Rules.ini `Owner=` gate for a structure, with TD fallback when omitted.
+    pub fn structure_owned_by_faction(&self, owner: u8, structure: StructureType) -> bool {
+        let is_gdi = self.is_gdi(owner);
+        match self.rules.type_rule(structure.ini_name()) {
+            Some(rule) if !rule.owner.is_empty() => owner_token_allows(&rule.owner, is_gdi),
+            _ => default_structure_owner(structure, is_gdi),
+        }
+    }
+
     /// Build level of a structure: Rules.ini TechLevel or BDATA fallback.
     pub fn building_tech_level(&self, structure: StructureType) -> u8 {
         self.rules
@@ -559,7 +578,9 @@ impl Game {
                 category,
                 cost,
                 tech_level,
-                visible: tech_level <= house.tech_level && missing.is_empty(),
+                visible: tech_level <= house.tech_level
+                    && missing.is_empty()
+                    && self.unit_owned_by_faction(owner, unit_type),
                 affordable: house.can_afford(cost),
                 has_producer: self.has_producer(owner, category),
                 missing_prerequisites: missing,
@@ -576,7 +597,9 @@ impl Game {
                 category: ProductionKind::Building,
                 cost,
                 tech_level,
-                visible: tech_level <= house.tech_level && missing.is_empty(),
+                visible: tech_level <= house.tech_level
+                    && missing.is_empty()
+                    && self.structure_owned_by_faction(owner, structure),
                 affordable: house.can_afford(cost),
                 has_producer: has_yard,
                 missing_prerequisites: missing,
@@ -3551,6 +3574,72 @@ mod prerequisite_tests {
         assert!(e1.visible);
         assert!(!e1.affordable);
         assert!(e1.has_producer);
+    }
+
+    #[test]
+    fn sidebar_filters_owner_locked_rows() {
+        let mut game = Game::with_rules(
+            "sidebar-owner",
+            32,
+            32,
+            rules(
+                "[MTNK]\nOwner=GDI\n[HTNK]\nOwner=Nod\n[BGGY]\nOwner=Nod\n\
+                 [TMPL]\nOwner=Nod\nTechLevel=1\n[EYE]\nOwner=GDI\nTechLevel=1\n",
+            ),
+        );
+        game.setup_demo();
+
+        let gdi = game.visible_sidebar_options(0);
+        assert!(gdi
+            .iter()
+            .any(|option| option.buildable == Buildable::Unit(UnitType::MediumTank)));
+        assert!(!gdi
+            .iter()
+            .any(|option| option.buildable == Buildable::Unit(UnitType::MammothTank)));
+        assert!(!gdi
+            .iter()
+            .any(|option| option.buildable == Buildable::Unit(UnitType::Buggy)));
+        assert!(!gdi
+            .iter()
+            .any(|option| option.buildable == Buildable::Structure(StructureType::TempleOfNod)));
+        assert!(gdi
+            .iter()
+            .any(|option| option.buildable == Buildable::Structure(StructureType::IonCannon)));
+        // The full table still lists every row, just with visible = false.
+        assert_eq!(game.sidebar_options(0).len(), UnitType::ALL.len() + StructureType::ALL.len());
+
+        let nod = game.visible_sidebar_options(1);
+        assert!(!nod
+            .iter()
+            .any(|option| option.buildable == Buildable::Unit(UnitType::MediumTank)));
+        assert!(nod
+            .iter()
+            .any(|option| option.buildable == Buildable::Unit(UnitType::Buggy)));
+        assert!(nod
+            .iter()
+            .any(|option| option.buildable == Buildable::Structure(StructureType::TempleOfNod)));
+        assert!(!nod
+            .iter()
+            .any(|option| option.buildable == Buildable::Structure(StructureType::IonCannon)));
+    }
+
+    #[test]
+    fn faction_ownership_uses_owner_tokens_and_td_fallback() {
+        let mut game = Game::with_rules("owner-tokens", 32, 32, rules("[MTNK]\nOwner=Nod,ANY\n"));
+        game.setup_demo();
+
+        // Owner=ANY admits both sides, Owner=Nod locks the medium tank to Nod.
+        assert!(game.unit_owned_by_faction(0, UnitType::MediumTank));
+        assert!(game.unit_owned_by_faction(1, UnitType::MediumTank));
+
+        // No rules entry: TD defaults (Mammoth is GDI-only, Buggy Nod-only).
+        assert!(game.unit_owned_by_faction(0, UnitType::MammothTank));
+        assert!(!game.unit_owned_by_faction(1, UnitType::MammothTank));
+        assert!(!game.unit_owned_by_faction(0, UnitType::Buggy));
+        assert!(game.unit_owned_by_faction(1, UnitType::Buggy));
+        assert!(game.structure_owned_by_faction(0, StructureType::IonCannon));
+        assert!(!game.structure_owned_by_faction(1, StructureType::IonCannon));
+        assert!(game.structure_owned_by_faction(1, StructureType::TempleOfNod));
     }
 
     #[test]
