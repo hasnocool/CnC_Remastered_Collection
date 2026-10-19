@@ -1,6 +1,6 @@
 //! House/Faction logic for Tiberian Dawn
 
-use cnc_core::{ClassId, Fixed16_16, Vec2};
+use cnc_core::{ClassId, Fixed16_16};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 

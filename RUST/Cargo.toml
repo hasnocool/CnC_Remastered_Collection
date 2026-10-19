@@ -20,6 +20,15 @@ authors = ["CnC Rust Clone Team"]
 license = "GPL-3.0-or-later"
 repository = "https://github.com/example/cnc-rust-clone"
 
+[profile.release]
+# Thin LTO instead of fat: this host is a 16-GiB shared workstation where a
+# fat-LTO wgpu link risks starving other jobs; thin LTO is measurably cheaper
+# and links deterministically.
+lto = "thin"
+# Game binaries never rely on unwinding; abort removes unwind tables and
+# (because cargo overrides this for test/bench profiles) keeps tests usable.
+panic = "abort"
+
 [workspace.dependencies]
 anyhow = "1.0"
 thiserror = "1.0"

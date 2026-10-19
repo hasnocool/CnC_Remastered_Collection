@@ -917,6 +917,7 @@ dependencies = [
  "config",
  "criterion",
  "dotenv",
+ "image",
  "once_cell",
  "parking_lot",
  "pollster",

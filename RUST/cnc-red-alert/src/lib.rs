@@ -4,38 +4,36 @@
 //! keeps its own data model: two factions, five countries, naval and air
 //! branches, country superweapons and infiltration.
 
-pub mod render;
-pub mod map;
-pub mod pathfind;
-pub mod game;
-pub mod scenario;
-pub mod house;
-pub mod naval;
 pub mod aircraft;
+pub mod game;
+pub mod gapgen;
+pub mod house;
+pub mod map;
+pub mod mcv;
+pub mod naval;
+pub mod pathfind;
+pub mod render;
+pub mod scenario;
+pub mod spy;
 pub mod superweapon;
 pub mod tesla;
-pub mod gapgen;
-pub mod spy;
-pub mod mcv;
 
-pub use render::{render_entity, entity_asset};
-pub use map::{Map, Terrain, TILE_SIZE};
-pub use pathfind::{find_path, MoveClass};
+pub use aircraft::{Aircraft, Airfield, Helipad};
 pub use game::{
     AiCommander, BuildError, Game, GameCommand, GameStatus, GameStructure, GameUnit,
     ObjectiveState, RunningTrigger, ScenarioOutcome, Shot, TargetRef, UnitRole, WeaponSpec,
 };
-pub use scenario::{Scenario, ScenarioObject, ScenarioTrigger};
-pub use house::{Country, Faction, House, ProductionItem};
-pub use naval::{Ship, Submarine};
-pub use aircraft::{Aircraft, Airfield, Helipad};
-pub use superweapon::{
-    ArmoredUnit, Chronosphere, GPS, IronCurtain, Superweapon, SuperweaponError,
-};
-pub use tesla::{TeslaBolt, TeslaCoil};
 pub use gapgen::GapGenerator;
-pub use spy::{InfiltrationEffect, InfiltrationTarget, Spy, Thief};
+pub use house::{Country, Faction, House, ProductionItem};
+pub use map::{Map, Terrain, TILE_SIZE};
 pub use mcv::{can_deploy_at, yard_footprint, MCV};
+pub use naval::{Ship, Submarine};
+pub use pathfind::{find_path, MoveClass};
+pub use render::{entity_asset, render_entity};
+pub use scenario::{Scenario, ScenarioObject, ScenarioTrigger};
+pub use spy::{InfiltrationEffect, InfiltrationTarget, Spy, Thief};
+pub use superweapon::{ArmoredUnit, Chronosphere, IronCurtain, Superweapon, SuperweaponError, GPS};
+pub use tesla::{TeslaBolt, TeslaCoil};
 
 #[cfg(test)]
 mod integration_tests {
@@ -76,11 +74,11 @@ mod integration_tests {
 
         let mut curtain = IronCurtain::new(yard, 1);
         curtain.base.update(Fixed16_16::from_int(600));
-        let mut units = vec![ArmoredUnit::new(point(50.0, 50.0), Fixed16_16::from_int(200))];
-        assert_eq!(
-            curtain.harden(&mut units, Fixed16_16::from_int(48)),
-            Ok(1)
-        );
+        let mut units = vec![ArmoredUnit::new(
+            point(50.0, 50.0),
+            Fixed16_16::from_int(200),
+        )];
+        assert_eq!(curtain.harden(&mut units, Fixed16_16::from_int(48)), Ok(1));
         units[0].take_damage(Fixed16_16::from_int(100));
         assert_eq!(units[0].health, Fixed16_16::from_int(200));
     }

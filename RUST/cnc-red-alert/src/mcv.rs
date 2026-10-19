@@ -96,7 +96,8 @@ impl MCV {
 
 /// Footprint cells covered by a deployed yard, anchored at its position cell.
 pub fn yard_footprint(cell_x: i32, cell_y: i32) -> Vec<(i32, i32)> {
-    let mut cells = Vec::with_capacity((CONSTRUCTION_YARD_CELLS * CONSTRUCTION_YARD_CELLS) as usize);
+    let mut cells =
+        Vec::with_capacity((CONSTRUCTION_YARD_CELLS * CONSTRUCTION_YARD_CELLS) as usize);
     for y in 0..CONSTRUCTION_YARD_CELLS {
         for x in 0..CONSTRUCTION_YARD_CELLS {
             cells.push((cell_x + x, cell_y + y));

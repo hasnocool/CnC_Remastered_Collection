@@ -1095,9 +1095,7 @@ pub fn prerequisite_token_met(token: &str, is_gdi: bool, owned: &[StructureType]
         "NONE" | "ANY" | "ALL" => true,
         "GDI" | "GOOD" => is_gdi,
         "NOD" | "BAD" => !is_gdi,
-        upper => {
-            structure_from_ini_name(upper).map_or(false, |structure| owned.contains(&structure))
-        }
+        upper => structure_from_ini_name(upper).is_some_and(|structure| owned.contains(&structure)),
     }
 }
 

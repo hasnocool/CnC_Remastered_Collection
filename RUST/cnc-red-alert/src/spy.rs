@@ -184,10 +184,7 @@ mod tests {
         assert_eq!(spy.disguised_as, Some(ClassId::InfantryE1));
         spy.take_damage(Fixed16_16::from_int(100));
         assert!(!spy.disguise(ClassId::InfantryE2));
-        assert_eq!(
-            spy.infiltrate(InfiltrationTarget::Radar, 0),
-            None
-        );
+        assert_eq!(spy.infiltrate(InfiltrationTarget::Radar, 0), None);
     }
 
     #[test]

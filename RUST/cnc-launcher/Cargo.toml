@@ -6,6 +6,10 @@ license = { workspace = true }
 repository = { workspace = true }
 default-run = "cnc-launcher"
 
+[lib]
+name = "cnc_launcher"
+path = "src/lib.rs"
+
 [[bin]]
 name = "cnc-launcher"
 path = "src/main.rs"
@@ -35,6 +39,11 @@ pollster = "0.4"
 tokio = { workspace = true }
 parking_lot = { workspace = true }
 once_cell = { workspace = true }
+image = { workspace = true }
+
+[[bin]]
+name = "cnc-screenshots"
+path = "src/bin/screenshots.rs"
 
 [dev-dependencies]
 criterion = "0.5"

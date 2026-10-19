@@ -9,8 +9,7 @@ use cnc_core::{ClassId, Fixed16_16, Vec2};
 use serde::{Deserialize, Serialize};
 
 use crate::td_rules::{
-    leptons_to_px, modify_damage, ticks_to_seconds, ArmorType, BulletType, WarheadType,
-    WeaponType,
+    leptons_to_px, modify_damage, ticks_to_seconds, ArmorType, BulletType, WarheadType, WeaponType,
 };
 
 /// A weapon instance carried by a unit.
@@ -173,7 +172,13 @@ pub struct Projectile {
 }
 
 impl Projectile {
-    pub fn new(weapon: Weapon, position: Vec2, target: Vec2, source: u32, target_entity: Option<u32>) -> Self {
+    pub fn new(
+        weapon: Weapon,
+        position: Vec2,
+        target: Vec2,
+        source: u32,
+        target_entity: Option<u32>,
+    ) -> Self {
         let dx = target.x.to_f32() - position.x.to_f32();
         let dy = target.y.to_f32() - position.y.to_f32();
         let distance = (dx * dx + dy * dy).sqrt();
@@ -242,9 +247,8 @@ impl Projectile {
             } else {
                 1.0
             };
-            self.altitude = Fixed16_16::from_f32(
-                (progress * std::f32::consts::PI).sin() * self.arc_height,
-            );
+            self.altitude =
+                Fixed16_16::from_f32((progress * std::f32::consts::PI).sin() * self.arc_height);
         } else {
             self.altitude = Fixed16_16::ZERO;
         }
@@ -314,7 +318,10 @@ mod tests {
         }
 
         assert!(hit, "grenade should land");
-        assert!(max_altitude > 1.0, "grenade should arc upward, max {max_altitude}");
+        assert!(
+            max_altitude > 1.0,
+            "grenade should arc upward, max {max_altitude}"
+        );
     }
 
     #[test]

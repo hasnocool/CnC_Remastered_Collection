@@ -50,7 +50,10 @@ fn shp_bytes(frames: &[(u16, u16, u8)]) -> Vec<u8> {
         cursor += u32::from(*width) * u32::from(*height);
     }
     for (width, height, color) in frames {
-        out.extend(std::iter::repeat(*color).take(usize::from(*width) * usize::from(*height)));
+        out.extend(std::iter::repeat_n(
+            *color,
+            usize::from(*width) * usize::from(*height),
+        ));
     }
     out
 }
@@ -75,14 +78,14 @@ fn aud_bytes() -> Vec<u8> {
     data
 }
 
-
 fn aud_bytes_with_samples(frames: usize) -> Vec<u8> {
     let mut data = Vec::new();
     data.extend_from_slice(&22050u32.to_le_bytes());
     data.extend_from_slice(&1u16.to_le_bytes());
     data.extend_from_slice(&0u16.to_le_bytes());
     for index in 0..frames {
-        let sample = ((index as f32 * 440.0 * std::f32::consts::TAU / 22050.0).sin() * 12000.0) as i16;
+        let sample =
+            ((index as f32 * 440.0 * std::f32::consts::TAU / 22050.0).sin() * 12000.0) as i16;
         data.extend_from_slice(&sample.to_le_bytes());
     }
     data
@@ -100,10 +103,16 @@ fn mix_bytes() -> Vec<u8> {
         names.extend_from_slice(name.as_bytes());
         names.push(0);
     }
-    for offset in offsets { out.extend_from_slice(&offset.to_le_bytes()); }
-    for (_, data) in entries { out.extend_from_slice(&(data.len() as u32).to_le_bytes()); }
+    for offset in offsets {
+        out.extend_from_slice(&offset.to_le_bytes());
+    }
+    for (_, data) in entries {
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    }
     out.extend_from_slice(&names);
-    for (_, data) in entries { out.extend_from_slice(data); }
+    for (_, data) in entries {
+        out.extend_from_slice(data);
+    }
     out
 }
 
@@ -120,7 +129,10 @@ fn assert_success(command: &mut Command) -> String {
 
 fn assert_failure(command: &mut Command) {
     let output = command.output().expect("failed to spawn cnc-asset-cli");
-    assert!(!output.status.success(), "command unexpectedly succeeded: {command:?}");
+    assert!(
+        !output.status.success(),
+        "command unexpectedly succeeded: {command:?}"
+    );
 }
 
 #[test]
@@ -130,13 +142,29 @@ fn pal_export_formats() {
     fs::write(&input, palette_bytes()).unwrap();
     for format in ["json", "png", "css"] {
         let out = dir.join(format);
-        let stdout = assert_success(cli().args(["pal", "--input"]).arg(&input).arg("--output").arg(&out).args(["--format", format]));
+        let stdout = assert_success(
+            cli()
+                .args(["pal", "--input"])
+                .arg(&input)
+                .arg("--output")
+                .arg(&out)
+                .args(["--format", format]),
+        );
         assert!(stdout.contains("palette"), "stdout: {stdout}");
     }
     assert!(dir.join("json/palette.json").exists());
     assert!(dir.join("png/palette.png").exists());
-    assert!(fs::read_to_string(dir.join("css/palette.css")).unwrap().contains("--palette-255"));
-    assert_failure(cli().args(["pal", "--input"]).arg(&input).arg("--output").arg(dir.join("bad")).args(["--format", "xml"]));
+    assert!(fs::read_to_string(dir.join("css/palette.css"))
+        .unwrap()
+        .contains("--palette-255"));
+    assert_failure(
+        cli()
+            .args(["pal", "--input"])
+            .arg(&input)
+            .arg("--output")
+            .arg(dir.join("bad"))
+            .args(["--format", "xml"]),
+    );
     fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -149,15 +177,33 @@ fn shp_frames_and_sprite_sheet() {
     fs::write(&pal, palette_bytes()).unwrap();
 
     let frames = dir.join("frames");
-    let stdout = assert_success(cli().args(["shp", "--input"]).arg(&shp).arg("--output").arg(&frames).arg("--palette").arg(&pal));
+    let stdout = assert_success(
+        cli()
+            .args(["shp", "--input"])
+            .arg(&shp)
+            .arg("--output")
+            .arg(&frames)
+            .arg("--palette")
+            .arg(&pal),
+    );
     assert!(stdout.contains("2 frame"), "stdout: {stdout}");
     assert!(frames.join("E1_frame000.png").exists());
     assert!(frames.join("E1_frame001.png").exists());
 
     let sheet = dir.join("sheet").join("E1_sheet.png");
-    assert_success(cli().args(["shp", "--input"]).arg(&shp).arg("--output").arg(&sheet).arg("--palette").arg(&pal).arg("--sprite-sheet"));
+    assert_success(
+        cli()
+            .args(["shp", "--input"])
+            .arg(&shp)
+            .arg("--output")
+            .arg(&sheet)
+            .arg("--palette")
+            .arg(&pal)
+            .arg("--sprite-sheet"),
+    );
     assert!(sheet.exists());
-    let manifest: serde_json::Value = serde_json::from_str(&fs::read_to_string(sheet.with_extension("json")).unwrap()).unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(sheet.with_extension("json")).unwrap()).unwrap();
     assert_eq!(manifest["width"], 5);
     assert_eq!(manifest["frames"].as_array().unwrap().len(), 2);
     fs::remove_dir_all(&dir).unwrap();
@@ -170,11 +216,27 @@ fn mix_list_and_extract() {
     fs::write(&mix, mix_bytes()).unwrap();
 
     let out_dir = dir.join("extracted");
-    let list = assert_success(cli().args(["mix", "--input"]).arg(&mix).arg("--output").arg(&out_dir).arg("--list"));
-    assert!(list.contains("HELLO.TXT") && list.contains("DATA.BIN"), "list: {list}");
+    let list = assert_success(
+        cli()
+            .args(["mix", "--input"])
+            .arg(&mix)
+            .arg("--output")
+            .arg(&out_dir)
+            .arg("--list"),
+    );
+    assert!(
+        list.contains("HELLO.TXT") && list.contains("DATA.BIN"),
+        "list: {list}"
+    );
     assert!(!out_dir.exists());
 
-    let stdout = assert_success(cli().args(["mix", "--input"]).arg(&mix).arg("--output").arg(&out_dir));
+    let stdout = assert_success(
+        cli()
+            .args(["mix", "--input"])
+            .arg(&mix)
+            .arg("--output")
+            .arg(&out_dir),
+    );
     assert!(stdout.contains("2 entries"), "stdout: {stdout}");
     assert_eq!(fs::read(out_dir.join("HELLO.TXT")).unwrap(), b"hello mix");
     fs::remove_dir_all(&dir).unwrap();
@@ -189,8 +251,20 @@ fn voc_and_aud_to_wav() {
     fs::write(&aud, aud_bytes()).unwrap();
     let voc_wav = dir.join("beep.wav");
     let aud_wav = dir.join("shot.wav");
-    assert_success(cli().args(["voc", "--input"]).arg(&voc).arg("--output").arg(&voc_wav));
-    assert_success(cli().args(["voc", "--input"]).arg(&aud).arg("--output").arg(&aud_wav));
+    assert_success(
+        cli()
+            .args(["voc", "--input"])
+            .arg(&voc)
+            .arg("--output")
+            .arg(&voc_wav),
+    );
+    assert_success(
+        cli()
+            .args(["voc", "--input"])
+            .arg(&aud)
+            .arg("--output")
+            .arg(&aud_wav),
+    );
     assert_eq!(&fs::read(&voc_wav).unwrap()[..4], b"RIFF");
     assert_eq!(&fs::read(&aud_wav).unwrap()[..4], b"RIFF");
     fs::remove_dir_all(&dir).unwrap();
@@ -209,15 +283,32 @@ fn batch_converts_tree_and_reports_counts() {
     fs::write(input.join("notes.txt"), b"ignored").unwrap();
 
     let out = dir.join("out");
-    let stdout = assert_success(cli().args(["batch", "--input"]).arg(&input).arg("--output").arg(&out).args(["--game", "td"]));
-    assert!(stdout.contains("converted 5 file(s), skipped 1, failed 0"), "stdout: {stdout}");
+    let stdout = assert_success(
+        cli()
+            .args(["batch", "--input"])
+            .arg(&input)
+            .arg("--output")
+            .arg(&out)
+            .args(["--game", "td"]),
+    );
+    assert!(
+        stdout.contains("converted 5 file(s), skipped 1, failed 0"),
+        "stdout: {stdout}"
+    );
     for kind in ["mix: 1", "shp: 1", "voc: 1", "aud: 1", "pal: 1"] {
         assert!(stdout.contains(kind), "missing {kind} in: {stdout}");
     }
     assert!(out.join("E1_frame000.png").exists());
     assert!(out.join("data").join("beep.wav").exists());
     assert!(out.join("data").join("ARCHIVE").join("HELLO.TXT").exists());
-    assert_failure(cli().args(["batch", "--input"]).arg(&input).arg("--output").arg(dir.join("bad")).args(["--game", "duke3d"]));
+    assert_failure(
+        cli()
+            .args(["batch", "--input"])
+            .arg(&input)
+            .arg("--output")
+            .arg(dir.join("bad"))
+            .args(["--game", "duke3d"]),
+    );
     fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -225,11 +316,21 @@ fn batch_converts_tree_and_reports_counts() {
 fn generate_atlas_writes_manifest() {
     let dir = test_dir("atlas");
     let out = dir.join("atlas");
-    let stdout = assert_success(cli().args(["generate-atlas", "--out"]).arg(&out).args(["--style", "classic"]));
+    let stdout = assert_success(
+        cli()
+            .args(["generate-atlas", "--out"])
+            .arg(&out)
+            .args(["--style", "classic"]),
+    );
     assert!(stdout.contains("frames"), "stdout: {stdout}");
     assert!(out.join("atlas.png").exists());
     assert!(out.join("atlas.json").exists());
-    assert_failure(cli().args(["generate-atlas", "--out"]).arg(dir.join("bad")).args(["--style", "vaporwave"]));
+    assert_failure(
+        cli()
+            .args(["generate-atlas", "--out"])
+            .arg(dir.join("bad"))
+            .args(["--style", "vaporwave"]),
+    );
     fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -266,7 +367,14 @@ fn aud_to_ogg_with_loop_points_and_batch_ogg() {
             .arg(&aud)
             .arg("--output")
             .arg(&ogg)
-            .args(["--format", "ogg", "--loop-start", "100", "--loop-end", "3000"]),
+            .args([
+                "--format",
+                "ogg",
+                "--loop-start",
+                "100",
+                "--loop-end",
+                "3000",
+            ]),
     );
     assert!(stdout.contains("ogg"), "stdout: {stdout}");
     let bytes = fs::read(&ogg).unwrap();
@@ -276,7 +384,13 @@ fn aud_to_ogg_with_loop_points_and_batch_ogg() {
 
     // Extension-based format inference also selects Ogg.
     let inferred = dir.join("inferred.ogg");
-    assert_success(cli().args(["voc", "--input"]).arg(&aud).arg("--output").arg(&inferred));
+    assert_success(
+        cli()
+            .args(["voc", "--input"])
+            .arg(&aud)
+            .arg("--output")
+            .arg(&inferred),
+    );
     assert_eq!(&fs::read(&inferred).unwrap()[..4], b"OggS");
 
     // Batch converts to Ogg when requested.

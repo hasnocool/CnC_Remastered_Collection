@@ -1,5 +1,5 @@
 //! Palette (.pal) Parser
-use anyhow::{Result, Context, bail};
+use anyhow::{bail, Context, Result};
 use cnc_core::RGB888;
 use std::path::Path;
 
@@ -10,17 +10,20 @@ pub struct PalFile {
 
 impl PalFile {
     pub fn load(data: &[u8]) -> Result<Self> {
-        if data.len() < 768 { bail!("PAL too small: need 768 bytes, got {}", data.len()); }
+        if data.len() < 768 {
+            bail!("PAL too small: need 768 bytes, got {}", data.len());
+        }
         let mut colors = [RGB888::new(0, 0, 0); 256];
-        for i in 0..256 {
+        for (i, color) in colors.iter_mut().enumerate() {
             let offset = i * 3;
-            colors[i] = RGB888::new(data[offset], data[offset + 1], data[offset + 2]);
+            *color = RGB888::new(data[offset], data[offset + 1], data[offset + 2]);
         }
         Ok(Self { colors })
     }
 
     pub fn load_file(path: &Path) -> Result<Self> {
-        let data = std::fs::read(path).with_context(|| format!("Failed to read PAL: {:?}", path))?;
+        let data =
+            std::fs::read(path).with_context(|| format!("Failed to read PAL: {:?}", path))?;
         Self::load(&data)
     }
 
@@ -35,15 +38,16 @@ impl PalFile {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        std::fs::write(path, self.to_bytes()).with_context(|| format!("Failed to write PAL: {:?}", path))?;
+        std::fs::write(path, self.to_bytes())
+            .with_context(|| format!("Failed to write PAL: {:?}", path))?;
         Ok(())
     }
 
     /// Create grayscale palette
     pub fn grayscale() -> Self {
         let mut colors = [RGB888::new(0, 0, 0); 256];
-        for i in 0..256 {
-            colors[i] = RGB888::new(i as u8, i as u8, i as u8);
+        for (i, color) in colors.iter_mut().enumerate() {
+            *color = RGB888::new(i as u8, i as u8, i as u8);
         }
         Self { colors }
     }
@@ -63,7 +67,8 @@ impl PalFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn test_pal_roundtrip() {
+    #[test]
+    fn test_pal_roundtrip() {
         let pal = PalFile::grayscale();
         let bytes = pal.to_bytes();
         let loaded = PalFile::load(&bytes).unwrap();

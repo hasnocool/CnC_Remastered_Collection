@@ -101,7 +101,9 @@ pub enum Condition {
     /// Always false; useful to stage disabled triggers.
     Never,
     /// Mission clock has reached this many seconds.
-    Elapsed { seconds: u32 },
+    Elapsed {
+        seconds: u32,
+    },
     /// Alive units owned by `owner`, optionally filtered by type.
     UnitCount {
         owner: u8,
@@ -130,7 +132,10 @@ pub enum Condition {
         comparison: Comparison,
     },
     /// A unit (optionally of `owner`) stands inside a map trigger zone.
-    ZoneOccupied { zone: u32, owner: Option<u8> },
+    ZoneOccupied {
+        zone: u32,
+        owner: Option<u8>,
+    },
     /// A named mission flag has been set by an earlier action.
     FlagSet(String),
     Not(Box<Condition>),
@@ -172,9 +177,8 @@ impl Condition {
                     .filter(|building| {
                         building.is_alive()
                             && building.owner == *owner
-                            && structure.is_none_or(|wanted| {
-                                building.structure_type() == Some(wanted)
-                            })
+                            && structure
+                                .is_none_or(|wanted| building.structure_type() == Some(wanted))
                     })
                     .count() as i64;
                 comparison.matches(count)
@@ -228,7 +232,10 @@ pub enum Action {
     Win,
     Lose,
     /// Add credits to a house (negative values are allowed).
-    Credits { owner: u8, amount: i32 },
+    Credits {
+        owner: u8,
+        amount: i32,
+    },
     /// Spawn units near a map cell; they are spread over a small block.
     SpawnUnits {
         owner: u8,
@@ -513,11 +520,8 @@ fn text_value(section: &IniSection, keys: &[&str]) -> Option<String> {
 }
 
 fn int_value(section: &IniSection, keys: &[&str]) -> Option<Result<i64>> {
-    keys.iter().find_map(|key| {
-        section
-            .get_ci(key)
-            .map(|value| value.as_i64().map_err(anyhow::Error::from))
-    })
+    keys.iter()
+        .find_map(|key| section.get_ci(key).map(|value| value.as_i64()))
 }
 
 fn parse_trigger(section: &IniSection, fallback_id: u32) -> Result<Trigger> {
@@ -540,8 +544,8 @@ fn parse_trigger(section: &IniSection, fallback_id: u32) -> Result<Trigger> {
 
     let actions_text =
         text_value(section, &["Actions", "Action"]).unwrap_or_else(|| "win".to_string());
-    let actions =
-        parse_actions(&actions_text).with_context(|| format!("invalid Actions '{actions_text}'"))?;
+    let actions = parse_actions(&actions_text)
+        .with_context(|| format!("invalid Actions '{actions_text}'"))?;
 
     let once = bool_value(section, &["Once", "SingleShot"])?.unwrap_or(true);
     let enabled = bool_value(section, &["Enabled"])?.unwrap_or(true);
@@ -561,7 +565,7 @@ fn parse_trigger(section: &IniSection, fallback_id: u32) -> Result<Trigger> {
 fn bool_value(section: &IniSection, keys: &[&str]) -> Result<Option<bool>> {
     for key in keys {
         if let Some(value) = section.get_ci(key) {
-            return value.as_bool().map(Some).map_err(anyhow::Error::from);
+            return value.as_bool().map(Some);
         }
     }
     Ok(None)
@@ -707,7 +711,7 @@ fn parse_action(text: &str) -> Result<Action> {
             require_len(&fields, 2, "credits:owner:amount")?;
             Ok(Action::Credits {
                 owner: parse_owner(fields[0])?,
-                amount: parse_number(Some(&fields[1]), "amount")? as i32,
+                amount: parse_number(Some(fields[1]), "amount")? as i32,
             })
         }
         "spawn" => {
@@ -724,7 +728,7 @@ fn parse_action(text: &str) -> Result<Action> {
             Ok(Action::SpawnUnits {
                 owner: parse_owner(fields[0])?,
                 unit_type,
-                count: parse_number(Some(&fields[2]), "count")?.max(1) as usize,
+                count: parse_number(Some(fields[2]), "count")?.max(1) as usize,
                 cell: parse_cell(fields[3], fields[4])?,
             })
         }
@@ -898,8 +902,7 @@ Actions=message:One minute elapsed|credits:0:250
 
     #[test]
     fn condition_combinators_and_negation() {
-        let condition =
-            parse_condition("elapsed:10 & !has:1:PROC | credits:0:>=:1000").unwrap();
+        let condition = parse_condition("elapsed:10 & !has:1:PROC | credits:0:>=:1000").unwrap();
         match condition {
             Condition::Any(parts) => {
                 assert_eq!(parts.len(), 2);
@@ -936,7 +939,11 @@ Actions=message:One minute elapsed|credits:0:250
         assert_eq!(game.mission.messages.last().unwrap(), "One minute elapsed");
 
         game.update_mission(Fixed16_16::ONE);
-        assert_eq!(game.houses[0].credits, before + 250, "Once trigger must not repeat");
+        assert_eq!(
+            game.houses[0].credits,
+            before + 250,
+            "Once trigger must not repeat"
+        );
     }
 
     #[test]
@@ -1038,8 +1045,8 @@ Actions=message:One minute elapsed|credits:0:250
 
     #[test]
     fn shipped_sample_mission_parses() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../assets/missions/gdi_01.ini");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../assets/missions/gdi_01.ini");
         let mission = Mission::from_file(&path).unwrap();
         assert_eq!(mission.name, "GDI 01 - X16");
         assert_eq!(mission.objectives.len(), 3);
@@ -1092,6 +1099,10 @@ Actions=message:One minute elapsed|credits:0:250
         game.start_mission(mission);
         game.update_mission(Fixed16_16::ONE);
         game.update_mission(Fixed16_16::ONE);
-        assert!(!game.mission.messages.iter().any(|line| line == "must not run"));
+        assert!(!game
+            .mission
+            .messages
+            .iter()
+            .any(|line| line == "must not run"));
     }
 }

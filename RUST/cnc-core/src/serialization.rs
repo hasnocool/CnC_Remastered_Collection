@@ -1,10 +1,9 @@
 //! Binary serialization framework (little-endian, versioned)
 
 use crate::{Fixed16_16, FloatBias};
-use anyhow::{Result, Context};
-use serde::{Serialize, Deserialize, Serializer, Deserializer};
-use std::io::{Read, Write, Cursor, Seek, SeekFrom};
+use anyhow::{Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use std::io::{Cursor, Read, Write};
 
 /// Trait for types that can be serialized to/from binary
 pub trait Serializable: Sized {
@@ -56,35 +55,51 @@ impl<'a> BinaryReader<'a> {
     }
 
     pub fn read_u16(&mut self) -> Result<u16> {
-        self.cursor.read_u16::<LittleEndian>().context("Failed to read u16")
+        self.cursor
+            .read_u16::<LittleEndian>()
+            .context("Failed to read u16")
     }
 
     pub fn read_i16(&mut self) -> Result<i16> {
-        self.cursor.read_i16::<LittleEndian>().context("Failed to read i16")
+        self.cursor
+            .read_i16::<LittleEndian>()
+            .context("Failed to read i16")
     }
 
     pub fn read_u32(&mut self) -> Result<u32> {
-        self.cursor.read_u32::<LittleEndian>().context("Failed to read u32")
+        self.cursor
+            .read_u32::<LittleEndian>()
+            .context("Failed to read u32")
     }
 
     pub fn read_i32(&mut self) -> Result<i32> {
-        self.cursor.read_i32::<LittleEndian>().context("Failed to read i32")
+        self.cursor
+            .read_i32::<LittleEndian>()
+            .context("Failed to read i32")
     }
 
     pub fn read_u64(&mut self) -> Result<u64> {
-        self.cursor.read_u64::<LittleEndian>().context("Failed to read u64")
+        self.cursor
+            .read_u64::<LittleEndian>()
+            .context("Failed to read u64")
     }
 
     pub fn read_i64(&mut self) -> Result<i64> {
-        self.cursor.read_i64::<LittleEndian>().context("Failed to read i64")
+        self.cursor
+            .read_i64::<LittleEndian>()
+            .context("Failed to read i64")
     }
 
     pub fn read_f32(&mut self) -> Result<f32> {
-        self.cursor.read_f32::<LittleEndian>().context("Failed to read f32")
+        self.cursor
+            .read_f32::<LittleEndian>()
+            .context("Failed to read f32")
     }
 
     pub fn read_f64(&mut self) -> Result<f64> {
-        self.cursor.read_f64::<LittleEndian>().context("Failed to read f64")
+        self.cursor
+            .read_f64::<LittleEndian>()
+            .context("Failed to read f64")
     }
 
     pub fn read_bool(&mut self) -> Result<bool> {
@@ -105,7 +120,9 @@ impl<'a> BinaryReader<'a> {
     pub fn read_string(&mut self) -> Result<String> {
         let len = self.read_u32()? as usize;
         let mut buf = vec![0u8; len];
-        self.cursor.read_exact(&mut buf).context("Failed to read string bytes")?;
+        self.cursor
+            .read_exact(&mut buf)
+            .context("Failed to read string bytes")?;
         String::from_utf8(buf).context("Invalid UTF-8 in string")
     }
 
@@ -125,7 +142,9 @@ impl<'a> BinaryReader<'a> {
     // Fixed-length string
     pub fn read_fixed_string(&mut self, len: usize) -> Result<String> {
         let mut buf = vec![0u8; len];
-        self.cursor.read_exact(&mut buf).context("Failed to read fixed string")?;
+        self.cursor
+            .read_exact(&mut buf)
+            .context("Failed to read fixed string")?;
         // Trim at null terminator if present
         if let Some(null_pos) = buf.iter().position(|&b| b == 0) {
             buf.truncate(null_pos);
@@ -136,7 +155,9 @@ impl<'a> BinaryReader<'a> {
     // Bytes
     pub fn read_bytes(&mut self, len: usize) -> Result<Vec<u8>> {
         let mut buf = vec![0u8; len];
-        self.cursor.read_exact(&mut buf).context("Failed to read bytes")?;
+        self.cursor
+            .read_exact(&mut buf)
+            .context("Failed to read bytes")?;
         Ok(buf)
     }
 
@@ -223,35 +244,51 @@ impl BinaryWriter {
     }
 
     pub fn write_u16(&mut self, value: u16) -> Result<()> {
-        self.cursor.write_u16::<LittleEndian>(value).context("Failed to write u16")
+        self.cursor
+            .write_u16::<LittleEndian>(value)
+            .context("Failed to write u16")
     }
 
     pub fn write_i16(&mut self, value: i16) -> Result<()> {
-        self.cursor.write_i16::<LittleEndian>(value).context("Failed to write i16")
+        self.cursor
+            .write_i16::<LittleEndian>(value)
+            .context("Failed to write i16")
     }
 
     pub fn write_u32(&mut self, value: u32) -> Result<()> {
-        self.cursor.write_u32::<LittleEndian>(value).context("Failed to write u32")
+        self.cursor
+            .write_u32::<LittleEndian>(value)
+            .context("Failed to write u32")
     }
 
     pub fn write_i32(&mut self, value: i32) -> Result<()> {
-        self.cursor.write_i32::<LittleEndian>(value).context("Failed to write i32")
+        self.cursor
+            .write_i32::<LittleEndian>(value)
+            .context("Failed to write i32")
     }
 
     pub fn write_u64(&mut self, value: u64) -> Result<()> {
-        self.cursor.write_u64::<LittleEndian>(value).context("Failed to write u64")
+        self.cursor
+            .write_u64::<LittleEndian>(value)
+            .context("Failed to write u64")
     }
 
     pub fn write_i64(&mut self, value: i64) -> Result<()> {
-        self.cursor.write_i64::<LittleEndian>(value).context("Failed to write i64")
+        self.cursor
+            .write_i64::<LittleEndian>(value)
+            .context("Failed to write i64")
     }
 
     pub fn write_f32(&mut self, value: f32) -> Result<()> {
-        self.cursor.write_f32::<LittleEndian>(value).context("Failed to write f32")
+        self.cursor
+            .write_f32::<LittleEndian>(value)
+            .context("Failed to write f32")
     }
 
     pub fn write_f64(&mut self, value: f64) -> Result<()> {
-        self.cursor.write_f64::<LittleEndian>(value).context("Failed to write f64")
+        self.cursor
+            .write_f64::<LittleEndian>(value)
+            .context("Failed to write f64")
     }
 
     pub fn write_bool(&mut self, value: bool) -> Result<()> {
@@ -272,12 +309,16 @@ impl BinaryWriter {
     pub fn write_string(&mut self, value: &str) -> Result<()> {
         let bytes = value.as_bytes();
         self.write_u32(bytes.len() as u32)?;
-        self.cursor.write_all(bytes).context("Failed to write string bytes")
+        self.cursor
+            .write_all(bytes)
+            .context("Failed to write string bytes")
     }
 
     // Null-terminated string
     pub fn write_cstring(&mut self, value: &str) -> Result<()> {
-        self.cursor.write_all(value.as_bytes()).context("Failed to write C string")?;
+        self.cursor
+            .write_all(value.as_bytes())
+            .context("Failed to write C string")?;
         self.write_u8(0)
     }
 
@@ -285,7 +326,9 @@ impl BinaryWriter {
     pub fn write_fixed_string(&mut self, value: &str, len: usize) -> Result<()> {
         let bytes = value.as_bytes();
         let write_len = bytes.len().min(len);
-        self.cursor.write_all(&bytes[..write_len]).context("Failed to write fixed string")?;
+        self.cursor
+            .write_all(&bytes[..write_len])
+            .context("Failed to write fixed string")?;
         for _ in write_len..len {
             self.write_u8(0)?;
         }
@@ -294,7 +337,9 @@ impl BinaryWriter {
 
     // Bytes
     pub fn write_bytes(&mut self, value: &[u8]) -> Result<()> {
-        self.cursor.write_all(value).context("Failed to write bytes")
+        self.cursor
+            .write_all(value)
+            .context("Failed to write bytes")
     }
 
     // Write array of serializable items
@@ -322,89 +367,142 @@ impl BinaryWriter {
         }
         Ok(())
     }
-
-    // Get cursor for direct writes
-    fn cursor(&mut self) -> &mut Cursor<&mut Vec<u8>> {
-        // This is a bit of a hack - we need access to the inner cursor
-        // In practice, we'd use a different design
-        unimplemented!("Use direct write methods")
-    }
 }
 
 // Serializable implementations for primitives
 impl Serializable for u8 {
-    fn read(reader: &mut BinaryReader) -> Result<Self> { reader.read_u8() }
-    fn write(&self, writer: &mut BinaryWriter) -> Result<()> { writer.write_u8(*self) }
+    fn read(reader: &mut BinaryReader) -> Result<Self> {
+        reader.read_u8()
+    }
+    fn write(&self, writer: &mut BinaryWriter) -> Result<()> {
+        writer.write_u8(*self)
+    }
 }
 
 impl Serializable for i8 {
-    fn read(reader: &mut BinaryReader) -> Result<Self> { reader.read_i8() }
-    fn write(&self, writer: &mut BinaryWriter) -> Result<()> { writer.write_i8(*self) }
+    fn read(reader: &mut BinaryReader) -> Result<Self> {
+        reader.read_i8()
+    }
+    fn write(&self, writer: &mut BinaryWriter) -> Result<()> {
+        writer.write_i8(*self)
+    }
 }
 
 impl Serializable for u16 {
-    fn read(reader: &mut BinaryReader) -> Result<Self> { reader.read_u16() }
-    fn write(&self, writer: &mut BinaryWriter) -> Result<()> { writer.write_u16(*self) }
+    fn read(reader: &mut BinaryReader) -> Result<Self> {
+        reader.read_u16()
+    }
+    fn write(&self, writer: &mut BinaryWriter) -> Result<()> {
+        writer.write_u16(*self)
+    }
 }
 
 impl Serializable for i16 {
-    fn read(reader: &mut BinaryReader) -> Result<Self> { reader.read_i16() }
-    fn write(&self, writer: &mut BinaryWriter) -> Result<()> { writer.write_i16(*self) }
+    fn read(reader: &mut BinaryReader) -> Result<Self> {
+        reader.read_i16()
+    }
+    fn write(&self, writer: &mut BinaryWriter) -> Result<()> {
+        writer.write_i16(*self)
+    }
 }
 
 impl Serializable for u32 {
-    fn read(reader: &mut BinaryReader) -> Result<Self> { reader.read_u32() }
-    fn write(&self, writer: &mut BinaryWriter) -> Result<()> { writer.write_u32(*self) }
+    fn read(reader: &mut BinaryReader) -> Result<Self> {
+        reader.read_u32()
+    }
+    fn write(&self, writer: &mut BinaryWriter) -> Result<()> {
+        writer.write_u32(*self)
+    }
 }
 
 impl Serializable for i32 {
-    fn read(reader: &mut BinaryReader) -> Result<Self> { reader.read_i32() }
-    fn write(&self, writer: &mut BinaryWriter) -> Result<()> { writer.write_i32(*self) }
+    fn read(reader: &mut BinaryReader) -> Result<Self> {
+        reader.read_i32()
+    }
+    fn write(&self, writer: &mut BinaryWriter) -> Result<()> {
+        writer.write_i32(*self)
+    }
 }
 
 impl Serializable for u64 {
-    fn read(reader: &mut BinaryReader) -> Result<Self> { reader.read_u64() }
-    fn write(&self, writer: &mut BinaryWriter) -> Result<()> { writer.write_u64(*self) }
+    fn read(reader: &mut BinaryReader) -> Result<Self> {
+        reader.read_u64()
+    }
+    fn write(&self, writer: &mut BinaryWriter) -> Result<()> {
+        writer.write_u64(*self)
+    }
 }
 
 impl Serializable for i64 {
-    fn read(reader: &mut BinaryReader) -> Result<Self> { reader.read_i64() }
-    fn write(&self, writer: &mut BinaryWriter) -> Result<()> { writer.write_i64(*self) }
+    fn read(reader: &mut BinaryReader) -> Result<Self> {
+        reader.read_i64()
+    }
+    fn write(&self, writer: &mut BinaryWriter) -> Result<()> {
+        writer.write_i64(*self)
+    }
 }
 
 impl Serializable for f32 {
-    fn read(reader: &mut BinaryReader) -> Result<Self> { reader.read_f32() }
-    fn write(&self, writer: &mut BinaryWriter) -> Result<()> { writer.write_f32(*self) }
+    fn read(reader: &mut BinaryReader) -> Result<Self> {
+        reader.read_f32()
+    }
+    fn write(&self, writer: &mut BinaryWriter) -> Result<()> {
+        writer.write_f32(*self)
+    }
 }
 
 impl Serializable for f64 {
-    fn read(reader: &mut BinaryReader) -> Result<Self> { reader.read_f64() }
-    fn write(&self, writer: &mut BinaryWriter) -> Result<()> { writer.write_f64(*self) }
+    fn read(reader: &mut BinaryReader) -> Result<Self> {
+        reader.read_f64()
+    }
+    fn write(&self, writer: &mut BinaryWriter) -> Result<()> {
+        writer.write_f64(*self)
+    }
 }
 
 impl Serializable for bool {
-    fn read(reader: &mut BinaryReader) -> Result<Self> { reader.read_bool() }
-    fn write(&self, writer: &mut BinaryWriter) -> Result<()> { writer.write_bool(*self) }
+    fn read(reader: &mut BinaryReader) -> Result<Self> {
+        reader.read_bool()
+    }
+    fn write(&self, writer: &mut BinaryWriter) -> Result<()> {
+        writer.write_bool(*self)
+    }
 }
 
 impl Serializable for Fixed16_16 {
-    fn read(reader: &mut BinaryReader) -> Result<Self> { reader.read_fixed() }
-    fn write(&self, writer: &mut BinaryWriter) -> Result<()> { writer.write_fixed(*self) }
+    fn read(reader: &mut BinaryReader) -> Result<Self> {
+        reader.read_fixed()
+    }
+    fn write(&self, writer: &mut BinaryWriter) -> Result<()> {
+        writer.write_fixed(*self)
+    }
 }
 
 impl Serializable for FloatBias {
-    fn read(reader: &mut BinaryReader) -> Result<Self> { reader.read_float_bias() }
-    fn write(&self, writer: &mut BinaryWriter) -> Result<()> { writer.write_float_bias(*self) }
+    fn read(reader: &mut BinaryReader) -> Result<Self> {
+        reader.read_float_bias()
+    }
+    fn write(&self, writer: &mut BinaryWriter) -> Result<()> {
+        writer.write_float_bias(*self)
+    }
 }
 
 impl Serializable for String {
-    fn read(reader: &mut BinaryReader) -> Result<Self> { reader.read_string() }
-    fn write(&self, writer: &mut BinaryWriter) -> Result<()> { writer.write_string(self) }
+    fn read(reader: &mut BinaryReader) -> Result<Self> {
+        reader.read_string()
+    }
+    fn write(&self, writer: &mut BinaryWriter) -> Result<()> {
+        writer.write_string(self)
+    }
 }
 
 impl<T: Serializable> Serializable for Vec<T> {
-    fn read(reader: &mut BinaryReader) -> Result<Self> { reader.read_vec() }
-    fn write(&self, writer: &mut BinaryWriter) -> Result<()> { writer.write_vec(self) }
+    fn read(reader: &mut BinaryReader) -> Result<Self> {
+        reader.read_vec()
+    }
+    fn write(&self, writer: &mut BinaryWriter) -> Result<()> {
+        writer.write_vec(self)
+    }
 }
 
 impl<T: Serializable, const N: usize> Serializable for [T; N] {
@@ -415,7 +513,9 @@ impl<T: Serializable, const N: usize> Serializable for [T; N] {
         }
         Ok(arr.try_into().unwrap_or_else(|_| unreachable!()))
     }
-    fn write(&self, writer: &mut BinaryWriter) -> Result<()> { writer.write_array(self) }
+    fn write(&self, writer: &mut BinaryWriter) -> Result<()> {
+        writer.write_array(self)
+    }
 }
 
 // Option<T> - write as u8 (0 = None, 1 = Some) + value
@@ -481,5 +581,50 @@ mod tests {
         let mut reader = BinaryReader::new(&data, 1);
         let read_vec: Vec<Option<u32>> = reader.read_vec().unwrap();
         assert_eq!(read_vec, vec![Some(42), None, Some(100)]);
+    }
+
+    /// Property-based round-trip tests (proptest).
+    #[cfg(test)]
+    mod property_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            #[test]
+            fn write_then_read_round_trips_mixed_values(
+                u in any::<u32>(),
+                i in any::<i16>(),
+                f in any::<f32>(),
+                bits in any::<i32>(),
+                opt in proptest::option::of(any::<u32>()),
+                bytes in proptest::collection::vec(any::<u8>(), 0..=64),
+            ) {
+                let mut writer = BinaryWriter::new(7);
+                writer.write_u32(u).unwrap();
+                writer.write_i16(i).unwrap();
+                writer.write_f32(f).unwrap();
+                writer.write_fixed(Fixed16_16::from_bits(bits)).unwrap();
+                let opt_val: Option<u32> = opt;
+                let byte_vec: Vec<u8> = bytes;
+                Serializable::write(&opt_val, &mut writer).unwrap();
+                Serializable::write(&byte_vec, &mut writer).unwrap();
+
+                let data = writer.into_bytes();
+                let mut reader = BinaryReader::new(&data, 7);
+                prop_assert_eq!(reader.version(), 7);
+                prop_assert_eq!(reader.read_u32().unwrap(), u);
+                prop_assert_eq!(reader.read_i16().unwrap(), i);
+                // f32 must survive bit-identical, NaN payloads included.
+                prop_assert_eq!(reader.read_f32().unwrap().to_bits(), f.to_bits());
+                prop_assert_eq!(reader.read_fixed().unwrap(), Fixed16_16::from_bits(bits));
+                let read_opt: Option<u32> = Serializable::read(&mut reader).unwrap();
+                prop_assert_eq!(read_opt, opt_val);
+                let read_vec: Vec<u8> = Serializable::read(&mut reader).unwrap();
+                prop_assert_eq!(read_vec, byte_vec);
+                prop_assert!(reader.is_eof(), "all written bytes must be consumed");
+            }
+        }
     }
 }

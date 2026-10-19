@@ -1,9 +1,8 @@
 //! Color types and palette management
 
 use crate::Fixed16_16;
-use core::ops::{Add, Sub, Mul, Div};
-use serde::{Serialize, Deserialize};
 use bytemuck::{Pod, Zeroable};
+use serde::{Deserialize, Serialize};
 
 // ============================================================================
 // 15-bit Color (RGB555) - Original C&C format
@@ -107,7 +106,9 @@ impl RGB565 {
 
 /// 24-bit RGB color (8 bits per channel)
 #[repr(C)]
-#[derive(Copy, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Pod, Zeroable, Debug)]
+#[derive(
+    Copy, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Pod, Zeroable, Debug,
+)]
 pub struct RGB888 {
     pub r: u8,
     pub g: u8,
@@ -153,7 +154,9 @@ impl RGB888 {
 
 /// 32-bit ARGB color (8 bits per channel)
 #[repr(transparent)]
-#[derive(Copy, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Pod, Zeroable, Debug)]
+#[derive(
+    Copy, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Pod, Zeroable, Debug,
+)]
 pub struct ARGB8888(pub u32);
 
 impl ARGB8888 {
@@ -260,8 +263,8 @@ impl PlayerRemap {
     /// Identity remap (no change)
     pub fn identity() -> Self {
         let mut map = [0u8; 256];
-        for i in 0..256 {
-            map[i] = i as u8;
+        for (i, entry) in map.iter_mut().enumerate() {
+            *entry = i as u8;
         }
         Self { map }
     }
@@ -272,12 +275,12 @@ impl PlayerRemap {
         // Player colors typically occupy palette indices 0-15 or similar ranges
         // This is a simplified version - actual implementation would use the game's remap tables
         let mut map = [0u8; 256];
-        for i in 0..256 {
-            map[i] = i as u8;
+        for (i, entry) in map.iter_mut().enumerate() {
+            *entry = i as u8;
         }
         // Remap the player color range (indices 0-15 typically)
-        for i in 0..16 {
-            map[i] = player.saturating_mul(16).saturating_add(i as u8);
+        for (i, entry) in map.iter_mut().enumerate().take(16) {
+            *entry = player.saturating_mul(16).saturating_add(i as u8);
         }
         Self { map }
     }

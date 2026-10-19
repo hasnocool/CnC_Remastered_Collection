@@ -7,8 +7,8 @@ pub mod house;
 pub mod map;
 pub mod mission;
 pub mod network;
-pub mod savegame;
 pub mod pathfind;
+pub mod savegame;
 pub mod td_rules;
 pub mod unit;
 pub mod weapon;
@@ -21,9 +21,7 @@ pub use map::{CellGrid, Map};
 pub use mission::{
     Action, Comparison, Condition, Mission, MissionOutcome, Objective, Script, Trigger,
 };
-pub use network::{
-    CommandQueue, LiveEvent, LiveSession, NetworkConfig, PeerHandshake, Replay,
-};
+pub use network::{CommandQueue, LiveEvent, LiveSession, NetworkConfig, PeerHandshake, Replay};
 pub use savegame::{GameSnapshot, SAVE_MAGIC, SAVE_VERSION};
 pub use td_rules::{ArmorType, StructureType, UnitType, WarheadType, WeaponType};
 pub use unit::{Aircraft, Infantry, Unit, Vehicle};

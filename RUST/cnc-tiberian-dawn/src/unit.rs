@@ -1,10 +1,10 @@
 //! Units for Tiberian Dawn
 
-use cnc_core::rules::RulesDatabase;
-use serde::{Deserialize, Serialize};
-use cnc_core::{ARGB8888, ClassId, Fixed16_16, Rect, Vec2, Vec2i};
 use cnc_asset::{AssetRegistry, SpriteAtlas};
+use cnc_core::rules::RulesDatabase;
+use cnc_core::{ClassId, Fixed16_16, Rect, Vec2, Vec2i, ARGB8888};
 use cnc_renderer::{Renderer, Sprite};
+use serde::{Deserialize, Serialize};
 
 use crate::td_rules::{unit_class_id, ArmorType, UnitStats, UnitType, TICKS_PER_SECOND};
 use crate::weapon::Weapon;
@@ -299,8 +299,7 @@ impl Unit {
                 } else {
                     [1.0, 1.0, 1.0, 1.0]
                 };
-                let y = self.position.y.to_f32()
-                    + if self.is_aircraft { -14.0 } else { 0.0 };
+                let y = self.position.y.to_f32() + if self.is_aircraft { -14.0 } else { 0.0 };
 
                 if self.is_aircraft {
                     renderer.draw_rect(
@@ -313,7 +312,7 @@ impl Unit {
                 }
 
                 let mut sprite = Sprite::new(
-                    1,
+                    0, // texture slot 0 = procedural unit atlas
                     Vec2::new(self.position.x, Fixed16_16::from_f32(y)),
                     Vec2::new(Fixed16_16::from_int(16), Fixed16_16::from_int(16)),
                 );
@@ -407,7 +406,9 @@ impl Unit {
 
     /// Resolve this unit's sprite bytes from the asset registry.
     pub fn asset(&self, assets: &AssetRegistry) -> Option<Vec<u8>> {
-        assets.get(&format!("units/{:?}.shp", self.class_id)).cloned()
+        assets
+            .get(&format!("units/{:?}.shp", self.class_id))
+            .cloned()
     }
 }
 
@@ -433,7 +434,10 @@ pub struct Vehicle {
 
 impl Vehicle {
     pub fn new(base: Unit) -> Self {
-        Self { base, turret_rotation: Fixed16_16::ZERO }
+        Self {
+            base,
+            turret_rotation: Fixed16_16::ZERO,
+        }
     }
 }
 
@@ -447,7 +451,11 @@ pub struct Aircraft {
 
 impl Aircraft {
     pub fn new(base: Unit) -> Self {
-        Self { base, altitude: Fixed16_16::ZERO, target_position: None }
+        Self {
+            base,
+            altitude: Fixed16_16::ZERO,
+            target_position: None,
+        }
     }
 }
 
@@ -476,7 +484,10 @@ mod tests {
     fn single_shooter_always_uses_normal_rearm() {
         let mut unit = Unit::new(UnitType::MediumTank, Vec2::zero(), 0);
         let weapon = unit.weapon.clone().expect("tank has a weapon");
-        assert!(unit.second_shot, "single shooters start on the normal delay");
+        assert!(
+            unit.second_shot,
+            "single shooters start on the normal delay"
+        );
         assert_eq!(unit.next_rearm_delay(&weapon), weapon.rate_of_fire);
         unit.note_shot_fired();
         assert!(unit.second_shot);
@@ -490,7 +501,9 @@ mod tests {
         // Aim north.
         unit.rotate_toward(-std::f32::consts::FRAC_PI_2, Fixed16_16::from_f32(0.5));
         assert!(unit.turret_facing < start);
-        assert!(facing_difference(unit.turret_facing, -std::f32::consts::FRAC_PI_2).abs()
-            < std::f32::consts::FRAC_PI_2);
+        assert!(
+            facing_difference(unit.turret_facing, -std::f32::consts::FRAC_PI_2).abs()
+                < std::f32::consts::FRAC_PI_2
+        );
     }
 }

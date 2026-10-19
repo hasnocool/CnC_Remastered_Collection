@@ -1,8 +1,11 @@
 //! GPU sprite batching for wgpu 22
 //!
 //! Instanced quad rendering: one instance per sprite, six vertices generated in
-//! the vertex shader. A sprite texture atlas is sampled when texture_id is
-//! non-zero, and a 256-entry palette texture can tint instances by index.
+//! the vertex shader. Instances carry a texture index that selects a layer of
+//! a 2D texture array: layer 0 is the procedural unit/building atlas
+//! (texture slot 0), layer 1 is the RTS tileset atlas
+//! (`TILESET_TEXTURE_ID`). [`TEXTURE_NONE`] draws the instance color without
+//! sampling. A 256-entry palette texture can tint instances by index.
 
 use anyhow::Result;
 use bytemuck::{Pod, Zeroable};
@@ -28,15 +31,22 @@ pub struct SpriteInstance {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct FrameUniform {
     view_proj: [[f32; 4]; 4],
-    atlas_size: [f32; 2],
-    _pad: [f32; 2],
+    /// Atlas pixel dimensions per texture slot (slot id = array index).
+    atlas_sizes: [[f32; 4]; MAX_ATLAS_TEXTURES],
 }
 
 /// Sentinel palette index meaning "use the instance color directly".
 pub const PALETTE_NONE: u32 = u32::MAX;
 
-/// texture_id value meaning "draw the instance color without sampling a texture".
-pub const TEXTURE_NONE: u32 = 0;
+/// texture_id value meaning "draw the instance color without sampling a
+/// texture". Any other value indexes the atlas texture array (layer 0 = unit
+/// atlas slot, layer 1 = tileset slot; see [`crate::renderer::TILESET_TEXTURE_ID`]).
+pub const TEXTURE_NONE: u32 = u32::MAX;
+
+/// Number of atlas texture slots carried in one batch. Slot 0 is the
+/// procedural unit/building atlas (`SpriteBatch::set_texture`), slot 1 is the
+/// RTS tileset atlas (see `TILESET_TEXTURE_ID` in [`crate::renderer`]).
+pub const MAX_ATLAS_TEXTURES: usize = 2;
 
 const INITIAL_INSTANCE_CAPACITY: usize = 1024;
 const COPY_ROW_ALIGNMENT: usize = 256;
@@ -44,7 +54,8 @@ const COPY_ROW_ALIGNMENT: usize = 256;
 const SHADER: &str = r#"
 struct FrameUniform {
     view_proj: mat4x4<f32>,
-    atlas_size: vec2<f32>,
+    // Atlas pixel dimensions per texture slot; slot id = array index.
+    atlas_sizes: array<vec4<f32>, 2>,
 };
 
 @group(0) @binding(0)
@@ -56,7 +67,7 @@ var palette_texture: texture_2d<f32>;
 var palette_sampler: sampler;
 
 @group(2) @binding(0)
-var sprite_texture: texture_2d<f32>;
+var sprite_textures: texture_2d_array<f32>;
 @group(2) @binding(1)
 var sprite_sampler: sampler;
 
@@ -102,7 +113,10 @@ fn vs_main(
     let world = instance.position + instance.size * 0.5 + rotated;
 
     let uv_pixels = mix(instance.uv_rect.xy, instance.uv_rect.zw, corner);
-    let atlas = max(frame.atlas_size, vec2<f32>(1.0, 1.0));
+    // Texture index = texture array layer. Flat instances (TEXTURE_NONE) are
+    // clamped to a valid layer here and skipped in the fragment shader.
+    let layer = min(instance.texture_id, 1u);
+    let atlas = max(frame.atlas_sizes[layer].xy, vec2<f32>(1.0, 1.0));
 
     var out: VertexOutput;
     out.clip_position = frame.view_proj * vec4<f32>(world, 0.0, 1.0);
@@ -122,8 +136,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     var tex = vec4<f32>(1.0, 1.0, 1.0, 1.0);
-    if (in.texture_id != 0u) {
-        tex = textureSample(sprite_texture, sprite_sampler, in.uv);
+    // 4294967295u is TEXTURE_NONE: draw the instance color without sampling.
+    // textureSampleLevel keeps sampling well-defined for the dynamic layer
+    // index; the atlases are mip-less so level 0 matches a plain sample.
+    if (in.texture_id != 4294967295u) {
+        tex = textureSampleLevel(sprite_textures, sprite_sampler, in.uv, i32(in.texture_id), 0.0);
     }
 
     return base * tex * in.color;
@@ -131,14 +148,46 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 "#;
 
 const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 8] = [
-    wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x2 },
-    wgpu::VertexAttribute { offset: 8, shader_location: 1, format: wgpu::VertexFormat::Float32x2 },
-    wgpu::VertexAttribute { offset: 16, shader_location: 2, format: wgpu::VertexFormat::Float32x4 },
-    wgpu::VertexAttribute { offset: 32, shader_location: 3, format: wgpu::VertexFormat::Float32x4 },
-    wgpu::VertexAttribute { offset: 48, shader_location: 4, format: wgpu::VertexFormat::Float32 },
-    wgpu::VertexAttribute { offset: 52, shader_location: 5, format: wgpu::VertexFormat::Uint32 },
-    wgpu::VertexAttribute { offset: 56, shader_location: 6, format: wgpu::VertexFormat::Uint32 },
-    wgpu::VertexAttribute { offset: 60, shader_location: 7, format: wgpu::VertexFormat::Sint32 },
+    wgpu::VertexAttribute {
+        offset: 0,
+        shader_location: 0,
+        format: wgpu::VertexFormat::Float32x2,
+    },
+    wgpu::VertexAttribute {
+        offset: 8,
+        shader_location: 1,
+        format: wgpu::VertexFormat::Float32x2,
+    },
+    wgpu::VertexAttribute {
+        offset: 16,
+        shader_location: 2,
+        format: wgpu::VertexFormat::Float32x4,
+    },
+    wgpu::VertexAttribute {
+        offset: 32,
+        shader_location: 3,
+        format: wgpu::VertexFormat::Float32x4,
+    },
+    wgpu::VertexAttribute {
+        offset: 48,
+        shader_location: 4,
+        format: wgpu::VertexFormat::Float32,
+    },
+    wgpu::VertexAttribute {
+        offset: 52,
+        shader_location: 5,
+        format: wgpu::VertexFormat::Uint32,
+    },
+    wgpu::VertexAttribute {
+        offset: 56,
+        shader_location: 6,
+        format: wgpu::VertexFormat::Uint32,
+    },
+    wgpu::VertexAttribute {
+        offset: 60,
+        shader_location: 7,
+        format: wgpu::VertexFormat::Sint32,
+    },
 ];
 
 fn create_instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
@@ -154,11 +203,18 @@ fn create_instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffe
 fn ortho_matrix(camera: &Camera) -> [[f32; 4]; 4] {
     let view_w = camera.viewport_width.max(1) as f32;
     let view_h = camera.viewport_height.max(1) as f32;
-    let zoom = if camera.zoom.to_f32() == 0.0 { 1.0 } else { camera.zoom.to_f32() };
+    let zoom = if camera.zoom.to_f32() == 0.0 {
+        1.0
+    } else {
+        camera.zoom.to_f32()
+    };
     let half_w = (view_w / (2.0 * zoom)).max(1.0e-6);
     let half_h = (view_h / (2.0 * zoom)).max(1.0e-6);
-    let cx = camera.position.x.to_f32();
-    let cy = camera.position.y.to_f32();
+    // Shake flows through effective_position; picking (screen_to_world) uses
+    // the raw position, so jitter is visual-only.
+    let effective = camera.effective_position();
+    let cx = effective.x.to_f32();
+    let cy = effective.y.to_f32();
 
     let sx = 1.0 / half_w;
     let sy = -1.0 / half_h;
@@ -172,6 +228,14 @@ fn ortho_matrix(camera: &Camera) -> [[f32; 4]; 4] {
     ]
 }
 
+/// Per-slot uploaded atlas kept so the texture array can be rebuilt when a
+/// later slot grows the shared layer dimensions.
+struct LayerData {
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
 /// Batches sprite instances and draws them in a single instanced draw call.
 pub struct SpriteBatch {
     pipeline: wgpu::RenderPipeline,
@@ -182,7 +246,11 @@ pub struct SpriteBatch {
     texture_layout: wgpu::BindGroupLayout,
     texture_sampler: wgpu::Sampler,
     texture_bind_group: wgpu::BindGroup,
-    atlas_size: [f32; 2],
+    /// Per-slot uploaded atlases. Slot 0 is the procedural unit atlas, slot 1
+    /// is the RTS tileset atlas (see `TILESET_TEXTURE_ID` in [`crate::renderer`]).
+    layers: [Option<LayerData>; MAX_ATLAS_TEXTURES],
+    /// Atlas pixel dimensions per slot, mirrored into the frame uniform.
+    atlas_sizes: [[f32; 4]; MAX_ATLAS_TEXTURES],
     camera: Camera,
     instance_buffer: wgpu::Buffer,
     instance_capacity: usize,
@@ -192,7 +260,11 @@ pub struct SpriteBatch {
 }
 
 impl SpriteBatch {
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Result<Self> {
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+    ) -> Result<Self> {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("sprite_shader"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -230,7 +302,11 @@ impl SpriteBatch {
 
         let palette_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("sprite_palette_texture"),
-            size: wgpu::Extent3d { width: 256, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 256,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -295,7 +371,7 @@ impl SpriteBatch {
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
                         multisampled: false,
                     },
                     count: None,
@@ -320,9 +396,16 @@ impl SpriteBatch {
             ..Default::default()
         });
 
-        let white_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("sprite_default_white_texture"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        // Texture array backing all atlas slots. Every layer starts white so
+        // sprites sampling a slot without an uploaded atlas (or TEXTURE_NONE,
+        // skipped in the shader) keep the old flat-color fallback behavior.
+        let atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("sprite_atlas_texture_array"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: MAX_ATLAS_TEXTURES as u32,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -330,29 +413,40 @@ impl SpriteBatch {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        queue.write_texture(
-            wgpu::ImageCopyTexture {
-                texture: &white_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &[255u8, 255, 255, 255],
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(4),
-                rows_per_image: Some(1),
-            },
-            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-        );
-        let white_view = white_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let white_row = vec![255u8; 4];
+        for slot in 0..MAX_ATLAS_TEXTURES {
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &atlas_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: slot as u32,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &white_row,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4),
+                    rows_per_image: Some(1),
+                },
+                wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("sprite_texture_bind_group"),
             layout: &texture_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&white_view),
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -424,7 +518,11 @@ impl SpriteBatch {
                 bytes_per_row: Some(256 * 4),
                 rows_per_image: Some(1),
             },
-            wgpu::Extent3d { width: 256, height: 1, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: 256,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
         );
 
         let mut batch = Self {
@@ -436,7 +534,8 @@ impl SpriteBatch {
             texture_layout,
             texture_sampler,
             texture_bind_group,
-            atlas_size: [1.0, 1.0],
+            layers: std::array::from_fn(|_| None),
+            atlas_sizes: [[1.0, 1.0, 0.0, 0.0]; MAX_ATLAS_TEXTURES],
             camera: Camera::default(),
             instance_buffer,
             instance_capacity,
@@ -466,10 +565,6 @@ impl SpriteBatch {
         self.pending.is_empty()
     }
 
-    pub fn atlas_size(&self) -> [f32; 2] {
-        self.atlas_size
-    }
-
     /// Upload a 256-entry palette used by instances with a palette index.
     pub fn set_palette(&mut self, queue: &wgpu::Queue, palette: &Palette) {
         let colors = palette.to_argb8888(255);
@@ -493,11 +588,25 @@ impl SpriteBatch {
                 bytes_per_row: Some(256 * 4),
                 rows_per_image: Some(1),
             },
-            wgpu::Extent3d { width: 256, height: 1, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: 256,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
         );
     }
 
-    /// Replace the sprite atlas sampled by instances whose texture_id is not 0.
+    /// True once an atlas has been uploaded into slot 0 via `set_texture`.
+    pub fn texture_ready(&self) -> bool {
+        self.layers[0].is_some()
+    }
+
+    /// True when `texture_id` has an uploaded atlas layer.
+    pub fn layer_ready(&self, texture_id: u32) -> bool {
+        (texture_id as usize) < MAX_ATLAS_TEXTURES && self.layers[texture_id as usize].is_some()
+    }
+
+    /// Replace the slot-0 sprite atlas (the procedural unit/building atlas).
     ///
     /// uv_rect values on SpriteInstance are expressed in atlas pixels.
     pub fn set_texture(
@@ -508,6 +617,30 @@ impl SpriteBatch {
         height: u32,
         rgba: &[u8],
     ) -> Result<()> {
+        self.set_texture_layer(device, queue, 0, width, height, rgba)
+    }
+
+    /// Upload an RGBA8 atlas into texture slot `texture_id`, replacing
+    /// whatever was bound there before.
+    ///
+    /// uv_rect values on SpriteInstance are expressed in atlas pixels of the
+    /// slot they sample. All uploaded slots share one texture array sized to
+    /// the largest atlas seen so far, so a later upload rebuilds it.
+    pub fn set_texture_layer(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture_id: u32,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<()> {
+        let slot = texture_id as usize;
+        if slot >= MAX_ATLAS_TEXTURES {
+            return Err(anyhow::anyhow!(
+                "atlas texture id {texture_id} unsupported: this batch carries {MAX_ATLAS_TEXTURES} slots"
+            ));
+        }
         if width == 0 || height == 0 {
             return Ok(());
         }
@@ -519,10 +652,41 @@ impl SpriteBatch {
                 rgba.len()
             ));
         }
+        self.layers[slot] = Some(LayerData {
+            rgba: rgba.to_vec(),
+            width,
+            height,
+        });
+        self.atlas_sizes[slot] = [width as f32, height as f32, 0.0, 0.0];
+        self.rebuild_atlas(device, queue);
+        Ok(())
+    }
+
+    /// Recreate the atlas texture array (sized to the largest uploaded
+    /// layer), white-filling any slot without real atlas data.
+    fn rebuild_atlas(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let width = self
+            .layers
+            .iter()
+            .filter_map(|layer| layer.as_ref())
+            .map(|layer| layer.width)
+            .max()
+            .unwrap_or(1);
+        let height = self
+            .layers
+            .iter()
+            .filter_map(|layer| layer.as_ref())
+            .map(|layer| layer.height)
+            .max()
+            .unwrap_or(1);
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("sprite_atlas_texture"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            label: Some("sprite_atlas_texture_array"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: MAX_ATLAS_TEXTURES as u32,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -531,33 +695,78 @@ impl SpriteBatch {
             view_formats: &[],
         });
 
-        let unpadded_row = width as usize * 4;
-        let aligned_row = ((unpadded_row + COPY_ROW_ALIGNMENT - 1) / COPY_ROW_ALIGNMENT) * COPY_ROW_ALIGNMENT;
-        let mut upload = vec![0u8; aligned_row * height as usize];
-        for row in 0..height as usize {
-            let src = row * unpadded_row;
-            let dst = row * aligned_row;
-            upload[dst..dst + unpadded_row].copy_from_slice(&rgba[src..src + unpadded_row]);
+        // White-fill layers without an uploaded atlas so sampling them keeps
+        // the flat-color fallback behavior.
+        let white = vec![255u8; width as usize * height as usize * 4];
+        for slot in 0..MAX_ATLAS_TEXTURES {
+            if self.layers[slot].is_some() {
+                continue;
+            }
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: slot as u32,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &white,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(height),
+                },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
         }
 
-        queue.write_texture(
-            wgpu::ImageCopyTexture {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &upload,
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(aligned_row as u32),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-        );
+        let unpadded_row = width as usize * 4;
+        let aligned_row = unpadded_row.div_ceil(COPY_ROW_ALIGNMENT) * COPY_ROW_ALIGNMENT;
+        for slot in 0..MAX_ATLAS_TEXTURES {
+            let Some(layer) = self.layers[slot].as_ref() else {
+                continue;
+            };
+            let mut upload = vec![0u8; aligned_row * height as usize];
+            for row in 0..layer.height as usize {
+                let src = row * layer.width as usize * 4;
+                let dst = row * aligned_row;
+                upload[dst..dst + layer.width as usize * 4]
+                    .copy_from_slice(&layer.rgba[src..src + layer.width as usize * 4]);
+            }
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: slot as u32,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &upload,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(aligned_row as u32),
+                    rows_per_image: Some(height),
+                },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        self.texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("sprite_texture_bind_group"),
             layout: &self.texture_layout,
             entries: &[
@@ -571,11 +780,7 @@ impl SpriteBatch {
                 },
             ],
         });
-
-        self.texture_bind_group = bind_group;
-        self.atlas_size = [width as f32, height as f32];
         self.write_uniform(queue);
-        Ok(())
     }
 
     pub fn set_camera(&mut self, queue: &wgpu::Queue, camera: &Camera) {
@@ -586,8 +791,7 @@ impl SpriteBatch {
     fn write_uniform(&mut self, queue: &wgpu::Queue) {
         let uniform = FrameUniform {
             view_proj: ortho_matrix(&self.camera),
-            atlas_size: self.atlas_size,
-            _pad: [0.0, 0.0],
+            atlas_sizes: self.atlas_sizes,
         };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
     }
@@ -609,7 +813,7 @@ impl SpriteBatch {
         clear: wgpu::Color,
         load: bool,
     ) {
-        self.pending.sort_by_key(|instance| instance.z_order);
+        sort_instances_for_draw(&mut self.pending);
         let count = self.pending.len();
 
         if count > self.instance_capacity {
@@ -618,7 +822,11 @@ impl SpriteBatch {
         }
 
         if count > 0 {
-            queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&self.pending));
+            queue.write_buffer(
+                &self.instance_buffer,
+                0,
+                bytemuck::cast_slice(&self.pending),
+            );
         }
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -653,18 +861,27 @@ impl SpriteBatch {
     }
 }
 
+/// Painter's-order sort: ascending `z_order`, stable so sprites sharing a
+/// z level keep their submission order.
+fn sort_instances_for_draw(instances: &mut [SpriteInstance]) {
+    instances.sort_by_key(|instance| instance.z_order);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn shader_is_valid_wgsl() {
-        let module = naga::front::wgsl::parse_str(SHADER).expect("sprite shader should parse as WGSL");
+        let module =
+            naga::front::wgsl::parse_str(SHADER).expect("sprite shader should parse as WGSL");
         let mut validator = naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),
         );
-        validator.validate(&module).expect("sprite shader should pass naga validation");
+        validator
+            .validate(&module)
+            .expect("sprite shader should pass naga validation");
     }
 
     #[test]
@@ -686,5 +903,38 @@ mod tests {
             .max()
             .unwrap();
         assert_eq!(max_end, 64);
+    }
+
+    #[test]
+    fn z_order_sort_is_stable_and_ascending() {
+        let mut batch = [
+            sprite_at_z(0, 1),
+            sprite_at_z(-3, 2),
+            sprite_at_z(0, 3),
+            sprite_at_z(9, 4),
+            sprite_at_z(0, 5),
+        ];
+        sort_instances_for_draw(&mut batch);
+        assert_eq!(batch[0].z_order, -3);
+        // Stable sort: sprites that share a z level keep submission order
+        // (asserted via their distinct rotation values used as tags).
+        assert_eq!(batch[1].rotation, 1.0);
+        assert_eq!(batch[2].rotation, 3.0);
+        assert_eq!(batch[3].rotation, 5.0);
+        assert_eq!(batch[3].z_order, 0);
+        assert_eq!(batch[4].z_order, 9);
+    }
+
+    fn sprite_at_z(z_order: i32, tag: u32) -> SpriteInstance {
+        SpriteInstance {
+            position: [0.0, 0.0],
+            size: [1.0, 1.0],
+            uv_rect: [0.0, 0.0, 1.0, 1.0],
+            color: [1.0, 1.0, 1.0, 1.0],
+            rotation: tag as f32,
+            palette_index: PALETTE_NONE,
+            texture_id: TEXTURE_NONE,
+            z_order,
+        }
     }
 }

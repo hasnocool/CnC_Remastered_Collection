@@ -86,11 +86,7 @@ pub struct Submarine {
 
 impl Submarine {
     pub fn new(position: Vec2) -> Self {
-        let mut base = Ship::new(
-            ClassId::ShipE4,
-            position,
-            Fixed16_16::from_int(300),
-        );
+        let mut base = Ship::new(ClassId::ShipE4, position, Fixed16_16::from_int(300));
         base.speed = Fixed16_16::from_f32(SUB_SPEED_PX_PER_SEC);
         Self {
             base,

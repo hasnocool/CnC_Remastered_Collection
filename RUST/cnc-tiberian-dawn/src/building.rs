@@ -1,9 +1,9 @@
 //! Buildings for Tiberian Dawn
 
-use cnc_core::{ARGB8888, ClassId, Fixed16_16, Rect, Vec2};
-use serde::{Deserialize, Serialize};
 use cnc_asset::{AssetRegistry, SpriteAtlas};
+use cnc_core::{ClassId, Fixed16_16, Rect, Vec2, ARGB8888};
 use cnc_renderer::{Renderer, Sprite};
+use serde::{Deserialize, Serialize};
 
 use crate::td_rules::{ArmorType, StructureType};
 
@@ -90,7 +90,7 @@ impl Building {
                     [0.6, 0.6, 0.6, 1.0]
                 };
                 let mut sprite = Sprite::new(
-                    1,
+                    0, // texture slot 0 = procedural unit atlas
                     self.position,
                     Vec2::new(Fixed16_16::from_int(32), Fixed16_16::from_int(32)),
                 );
@@ -127,7 +127,9 @@ impl Building {
 
     /// Resolve this building's sprite bytes from the asset registry.
     pub fn asset(&self, assets: &AssetRegistry) -> Option<Vec<u8>> {
-        assets.get(&format!("buildings/{:?}.shp", self.class_id)).cloned()
+        assets
+            .get(&format!("buildings/{:?}.shp", self.class_id))
+            .cloned()
     }
 }
 
@@ -140,7 +142,10 @@ pub struct Factory {
 
 impl Factory {
     pub fn new(base: Building) -> Self {
-        Self { base, production_queue: Vec::new() }
+        Self {
+            base,
+            production_queue: Vec::new(),
+        }
     }
 }
 
@@ -167,6 +172,10 @@ pub struct Refinery {
 
 impl Refinery {
     pub fn new(base: Building, capacity: i32) -> Self {
-        Self { base, stored_credits: 0, capacity }
+        Self {
+            base,
+            stored_credits: 0,
+            capacity,
+        }
     }
 }

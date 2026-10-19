@@ -1,11 +1,11 @@
 //! Float bias arithmetic (matching Tiberian Dawn's float bias system)
 
-use core::ops::{Add, Sub, Mul, Div, Neg, AddAssign, SubAssign, MulAssign, DivAssign};
+use bytemuck::{Pod, Zeroable};
 use core::cmp::Ordering;
 use core::fmt;
-use num_traits::{Zero, One};
-use serde::{Serialize, Deserialize};
-use bytemuck::{Pod, Zeroable};
+use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+use num_traits::{One, Zero};
+use serde::{Deserialize, Serialize};
 
 /// Tiberian Dawn's float bias system
 /// Original uses float with a bias value for deterministic comparison
@@ -147,13 +147,21 @@ impl FloatBias {
     /// Min with bias
     #[inline]
     pub fn min(self, other: Self) -> Self {
-        if self.approx_lt(other) { self } else { other }
+        if self.approx_lt(other) {
+            self
+        } else {
+            other
+        }
     }
 
     /// Max with bias
     #[inline]
     pub fn max(self, other: Self) -> Self {
-        if self.approx_gt(other) { self } else { other }
+        if self.approx_gt(other) {
+            self
+        } else {
+            other
+        }
     }
 
     /// Clamp with bias
@@ -347,5 +355,75 @@ mod tests {
         let zero = FloatBias::ZERO;
         assert!(zero.sin().approx_eq(FloatBias::ZERO));
         assert!(zero.cos().approx_eq(FloatBias::ONE));
+    }
+
+    /// Property-based tests (proptest).
+    ///
+    /// Finite `f32` values only: NaN breaks reflexivity of `approx_eq`
+    /// (`NaN - NaN = NaN`, and `NaN.abs() <= BIAS` is false), which is
+    /// inherent to float-bias semantics and matches plain f32 behavior.
+    #[cfg(test)]
+    mod property_tests {
+        use super::*;
+        use core::cmp::Ordering;
+        use proptest::prelude::*;
+
+        fn finite_f32() -> impl Strategy<Value = f32> {
+            proptest::num::f32::ANY.prop_filter("finite", |v| v.is_finite())
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(128))]
+
+            #[test]
+            fn approx_eq_is_reflexive_and_symmetric_for_finite_values(
+                a in finite_f32(),
+                b in finite_f32(),
+            ) {
+                let fa = FloatBias::from_f32(a);
+                let fb = FloatBias::from_f32(b);
+                prop_assert!(fa.approx_eq(fa), "reflexivity");
+                prop_assert_eq!(fa.approx_eq(fb), fb.approx_eq(fa), "symmetry");
+            }
+
+            #[test]
+            fn approx_eq_matches_the_bias_band(a in finite_f32(), b in finite_f32()) {
+                let fa = FloatBias::from_f32(a);
+                let fb = FloatBias::from_f32(b);
+                prop_assert_eq!(fa.approx_eq(fb), (a - b).abs() <= FloatBias::BIAS);
+            }
+
+            #[test]
+            fn approx_lt_and_approx_gt_are_mutually_exclusive(a in any::<f32>(), b in any::<f32>()) {
+                let fa = FloatBias::from_f32(a);
+                let fb = FloatBias::from_f32(b);
+                // Holds even for NaN/infinity, where both are false.
+                prop_assert!(!(fa.approx_lt(fb) && fa.approx_gt(fb)));
+            }
+
+            #[test]
+            fn comparisons_agree_with_f32_ordering_beyond_twice_bias(
+                a in finite_f32(),
+                b in finite_f32(),
+            ) {
+                let fa = FloatBias::from_f32(a);
+                let fb = FloatBias::from_f32(b);
+                if (a - b).abs() > 2.0 * FloatBias::BIAS {
+                    prop_assert_eq!(fa.approx_lt(fb), a < b);
+                    prop_assert_eq!(fa.approx_gt(fb), a > b);
+                    prop_assert_eq!(fa.approx_eq(fb), false);
+                    let expected = if a < b { Ordering::Less } else { Ordering::Greater };
+                    prop_assert_eq!(fa.partial_cmp(&fb), Some(expected));
+                }
+            }
+
+            #[test]
+            fn approx_le_and_ge_extend_lt_gt_and_eq(a in finite_f32(), b in finite_f32()) {
+                let fa = FloatBias::from_f32(a);
+                let fb = FloatBias::from_f32(b);
+                prop_assert_eq!(fa.approx_le(fb), fa.approx_lt(fb) || fa.approx_eq(fb));
+                prop_assert_eq!(fa.approx_ge(fb), fa.approx_gt(fb) || fa.approx_eq(fb));
+            }
+        }
     }
 }

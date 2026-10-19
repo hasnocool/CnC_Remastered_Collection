@@ -53,6 +53,9 @@ pub struct MapModel {
     pub theater: String,
     pub terrain: Vec<u8>,
     pub overlay: Vec<u8>,
+    /// Normalised elevation per cell (0-255). Zero everywhere means "flat /
+    /// unpainted"; the renderer draws cliffs from adjacent differences.
+    pub elevation: Vec<u8>,
     pub objects: HashMap<u32, MapObject>,
     pub triggers: Vec<Trigger>,
     /// Authored AI commanders, stored alongside the scenario.
@@ -74,6 +77,7 @@ impl MapModel {
             theater: "Temperate".to_string(),
             terrain: vec![0; (width * height) as usize],
             overlay: vec![0; (width * height) as usize],
+            elevation: vec![0; (width * height) as usize],
             objects: HashMap::new(),
             triggers: Vec::new(),
             agents: Vec::new(),
@@ -189,7 +193,10 @@ impl MapModel {
         }
         for start in &self.player_starts {
             if !self.in_bounds(*start) {
-                issues.push(format!("player start ({}, {}) is out of bounds", start.x, start.y));
+                issues.push(format!(
+                    "player start ({}, {}) is out of bounds",
+                    start.x, start.y
+                ));
             }
         }
         for object in self.objects.values() {
@@ -201,6 +208,9 @@ impl MapModel {
             }
         }
         let mut seen = std::collections::BTreeSet::new();
+        if self.elevation.len() != (self.width * self.height) as usize {
+            issues.push("elevation grid does not match the map size".to_string());
+        }
         for trigger in &self.triggers {
             if !seen.insert(trigger.id) {
                 issues.push(format!("duplicate trigger id {}", trigger.id));
@@ -219,7 +229,8 @@ impl MapModel {
             if !agent.owner.trim().is_empty() {
                 match parse_class_id(&agent.owner) {
                     Some(class_id) if class_id.is_house() => {
-                        if let Some(other) = owners.insert(agent.owner.clone(), agent.name.clone()) {
+                        if let Some(other) = owners.insert(agent.owner.clone(), agent.name.clone())
+                        {
                             issues.push(format!(
                                 "agents {} and {} share owner {}",
                                 other, agent.name, agent.owner
@@ -281,6 +292,17 @@ impl MapModel {
                 .collect();
             out.push_str(&format!("{}={}\n", y, row.join(" ")));
         }
+        // Only persisted when painted, so exports of unpainted maps stay
+        // byte-compatible with older releases.
+        if self.elevation.iter().any(|level| *level != 0) {
+            out.push_str("[Elevation]\n");
+            for y in 0..self.height {
+                let row: Vec<String> = (0..self.width)
+                    .map(|x| self.elevation[(y * self.width + x) as usize].to_string())
+                    .collect();
+                out.push_str(&format!("{}={}\n", y, row.join(" ")));
+            }
+        }
         out.push_str("[Objects]\n");
         let mut objects: Vec<&MapObject> = self.objects.values().collect();
         objects.sort_by_key(|object| object.id);
@@ -326,6 +348,12 @@ impl MapModel {
 
     /// Parse a scenario produced by [`Self::to_ini`].
     pub fn from_ini(input: &str) -> anyhow::Result<Self> {
+        /// Which grid a scenario section fills.
+        enum Target {
+            Terrain,
+            Overlay,
+            Elevation,
+        }
         let ini = IniFile::parse(input)?;
         let map = ini.sections.get("Map");
         let width = map
@@ -351,9 +379,7 @@ impl MapModel {
             let mut entries: Vec<(u32, String)> = objectives
                 .values
                 .iter()
-                .filter_map(|(key, value)| {
-                    Some((key.parse::<u32>().ok()?, value_text(value)?))
-                })
+                .filter_map(|(key, value)| Some((key.parse::<u32>().ok()?, value_text(value)?)))
                 .collect();
             entries.sort_by_key(|(id, _)| *id);
             model.objectives = entries.into_iter().map(|(_, text)| text).collect();
@@ -367,10 +393,16 @@ impl MapModel {
                 }
             }
         }
-        for (section_name, target) in [("Terrain", true), ("Overlay", false)] {
+        for (section_name, target) in [
+            ("Terrain", Target::Terrain),
+            ("Overlay", Target::Overlay),
+            ("Elevation", Target::Elevation),
+        ] {
             if let Some(section) = ini.sections.get(section_name) {
                 for (row_key, value) in &section.values {
-                    let Ok(y) = row_key.parse::<u32>() else { continue };
+                    let Ok(y) = row_key.parse::<u32>() else {
+                        continue;
+                    };
                     let Some(text) = value_text(value) else {
                         continue;
                     };
@@ -384,10 +416,16 @@ impl MapModel {
                             continue;
                         }
                         let index = (y * model.width + x as u32) as usize;
-                        if target {
-                            model.terrain[index] = cell.clamp(0, 255) as u8;
-                        } else {
-                            model.overlay[index] = cell.clamp(0, 255) as u8;
+                        match target {
+                            Target::Terrain => {
+                                model.terrain[index] = cell.clamp(0, 255) as u8;
+                            }
+                            Target::Overlay => {
+                                model.overlay[index] = cell.clamp(0, 255) as u8;
+                            }
+                            Target::Elevation => {
+                                model.elevation[index] = cell.clamp(0, 255) as u8;
+                            }
                         }
                     }
                 }
@@ -396,16 +434,18 @@ impl MapModel {
         if let Some(section) = ini.sections.get("Objects") {
             for (key, value) in &section.values {
                 let Ok(id) = key.parse::<u32>() else { continue };
-                let Some(text) = value_text(value) else { continue };
+                let Some(text) = value_text(value) else {
+                    continue;
+                };
                 let parts: Vec<&str> = text.split(',').map(str::trim).collect();
                 if parts.len() < 3 {
                     continue;
                 }
-                let Some(class_id) = parse_class_id(parts[0]) else { continue };
-                let position = Vec2i::new(
-                    parts[1].parse().unwrap_or(0),
-                    parts[2].parse().unwrap_or(0),
-                );
+                let Some(class_id) = parse_class_id(parts[0]) else {
+                    continue;
+                };
+                let position =
+                    Vec2i::new(parts[1].parse().unwrap_or(0), parts[2].parse().unwrap_or(0));
                 let owner = parts
                     .get(3)
                     .filter(|token| !token.eq_ignore_ascii_case("none"))
@@ -452,7 +492,9 @@ impl MapModel {
         if let Some(section) = ini.sections.get("Triggers") {
             for (key, value) in &section.values {
                 let Ok(id) = key.parse::<u32>() else { continue };
-                let Some(text) = value_text(value) else { continue };
+                let Some(text) = value_text(value) else {
+                    continue;
+                };
                 let parts: Vec<&str> = text.split('|').map(str::trim).collect();
                 if parts.len() < 3 {
                     continue;
@@ -462,7 +504,9 @@ impl MapModel {
                     name: parts[0].to_string(),
                     condition: parts[1].to_string(),
                     action: parts[2].to_string(),
-                    group: parts.get(3).map_or(String::new(), |group| group.to_string()),
+                    group: parts
+                        .get(3)
+                        .map_or(String::new(), |group| group.to_string()),
                 });
             }
         }
@@ -500,7 +544,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(text: &str) -> Option<Vec<u8>> {
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return None;
     }
     let bytes = text.as_bytes();
@@ -513,7 +557,7 @@ fn hex_decode(text: &str) -> Option<Vec<u8>> {
             _ => None,
         }
     };
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0 {
         out.push((nibble(pair[0])? << 4) | nibble(pair[1])?);
     }
     Some(out)
@@ -590,6 +634,7 @@ pub(crate) fn parse_class_id(text: &str) -> Option<ClassId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::generator::{OverlayType, TerrainType};
 
     #[test]
     fn inserts_objects_with_unique_ids_and_finds_them() {
@@ -608,7 +653,10 @@ mod tests {
         });
         assert_ne!(first, second);
         assert_eq!(model.object_at(Vec2i::new(2, 3)).unwrap().id, first);
-        assert_eq!(model.remove_object(second).unwrap().class_id, ClassId::VehicleE1);
+        assert_eq!(
+            model.remove_object(second).unwrap().class_id,
+            ClassId::VehicleE1
+        );
         assert_eq!(model.objects.len(), 1);
     }
 
@@ -652,12 +700,61 @@ mod tests {
         assert_eq!(loaded.overlay[1], 3);
         assert_eq!(loaded.player_starts, vec![Vec2i::new(1, 2)]);
         assert_eq!(loaded.objects.len(), 1);
-        assert_eq!(
-            loaded.objects[&3].class_id,
-            ClassId::ConstructionYard
-        );
+        assert_eq!(loaded.objects[&3].class_id, ClassId::ConstructionYard);
         assert_eq!(loaded.triggers[0].name, "win");
         assert_eq!(loaded.triggers[0].group, "Victory");
+    }
+
+    #[test]
+    fn extension_sections_roundtrip_terrain_overlay_and_elevation() {
+        let mut model = MapModel::new(4, 4);
+        model.player_starts.push(Vec2i::new(0, 0));
+        for (index, (terrain, overlay)) in [
+            (TerrainType::Mud.id(), OverlayType::Road.id()),
+            (TerrainType::Crater.id(), OverlayType::Wall.id()),
+            (TerrainType::Scorched.id(), 0),
+            (TerrainType::Swamp.id(), 0),
+            (TerrainType::Ice.id(), 0),
+            (TerrainType::Concrete.id(), 0),
+            (TerrainType::ForestFloor.id(), 0),
+            (TerrainType::JungleFloor.id(), 0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            model.terrain[index] = terrain;
+            model.overlay[index] = overlay;
+        }
+        for index in 0..model.elevation.len() {
+            model.elevation[index] = ((index * 13) % 256) as u8;
+        }
+
+        let text = model.to_ini();
+        assert!(
+            text.contains("[Elevation]"),
+            "painted elevation is exported"
+        );
+        let loaded = MapModel::from_ini(&text).unwrap();
+        assert_eq!(loaded.terrain, model.terrain);
+        assert_eq!(loaded.overlay, model.overlay);
+        assert_eq!(loaded.elevation, model.elevation);
+        assert!(
+            loaded.validate().is_empty(),
+            "extended ids keep the map valid: {:?}",
+            loaded.validate()
+        );
+    }
+
+    #[test]
+    fn scenarios_without_optional_sections_load_flat() {
+        // A map exported by an older build: no [Elevation] at all.
+        let text = "[Map]\nWidth=2\nHeight=2\n[PlayerStarts]\n0=(0,0)\n\
+                    [Terrain]\n0=0 0\n1=0 0\n[Overlay]\n0=0 0\n1=0 0\n";
+        let loaded = MapModel::from_ini(text).unwrap();
+        assert!(loaded.elevation.iter().all(|level| *level == 0));
+        assert!(loaded.validate().is_empty());
+        // Re-exporting drops the empty section again.
+        assert!(!loaded.to_ini().contains("[Elevation]"));
     }
 
     #[test]
@@ -675,7 +772,10 @@ mod tests {
         });
         let issues = model.validate();
         assert!(issues.iter().any(|issue| issue.contains("out of bounds")));
-        assert_eq!(issues.iter().filter(|i| i.contains("player start")).count(), 0);
+        assert_eq!(
+            issues.iter().filter(|i| i.contains("player start")).count(),
+            0
+        );
     }
 
     #[test]
@@ -700,7 +800,7 @@ mod tests {
         assert_eq!(loaded_agent.owner, "HouseNod");
         assert_eq!(loaded_agent.doctrine, "Aggressive");
         assert_eq!(loaded_agent.script, script);
-        assert_eq!(loaded.summary().contains("1 agents"), true);
+        assert!(loaded.summary().contains("1 agents"));
     }
 
     #[test]
@@ -724,8 +824,8 @@ mod tests {
 
     #[test]
     fn ra_campaign_metadata_survives_editor_roundtrip() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../maps/ra_campaign/01.ini");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../maps/ra_campaign/01.ini");
         let text = std::fs::read_to_string(&path).unwrap();
         let model = MapModel::from_ini(&text).unwrap();
         assert_eq!(model.name, "01 - Holding the Line");

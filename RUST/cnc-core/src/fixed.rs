@@ -1,11 +1,11 @@
 //! 16.16 Fixed-point arithmetic (matching Westwood's `fixed` type)
 
-use core::ops::{Add, Sub, Mul, Div, Neg, AddAssign, SubAssign, MulAssign, DivAssign, Shr, Rem};
+use bytemuck::{Pod, Zeroable};
 use core::cmp::Ordering;
 use core::fmt;
-use num_traits::{Zero, One};
-use serde::{Serialize, Deserialize};
-use bytemuck::{Pod, Zeroable};
+use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Rem, Shr, Sub, SubAssign};
+use num_traits::{One, Zero};
+use serde::{Deserialize, Serialize};
 
 /// 16.16 fixed-point number (matches original C&C `fixed` type exactly)
 /// Range: -32768.0 to 32767.99998474121
@@ -187,9 +187,9 @@ impl Fixed16_16 {
         // Reduce to [-PI, PI]
         let mut x = self % Self::TAU;
         if x > Self::PI {
-            x = x - Self::TAU;
+            x -= Self::TAU;
         } else if x < -Self::PI {
-            x = x + Self::TAU;
+            x += Self::TAU;
         }
 
         // Taylor series: x - x^3/6 + x^5/120 - x^7/5040
@@ -198,8 +198,7 @@ impl Fixed16_16 {
         let x5 = x3.wrapping_mul(x2);
         let x7 = x5.wrapping_mul(x2);
 
-        x
-            .wrapping_sub(x3 / Self::from_int(6))
+        x.wrapping_sub(x3 / Self::from_int(6))
             .wrapping_add(x5 / Self::from_int(120))
             .wrapping_sub(x7 / Self::from_int(5040))
     }
@@ -208,9 +207,9 @@ impl Fixed16_16 {
     pub fn cos(self) -> Self {
         let mut x = self % Self::TAU;
         if x > Self::PI {
-            x = x - Self::TAU;
+            x -= Self::TAU;
         } else if x < -Self::PI {
-            x = x + Self::TAU;
+            x += Self::TAU;
         }
 
         // Taylor series: 1 - x^2/2! + x^4/4! - x^6/6! + x^8/8!
@@ -232,14 +231,18 @@ impl Fixed16_16 {
             if y == Self::ZERO {
                 return Self::ZERO;
             }
-            return if y > Self::ZERO { Self::FRAC_PI_2 } else { -Self::FRAC_PI_2 };
+            return if y > Self::ZERO {
+                Self::FRAC_PI_2
+            } else {
+                -Self::FRAC_PI_2
+            };
         }
         let mut angle = (y / x).atan();
         if x < Self::ZERO {
             if y >= Self::ZERO {
-                angle = angle + Self::PI;
+                angle += Self::PI;
             } else {
-                angle = angle - Self::PI;
+                angle -= Self::PI;
             }
         }
         angle
@@ -498,5 +501,114 @@ mod tests {
         // Wrapping addition should overflow without panicking
         let result = max + one;
         assert_eq!(result.0, i32::MAX.wrapping_add(one.0));
+    }
+
+    /// Property-based tests (proptest).
+    ///
+    /// Note: `neg`/`abs` use `-self.0`/`self.0.abs()`, which overflow-panic on
+    /// the `i32::MIN` bit pattern in debug builds — those cases are excluded.
+    #[cfg(test)]
+    mod property_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(256))]
+
+            #[test]
+            fn wrapping_add_sub_act_on_i32_bits(a in any::<i32>(), b in any::<i32>()) {
+                let fa = Fixed16_16::from_bits(a);
+                let fb = Fixed16_16::from_bits(b);
+                prop_assert_eq!(fa.wrapping_add(fb).to_bits(), a.wrapping_add(b));
+                prop_assert_eq!(fa.wrapping_sub(fb).to_bits(), a.wrapping_sub(b));
+                // The `+`/`-` operators delegate to the wrapping variants.
+                prop_assert_eq!((fa + fb).to_bits(), a.wrapping_add(b));
+                prop_assert_eq!((fa - fb).to_bits(), a.wrapping_sub(b));
+            }
+
+            #[test]
+            fn from_int_round_trips_for_small_integers(v in -32767i32..=32767) {
+                let f = Fixed16_16::from_int(v);
+                prop_assert_eq!(f.to_bits(), v * Fixed16_16::SCALE);
+                prop_assert_eq!(f.int(), v);
+            }
+
+            #[test]
+            fn neg_is_involutive(a in any::<i32>()) {
+                prop_assume!(a != i32::MIN);
+                let f = Fixed16_16::from_bits(a);
+                prop_assert_eq!((-(-f)).to_bits(), a);
+            }
+
+            #[test]
+            fn abs_is_nonnegative_and_idempotent(a in any::<i32>()) {
+                prop_assume!(a != i32::MIN);
+                let f = Fixed16_16::from_bits(a);
+                let abs = f.abs();
+                prop_assert!(abs.to_bits() >= 0);
+                prop_assert_eq!(abs.abs().to_bits(), abs.to_bits());
+            }
+
+            #[test]
+            fn ordering_matches_i32_ordering(a in any::<i32>(), b in any::<i32>()) {
+                let fa = Fixed16_16::from_bits(a);
+                let fb = Fixed16_16::from_bits(b);
+                prop_assert_eq!(fa < fb, a < b);
+                prop_assert_eq!(fa.cmp(&fb), a.cmp(&b));
+            }
+
+            #[test]
+            fn mul_matches_i64_shift_for_nonoverflowing_inputs(
+                a in -0x40_0000i32..0x40_0000,
+                b in -0x40_0000i32..0x40_0000,
+            ) {
+                // |a|,|b| < 2^22 so the product < 2^44 and `>> 16` always fits
+                // in i32: the inputs are non-overflowing by construction.
+                let expected = (a as i64 * b as i64) >> 16;
+                let fa = Fixed16_16::from_bits(a);
+                let fb = Fixed16_16::from_bits(b);
+                prop_assert_eq!(fa.wrapping_mul(fb).to_bits(), expected as i32);
+                prop_assert_eq!((fa * fb).to_bits(), expected as i32);
+            }
+
+            #[test]
+            fn wrapping_div_by_zero_is_zero(a in any::<i32>()) {
+                let fa = Fixed16_16::from_bits(a);
+                prop_assert_eq!(fa.wrapping_div(Fixed16_16::ZERO), Fixed16_16::ZERO);
+                prop_assert_eq!((fa / Fixed16_16::ZERO).to_bits(), 0);
+            }
+
+            #[test]
+            fn saturating_div_by_zero_saturates(a in any::<i32>()) {
+                let fa = Fixed16_16::from_bits(a);
+                let expected = if a >= 0 { Fixed16_16::MAX } else { Fixed16_16::MIN };
+                prop_assert_eq!(fa.saturating_div(Fixed16_16::ZERO), expected);
+            }
+
+            #[test]
+            fn div_matches_i64_formula_for_nonoverflowing_inputs(a in any::<i32>(), b in any::<i32>()) {
+                prop_assume!(b != 0);
+                let expected = ((a as i64) << 16) / (b as i64);
+                prop_assume!(expected >= i64::from(i32::MIN) && expected <= i64::from(i32::MAX));
+                let fa = Fixed16_16::from_bits(a);
+                let fb = Fixed16_16::from_bits(b);
+                prop_assert_eq!(fa.wrapping_div(fb).to_bits(), expected as i32);
+            }
+
+            #[test]
+            fn sqrt_squares_back_within_tolerance(v in 0.0f32..=1000.0) {
+                let x = Fixed16_16::from_f32(v);
+                let root = x.sqrt();
+                prop_assert!(root >= Fixed16_16::ZERO);
+                // `sqrt` is a floor sqrt, so `root^2 <= x` up to rounding of
+                // `from_f32`; the worst-case gap for |x| <= 1000 is ~0.001.
+                prop_assert!(
+                    (x - root.wrapping_mul(root)).abs() <= Fixed16_16::from_f32(0.01),
+                    "sqrt({v:?})^2 = {:?}, expected near {:?}",
+                    root.wrapping_mul(root),
+                    x
+                );
+            }
+        }
     }
 }

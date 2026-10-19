@@ -1,10 +1,10 @@
 //! Object pool for hot allocations (like Westwood's object pools)
 
-use std::alloc::{Layout, alloc, dealloc};
+use parking_lot::Mutex;
+use std::alloc::{alloc, dealloc, Layout};
+use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::marker::PhantomData;
-use parking_lot::Mutex;
 use thiserror::Error;
 
 /// Error type for object pool allocation failures
@@ -42,8 +42,6 @@ pub struct ObjectPool<T> {
 struct Block {
     ptr: NonNull<u8>,
     layout: Layout,
-    /// Bitmap of free slots (1 = free, 0 = used)
-    free_bitmap: Vec<u64>,
 }
 
 // The block only owns a raw allocation; ownership moves with the pool.
@@ -74,12 +72,16 @@ impl<T> ObjectPool<T> {
     /// Allocate a new object (uninitialized)
     pub fn allocate(&self) -> Result<*mut T, PoolError> {
         // Try to get from free list
-        let mut head = self.free_head.load(Ordering::Acquire);
+        let head = self.free_head.load(Ordering::Acquire);
         loop {
             if head != usize::MAX {
                 // Try to pop from free list
                 let next = unsafe { *(head as *mut usize) };
-                if self.free_head.compare_exchange_weak(head, next, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                if self
+                    .free_head
+                    .compare_exchange_weak(head, next, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
                     self.total_allocated.fetch_add(1, Ordering::Relaxed);
                     return Ok(head as *mut T);
                 }
@@ -90,11 +92,15 @@ impl<T> ObjectPool<T> {
 
         // Free list empty, allocate new block
         self.allocate_block()?;
-        
+
         // Retry
-        let mut head = self.free_head.load(Ordering::Acquire);
+        let head = self.free_head.load(Ordering::Acquire);
         let next = unsafe { *(head as *mut usize) };
-        if self.free_head.compare_exchange(head, next, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+        if self
+            .free_head
+            .compare_exchange(head, next, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
             self.total_allocated.fetch_add(1, Ordering::Relaxed);
             return Ok(head as *mut T);
         }
@@ -106,53 +112,72 @@ impl<T> ObjectPool<T> {
     /// Allocate and initialize with value
     pub fn allocate_init(&self, value: T) -> Result<*mut T, PoolError> {
         let ptr = self.allocate()?;
-        unsafe { ptr.write(value); }
+        unsafe {
+            ptr.write(value);
+        }
         Ok(ptr)
     }
 
     /// Deallocate an object
     pub fn deallocate(&self, ptr: *mut T) {
-        if ptr.is_null() { return; }
+        if ptr.is_null() {
+            return;
+        }
 
         // Add to free list
-        let mut head = self.free_head.load(Ordering::Acquire);
+        let head = self.free_head.load(Ordering::Acquire);
         loop {
-            unsafe { *(ptr as *mut usize) = head; }
-            if self.free_head.compare_exchange_weak(head, ptr as usize, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            unsafe {
+                *(ptr as *mut usize) = head;
+            }
+            if self
+                .free_head
+                .compare_exchange_weak(head, ptr as usize, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
                 self.total_freed.fetch_add(1, Ordering::Relaxed);
                 return;
             }
         }
     }
 
-    /// Deallocate and run destructor
-    pub fn deallocate_drop(&self, ptr: *mut T) {
-        if ptr.is_null() { return; }
-        unsafe { std::ptr::drop_in_place(ptr); }
+    /// Deallocate and run destructor.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must have been returned by `allocate`/`allocate_init` on the same
+    /// pool, must not have been dequeued or `drop_in_place`d before, and must
+    /// not be aliased: it is consumed here and the destructor runs exactly once.
+    pub unsafe fn deallocate_drop(&self, ptr: *mut T) {
+        if ptr.is_null() {
+            return;
+        }
+
+        std::ptr::drop_in_place(ptr);
         self.deallocate(ptr);
     }
 
     fn allocate_block(&self) -> Result<(), PoolError> {
         let align = std::mem::align_of::<T>().max(std::mem::align_of::<usize>());
-        let layout = Layout::from_size_align(
-            self.object_size * self.objects_per_block,
-            align,
-        )?;
+        let layout = Layout::from_size_align(self.object_size * self.objects_per_block, align)?;
 
         let ptr = unsafe { alloc(layout) };
-        if ptr.is_null() { return Err(PoolError::OutOfMemory); }
+        if ptr.is_null() {
+            return Err(PoolError::OutOfMemory);
+        }
 
         let block = Block {
             ptr: NonNull::new(ptr).unwrap(),
             layout,
-            free_bitmap: vec![u64::MAX; (self.objects_per_block + 63) / 64],
         };
 
         // Initialize free list for this block
         let base = ptr as usize;
         for i in (0..self.objects_per_block).rev() {
             let obj_ptr = base + i * self.object_size;
-            unsafe { *(obj_ptr as *mut usize) = self.free_head.load(Ordering::Relaxed); }
+            unsafe {
+                *(obj_ptr as *mut usize) = self.free_head.load(Ordering::Relaxed);
+            }
             self.free_head.store(obj_ptr, Ordering::Release);
         }
 
@@ -166,7 +191,8 @@ impl<T> ObjectPool<T> {
         PoolStats {
             total_allocated: self.total_allocated.load(Ordering::Relaxed),
             total_freed: self.total_freed.load(Ordering::Relaxed),
-            current_count: self.total_allocated.load(Ordering::Relaxed) - self.total_freed.load(Ordering::Relaxed),
+            current_count: self.total_allocated.load(Ordering::Relaxed)
+                - self.total_freed.load(Ordering::Relaxed),
             blocks: self.blocks.lock().len(),
             object_size: self.object_size,
         }
@@ -174,13 +200,17 @@ impl<T> ObjectPool<T> {
 }
 
 impl<T> Default for ObjectPool<T> {
-    fn default() -> Self { Self::new(256) }
+    fn default() -> Self {
+        Self::new(256)
+    }
 }
 
 impl<T> Drop for ObjectPool<T> {
     fn drop(&mut self) {
         for block in self.blocks.get_mut() {
-            unsafe { dealloc(block.ptr.as_ptr(), block.layout); }
+            unsafe {
+                dealloc(block.ptr.as_ptr(), block.layout);
+            }
         }
     }
 }
@@ -205,25 +235,47 @@ impl<T> PoolHandle<T> {
         Self { ptr, pool }
     }
 
-    pub fn ptr(&self) -> *mut T { self.ptr }
-    pub fn as_ref(&self) -> Option<&T> { if self.ptr.is_null() { None } else { Some(unsafe { &*self.ptr }) } }
-    pub fn as_mut(&mut self) -> Option<&mut T> { if self.ptr.is_null() { None } else { Some(unsafe { &mut *self.ptr }) } }
+    pub fn ptr(&self) -> *mut T {
+        self.ptr
+    }
+    pub fn as_ref(&self) -> Option<&T> {
+        if self.ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { &*self.ptr })
+        }
+    }
+    pub fn as_mut(&mut self) -> Option<&mut T> {
+        if self.ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { &mut *self.ptr })
+        }
+    }
 }
 
 impl<T> Deref for PoolHandle<T> {
     type Target = T;
-    fn deref(&self) -> &T { unsafe { &*self.ptr } }
+    fn deref(&self) -> &T {
+        unsafe { &*self.ptr }
+    }
 }
 
 impl<T> DerefMut for PoolHandle<T> {
-    fn deref_mut(&mut self) -> &mut T { unsafe { &mut *self.ptr } }
+    fn deref_mut(&mut self) -> &mut T {
+        unsafe { &mut *self.ptr }
+    }
 }
 
 impl<T> Drop for PoolHandle<T> {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
-            unsafe { std::ptr::drop_in_place(self.ptr); }
-            unsafe { (*self.pool).deallocate(self.ptr); }
+            unsafe {
+                std::ptr::drop_in_place(self.ptr);
+            }
+            unsafe {
+                (*self.pool).deallocate(self.ptr);
+            }
         }
     }
 }
@@ -235,7 +287,9 @@ pub struct ThreadLocalPool<T> {
 
 impl<T> ThreadLocalPool<T> {
     pub fn new(objects_per_block: usize) -> Self {
-        Self { pool: ObjectPool::new(objects_per_block) }
+        Self {
+            pool: ObjectPool::new(objects_per_block),
+        }
     }
 
     pub fn allocate(&self) -> Result<*mut T, PoolError> {
@@ -245,9 +299,23 @@ impl<T> ThreadLocalPool<T> {
     pub fn allocate_init(&self, value: T) -> Result<*mut T, PoolError> {
         self.pool.allocate_init(value)
     }
-    pub fn deallocate(&self, ptr: *mut T) { self.pool.deallocate(ptr); }
-    pub fn deallocate_drop(&self, ptr: *mut T) { self.pool.deallocate_drop(ptr); }
-    pub fn stats(&self) -> PoolStats { self.pool.stats() }
+    pub fn deallocate(&self, ptr: *mut T) {
+        self.pool.deallocate(ptr);
+    }
+    /// Deallocate and run the destructor.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must have been returned by this pool's `allocate`/`allocate_init`
+    /// and not yet released or destroyed; see `ObjectPool::deallocate_drop`.
+    pub unsafe fn deallocate_drop(&self, ptr: *mut T) {
+        // SAFETY: mirrors `ObjectPool::deallocate_drop`; the caller owns the
+        // pointer returned by this pool.
+        unsafe { self.pool.deallocate_drop(ptr) };
+    }
+    pub fn stats(&self) -> PoolStats {
+        self.pool.stats()
+    }
 }
 
 use std::ops::{Deref, DerefMut};
@@ -256,7 +324,8 @@ use std::ops::{Deref, DerefMut};
 mod tests {
     use super::*;
 
-    #[test] fn test_pool_basic() {
+    #[test]
+    fn test_pool_basic() {
         let pool = ObjectPool::<u32>::new(16);
         let ptr1 = pool.allocate_init(42).unwrap();
         let ptr2 = pool.allocate_init(100).unwrap();
@@ -264,8 +333,10 @@ mod tests {
         assert_eq!(unsafe { *ptr1 }, 42);
         assert_eq!(unsafe { *ptr2 }, 100);
 
-        pool.deallocate_drop(ptr1);
-        pool.deallocate_drop(ptr2);
+        unsafe {
+            pool.deallocate_drop(ptr1);
+            pool.deallocate_drop(ptr2);
+        }
 
         let stats = pool.stats();
         assert_eq!(stats.total_allocated, 2);
@@ -273,23 +344,138 @@ mod tests {
         assert_eq!(stats.current_count, 0);
     }
 
-    #[test] fn test_pool_reuse() {
+    #[test]
+    fn test_pool_reuse() {
         let pool = ObjectPool::<u32>::new(16);
         let ptr1 = pool.allocate_init(1).unwrap();
-        pool.deallocate_drop(ptr1);
+        unsafe { pool.deallocate_drop(ptr1) };
 
         let ptr2 = pool.allocate_init(2).unwrap();
         // Should reuse the same memory
         assert_eq!(ptr1, ptr2);
         assert_eq!(unsafe { *ptr2 }, 2);
 
-        pool.deallocate_drop(ptr2);
+        unsafe { pool.deallocate_drop(ptr2) };
     }
 
-    #[test] fn test_pool_handle() {
+    #[test]
+    fn test_pool_handle() {
         let pool = ObjectPool::<u32>::new(16);
         let handle = PoolHandle::new(pool.allocate_init(42).unwrap(), &pool);
         assert_eq!(*handle, 42);
         // Automatically deallocated on drop
+    }
+
+    struct DropFlag {
+        flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.flag.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn test_pool_handle_drop_runs_destructor_and_releases_slot() {
+        let pool = ObjectPool::<DropFlag>::new(4);
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ptr = pool
+            .allocate_init(DropFlag {
+                flag: std::sync::Arc::clone(&flag),
+            })
+            .unwrap();
+        let handle = PoolHandle::new(ptr, &pool);
+        assert!(handle.as_ref().is_some());
+        let slot = ptr as usize;
+
+        drop(handle);
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "PoolHandle::drop must run the destructor"
+        );
+        let stats = pool.stats();
+        assert_eq!(
+            stats.total_freed, 1,
+            "PoolHandle::drop must return the slot"
+        );
+        assert_eq!(stats.current_count, 0);
+
+        // The freed slot must be reused by the next allocation.
+        let flag2 = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ptr2 = pool.allocate_init(DropFlag { flag: flag2 }).unwrap();
+        assert_eq!(ptr2 as usize, slot, "freed slot must be reused");
+        unsafe { pool.deallocate_drop(ptr2) };
+    }
+
+    #[test]
+    fn test_deallocate_drop_runs_destructor_and_reuses_ptr() {
+        let pool = ObjectPool::<DropFlag>::new(4);
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ptr = pool
+            .allocate_init(DropFlag {
+                flag: std::sync::Arc::clone(&flag),
+            })
+            .unwrap();
+        assert!(!flag.load(Ordering::SeqCst));
+        unsafe { pool.deallocate_drop(ptr) };
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "deallocate_drop must run the destructor"
+        );
+        assert_eq!(pool.stats().current_count, 0);
+    }
+
+    #[test]
+    fn test_thread_local_pool_mirrors_object_pool() {
+        let pool = ThreadLocalPool::<u64>::new(8);
+        let p1 = pool.allocate_init(11u64).unwrap();
+        let p2 = pool.allocate_init(22u64).unwrap();
+        assert_eq!(unsafe { *p1 }, 11);
+        assert_eq!(unsafe { *p2 }, 22);
+        assert_eq!(pool.stats().current_count, 2);
+
+        unsafe { pool.deallocate_drop(p1) };
+        let p3 = pool.allocate_init(33u64).unwrap();
+        assert_eq!(p3, p1, "freed slot must be reused like ObjectPool");
+        assert_eq!(unsafe { *p3 }, 33);
+
+        unsafe {
+            pool.deallocate_drop(p2);
+            pool.deallocate_drop(p3);
+        }
+        let stats = pool.stats();
+        assert_eq!(stats.total_allocated, 3);
+        assert_eq!(stats.total_freed, 3);
+        assert_eq!(stats.current_count, 0);
+    }
+
+    #[test]
+    fn test_pool_allocates_multiple_blocks_and_values_survive() {
+        let pool = ObjectPool::<u8>::new(4);
+        let mut ptrs: Vec<*mut u8> = Vec::new();
+        for i in 0..10u8 {
+            ptrs.push(pool.allocate_init(i).unwrap());
+        }
+        assert!(
+            pool.stats().blocks >= 2,
+            "10 allocations with 4 objects/block need at least 2 blocks"
+        );
+        // All slot addresses must be distinct.
+        let mut addrs: Vec<usize> = ptrs.iter().map(|p| *p as usize).collect();
+        addrs.sort_unstable();
+        let before_dedup = addrs.len();
+        addrs.dedup();
+        assert_eq!(before_dedup, addrs.len(), "slot addresses must be distinct");
+        // Values must be intact.
+        for (i, ptr) in ptrs.iter().enumerate() {
+            assert_eq!(unsafe { **ptr }, i as u8);
+        }
+    }
+
+    #[test]
+    fn test_pool_error_display() {
+        assert_eq!(PoolError::OutOfMemory.to_string(), "Out of memory");
+        assert_eq!(PoolError::InvalidLayout.to_string(), "Invalid layout");
     }
 }

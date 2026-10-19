@@ -5,11 +5,12 @@
 //! tool's command through [`crate::history::History`], so the model is only
 //! ever changed by undoable commands.
 
-use cnc_core::Vec2i;
-use cnc_renderer::Renderer;
 use crate::history::History;
 use crate::map::{MapModel, TILE_SIZE};
 use crate::tools::Tool;
+use cnc_asset::tileset_pack::TilesetPack;
+use cnc_core::{Fixed16_16, Vec2, Vec2i};
+use cnc_renderer::{Renderer, Sprite, TILESET_TEXTURE_ID};
 
 /// Colour for a terrain id (editor-only placeholder palette).
 pub fn terrain_color(value: u8) -> [f32; 4] {
@@ -32,6 +33,29 @@ pub fn object_color(model: &MapModel, id: u32) -> [f32; 4] {
     }
 }
 
+/// Atlas pixel rect for a tiles.rs pick, honouring manifest family rows.
+fn ui_tile_rect(pack: &TilesetPack, draw: &crate::tiles::TileDraw) -> Option<cnc_core::Rect> {
+    use cnc_asset::tileset_pack::GRID;
+    let row = pack
+        .family_row(draw.category, draw.family)
+        .unwrap_or(draw.row)
+        .min((GRID - 1) as u8);
+    let col = draw.col % (GRID as u8);
+    pack.tile_px_rect(draw.category, row, col)
+        .map(|(px, py, pw, ph)| cnc_core::Rect::new(px as i32, py as i32, pw as i32, ph as i32))
+}
+
+/// One unit-sized textured quad sampled from the tileset atlas.
+fn draw_uv_sprite(renderer: &mut dyn Renderer, sx: f32, sy: f32, size: f32, rect: cnc_core::Rect) {
+    let mut sprite = Sprite::new(
+        TILESET_TEXTURE_ID,
+        Vec2::new(Fixed16_16::from_f32(sx), Fixed16_16::from_f32(sy)),
+        Vec2::new(Fixed16_16::from_f32(size), Fixed16_16::from_f32(size)),
+    );
+    sprite.uv_rect = rect;
+    renderer.draw_sprite(&sprite);
+}
+
 /// Interactive editor state.
 pub struct EditorUI {
     pub active_tool: Option<Box<dyn Tool>>,
@@ -44,6 +68,10 @@ pub struct EditorUI {
     /// the first entry so single-object tools keep working unchanged.
     pub selected_objects: Vec<u32>,
     pub status: String,
+    /// Optional RTS tileset pack: when set, cells draw the same tile layers
+    /// as the main editor (shores, cliffs, resource sprites); when absent,
+    /// this view keeps its flat-coloured fallback quads.
+    pub tileset: Option<TilesetPack>,
 }
 
 impl Default for EditorUI {
@@ -63,6 +91,7 @@ impl EditorUI {
             selected_object: None,
             selected_objects: Vec::new(),
             status: String::new(),
+            tileset: None,
         }
     }
 
@@ -149,14 +178,66 @@ impl EditorUI {
     /// Draw terrain, overlay markers, objects, grid and status line.
     pub fn render(&mut self, renderer: &mut dyn Renderer, model: &MapModel) {
         let tile = TILE_SIZE * self.zoom.max(0.1);
+
+        // Tileset mode: upload the pack atlas once, then draw the same tile
+        // layers (shores, cliffs, resource sprites) as the main editor.
+        let mut tiled = self.tileset.is_some();
+        if let Some(pack) = self.tileset.as_ref() {
+            if !renderer.texture_ready(TILESET_TEXTURE_ID)
+                && renderer
+                    .set_atlas_texture(TILESET_TEXTURE_ID, pack.width(), pack.height(), pack.rgba())
+                    .is_err()
+            {
+                tiled = false;
+            }
+        }
         for y in 0..model.height {
             for x in 0..model.width {
                 let index = (y * model.width + x) as usize;
-                let mut color = terrain_color(model.terrain[index]);
-                if model.overlay[index] != 0 {
-                    color = [0.70, 0.55, 0.25, 1.0];
+                let terrain = model.terrain[index];
+                let overlay = model.overlay[index];
+                let (sx, sy) = (x as f32 * tile, y as f32 * tile);
+
+                let mut drew_sprite = false;
+                let mut drew_overlay_sprite = false;
+                if tiled {
+                    if let Some(pack) = self.tileset.as_ref() {
+                        if let Some(draw) = crate::tiles::base_draw(model, x as i32, y as i32) {
+                            if let Some(rect) = ui_tile_rect(pack, &draw) {
+                                draw_uv_sprite(renderer, sx, sy, tile, rect);
+                                drew_sprite = true;
+                            }
+                        }
+                        for draw in crate::tiles::sprite_draws(model, x as i32, y as i32) {
+                            if let Some(rect) = ui_tile_rect(pack, &draw) {
+                                draw_uv_sprite(renderer, sx, sy, tile, rect);
+                                drew_sprite = true;
+                                drew_overlay_sprite |= draw.category == crate::tiles::DECORATIONS
+                                    || draw.category == crate::tiles::RESOURCES_FX;
+                            }
+                        }
+                    }
                 }
-                renderer.draw_rect(x as f32 * tile, y as f32 * tile, tile, tile, color);
+                // Flat fallbacks (also per-layer when pack art is missing).
+                match (drew_sprite, drew_overlay_sprite) {
+                    (true, true) => {}
+                    (true, false) => {
+                        renderer.draw_rect(
+                            sx + tile * 0.3,
+                            sy + tile * 0.3,
+                            tile * 0.4,
+                            tile * 0.4,
+                            [0.70, 0.55, 0.25, 1.0],
+                        );
+                    }
+                    (false, _) => {
+                        let mut color = terrain_color(terrain);
+                        if overlay != 0 {
+                            color = [0.70, 0.55, 0.25, 1.0];
+                        }
+                        renderer.draw_rect(sx, sy, tile, tile, color);
+                    }
+                }
             }
         }
 

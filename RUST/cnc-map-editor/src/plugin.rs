@@ -4,8 +4,8 @@
 //! validation rules that differ between Tiberian Dawn and Red Alert. The editor
 //! core stays game-agnostic and talks to this trait only.
 
-use cnc_core::ClassId;
 use crate::map::{MapModel, MapObject};
+use cnc_core::ClassId;
 
 /// Terrain theater a map is authored for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,8 +67,7 @@ pub trait GamePlugin: Send + Sync {
 
     /// Bounds and ownership validation. Defaults to "inside the grid".
     fn validate_object(&self, model: &MapModel, object: &MapObject) -> bool {
-        model.in_bounds(object.position)
-            && object.owner.map_or(true, |owner| owner.is_house())
+        model.in_bounds(object.position) && object.owner.is_none_or(|owner| owner.is_house())
     }
 
     fn get_object_name(&self, class_id: ClassId) -> String {
@@ -183,11 +182,11 @@ impl GamePlugin for RedAlertPlugin {
     }
 
     fn trigger_templates(&self) -> Vec<(&'static str, &'static str, &'static str)> {
-        let mut templates = Vec::new();
-        templates.push(("Victory", "structures:1:any:==:0", "win"));
-        templates.push(("Defeat", "!has:0:FACT", "lose"));
-        templates.push(("Chronosphere", "elapsed:600", "message:Chronosphere ready"));
-        templates
+        vec![
+            ("Victory", "structures:1:any:==:0", "win"),
+            ("Defeat", "!has:0:FACT", "lose"),
+            ("Chronosphere", "elapsed:600", "message:Chronosphere ready"),
+        ]
     }
 }
 
@@ -202,7 +201,11 @@ mod tests {
         assert_eq!(td.object_side(ClassId::VehicleE2), Some("GDI"));
         assert_eq!(td.object_side(ClassId::AircraftE1), Some("GDI"));
         assert_eq!(td.object_side(ClassId::PowerPlant), None);
-        assert_eq!(td.object_side(ClassId::VehicleE1), None, "Jeep/Buggy share a class");
+        assert_eq!(
+            td.object_side(ClassId::VehicleE1),
+            None,
+            "Jeep/Buggy share a class"
+        );
         let ra = RedAlertPlugin;
         assert_eq!(ra.object_side(ClassId::Chronosphere), Some("Allies"));
         assert_eq!(ra.object_side(ClassId::TeslaCoil), Some("Soviet"));

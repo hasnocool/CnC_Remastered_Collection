@@ -1,7 +1,7 @@
 //! SHP Shape Parser (Westwood .shp format)
-use anyhow::{Result, Context, bail};
-use cnc_core::Rect;
+use anyhow::{bail, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
+use cnc_core::Rect;
 use std::io::Cursor;
 
 #[derive(Debug, Clone)]
@@ -22,7 +22,9 @@ pub struct ShpFile {
 
 impl ShpFile {
     pub fn load(data: &[u8]) -> Result<Self> {
-        if data.len() < 8 { bail!("SHP too small"); }
+        if data.len() < 8 {
+            bail!("SHP too small");
+        }
         let mut cursor = Cursor::new(data);
         let version = cursor.read_u16::<LittleEndian>()?;
         let flags = cursor.read_u16::<LittleEndian>()?;
@@ -51,15 +53,19 @@ impl ShpFile {
         for i in 0..frame_count {
             let (width, height, offset_x, offset_y) = frame_offsets[i];
             let start = data_offsets[i];
-            let end = if i + 1 < frame_count { data_offsets[i + 1] } else { data.len() };
-            
+            let end = if i + 1 < frame_count {
+                data_offsets[i + 1]
+            } else {
+                data.len()
+            };
+
             if start >= data.len() || end > data.len() || start > end {
                 bail!("Invalid frame data offset");
             }
 
             let frame_data = data[start..end].to_vec();
             let expected_size = width as usize * height as usize;
-            
+
             // Some frames might be RLE compressed
             let decompressed = if frame_data.len() < expected_size {
                 Self::decode_rle(&frame_data, expected_size)?
@@ -73,11 +79,20 @@ impl ShpFile {
                 offset_x,
                 offset_y,
                 data: decompressed,
-                bounds: Rect::new(offset_x as i32, offset_y as i32, width as i32, height as i32),
+                bounds: Rect::new(
+                    offset_x as i32,
+                    offset_y as i32,
+                    width as i32,
+                    height as i32,
+                ),
             });
         }
 
-        Ok(Self { frames, version, flags })
+        Ok(Self {
+            frames,
+            version,
+            flags,
+        })
     }
 
     fn decode_rle(compressed: &[u8], expected_size: usize) -> Result<Vec<u8>> {
@@ -89,20 +104,28 @@ impl ShpFile {
             if control < 128 {
                 // Copy next (control + 1) bytes literally
                 let count = (control + 1) as usize;
-                if i + count > compressed.len() { bail!("RLE overrun"); }
-                output.extend_from_slice(&compressed[i..i+count]);
+                if i + count > compressed.len() {
+                    bail!("RLE overrun");
+                }
+                output.extend_from_slice(&compressed[i..i + count]);
                 i += count;
             } else {
                 // Repeat next byte (257 - control) times
                 let count = (257u16 - control as u16) as usize;
-                if i >= compressed.len() { bail!("RLE overrun"); }
+                if i >= compressed.len() {
+                    bail!("RLE overrun");
+                }
                 let byte = compressed[i];
                 i += 1;
-                output.extend(std::iter::repeat(byte).take(count));
+                output.extend(std::iter::repeat_n(byte, count));
             }
         }
         if output.len() != expected_size {
-            bail!("RLE decode size mismatch: expected {}, got {}", expected_size, output.len());
+            bail!(
+                "RLE decode size mismatch: expected {}, got {}",
+                expected_size,
+                output.len()
+            );
         }
         Ok(output)
     }
@@ -116,7 +139,11 @@ impl ShpFile {
     }
 
     /// Convert frame to RGBA pixels using palette
-    pub fn frame_to_rgba(&self, index: usize, palette: &[cnc_core::RGB888; 256]) -> Option<Vec<u8>> {
+    pub fn frame_to_rgba(
+        &self,
+        index: usize,
+        palette: &[cnc_core::RGB888; 256],
+    ) -> Option<Vec<u8>> {
         let frame = self.frames.get(index)?;
         let mut rgba = Vec::with_capacity(frame.width as usize * frame.height as usize * 4);
         for &idx in &frame.data {
@@ -133,7 +160,8 @@ impl ShpFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn test_rle_decode() {
+    #[test]
+    fn test_rle_decode() {
         let compressed = vec![0x02, 0x01, 0x02, 0x03, 0xFD, 0x04]; // 3 literal, then 4 repeats of 0x04
         let decoded = ShpFile::decode_rle(&compressed, 7).unwrap();
         assert_eq!(decoded, vec![1, 2, 3, 4, 4, 4, 4]);

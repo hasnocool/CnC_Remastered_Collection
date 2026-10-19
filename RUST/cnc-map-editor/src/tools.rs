@@ -3,9 +3,9 @@
 //! Tools never mutate the [`MapModel`]. They inspect the model and return an
 //! [`EditCommand`] for the caller to run through [`crate::history::History`].
 
-use cnc_core::{ClassId, Vec2i};
 use crate::history::{AddTrigger, EditCommand, EraseObject, PaintCells, PlaceObject};
 use crate::map::{MapModel, MapObject, Trigger};
+use cnc_core::{ClassId, Vec2i};
 
 /// A primary mouse action: click or drag.
 pub trait Tool {
@@ -15,12 +15,7 @@ pub trait Tool {
     fn click(&mut self, model: &MapModel, cell: Vec2i) -> Option<Box<dyn EditCommand>>;
 
     /// Build the command for a drag gesture (line interpolation by default).
-    fn drag(
-        &mut self,
-        model: &MapModel,
-        from: Vec2i,
-        to: Vec2i,
-    ) -> Option<Box<dyn EditCommand>> {
+    fn drag(&mut self, model: &MapModel, from: Vec2i, to: Vec2i) -> Option<Box<dyn EditCommand>> {
         let _ = (from, to);
         let _ = model;
         None
@@ -74,12 +69,7 @@ impl Tool for TerrainTool {
         Some(self.paint(model, vec![index]))
     }
 
-    fn drag(
-        &mut self,
-        model: &MapModel,
-        from: Vec2i,
-        to: Vec2i,
-    ) -> Option<Box<dyn EditCommand>> {
+    fn drag(&mut self, model: &MapModel, from: Vec2i, to: Vec2i) -> Option<Box<dyn EditCommand>> {
         let cells = self.cells(model, from, to);
         if cells.is_empty() {
             return None;
@@ -164,7 +154,11 @@ pub struct TriggerTool {
 }
 
 impl TriggerTool {
-    pub fn new(name: impl Into<String>, condition: impl Into<String>, action: impl Into<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        condition: impl Into<String>,
+        action: impl Into<String>,
+    ) -> Self {
         Self {
             name: name.into(),
             condition: condition.into(),
@@ -287,7 +281,10 @@ mod tests {
         let command = tool.click(&model, Vec2i::new(3, 3)).unwrap();
         let mut history = History::new(4);
         history.execute(&mut model, command);
-        assert!(tool.click(&model, Vec2i::new(3, 3)).is_none(), "cell is occupied");
+        assert!(
+            tool.click(&model, Vec2i::new(3, 3)).is_none(),
+            "cell is occupied"
+        );
     }
 
     #[test]

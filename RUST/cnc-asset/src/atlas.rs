@@ -35,14 +35,12 @@ impl AtlasStyle {
                 light: [205, 205, 195, 255],
                 dark: [55, 55, 50, 255],
                 accent: [235, 200, 80, 255],
-                shadow: [0, 0, 0, 150],
             },
             AtlasStyle::Neon => Palette {
                 body: [70, 78, 92, 255],
                 light: [150, 160, 180, 255],
                 dark: [30, 34, 44, 255],
                 accent: [0, 220, 255, 255],
-                shadow: [0, 0, 0, 160],
             },
         }
     }
@@ -54,7 +52,6 @@ struct Palette {
     light: [u8; 4],
     dark: [u8; 4],
     accent: [u8; 4],
-    shadow: [u8; 4],
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -185,6 +182,10 @@ impl SpriteAtlas {
         self.pixels[index..index + 4].copy_from_slice(&color);
     }
 
+    // Draw-cell origin (ox, oy) plus the shape rect (x, y, w, h) and its color
+    // are kept as bare i32s so Bresenham helpers stay simple; grouping them
+    // would obscure the geometry math.
+    #[allow(clippy::too_many_arguments)]
     fn fill(&mut self, ox: i32, oy: i32, x: i32, y: i32, w: i32, h: i32, color: [u8; 4]) {
         for dy in 0..h {
             for dx in 0..w {
@@ -193,6 +194,7 @@ impl SpriteAtlas {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn outline(&mut self, ox: i32, oy: i32, x: i32, y: i32, w: i32, h: i32, color: [u8; 4]) {
         self.fill(ox, oy, x, y, w, 1, color);
         self.fill(ox, oy, x, y + h - 1, w, 1, color);
@@ -210,6 +212,7 @@ impl SpriteAtlas {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // same geometry contract as fill/outline above
     fn line(
         &mut self,
         ox: i32,

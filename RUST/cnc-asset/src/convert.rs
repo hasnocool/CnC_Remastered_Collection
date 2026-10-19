@@ -10,7 +10,7 @@ use image::{ImageBuffer, Rgba, RgbaImage};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
-use std::num::{NonZeroU8, NonZeroU32};
+use std::num::{NonZeroU32, NonZeroU8};
 use std::path::{Path, PathBuf};
 use vorbis_rs::{VorbisBitrateManagementStrategy, VorbisEncoderBuilder};
 
@@ -77,8 +77,7 @@ pub fn frame_to_rgba(
         pixels.push(color.b);
         pixels.push(alpha);
     }
-    RgbaImage::from_raw(width, height, pixels)
-        .context("failed to build RGBA image from SHP frame")
+    RgbaImage::from_raw(width, height, pixels).context("failed to build RGBA image from SHP frame")
 }
 
 /// Convert every frame in a SHP file to RGBA.
@@ -318,13 +317,10 @@ pub fn load_audio(input: &Path) -> Result<PcmAudio> {
         .to_ascii_lowercase();
     match extension.as_str() {
         "voc" => {
-            let voc = VocFile::load(&data)
-                .with_context(|| format!("failed to parse VOC {:?}", input))?;
+            let voc =
+                VocFile::load(&data).with_context(|| format!("failed to parse VOC {:?}", input))?;
             let declared = match (voc.loop_start, voc.loop_end) {
-                (Some(start), Some(end)) => Some(AudioLoop::new(
-                    u64::from(start),
-                    u64::from(end),
-                )?),
+                (Some(start), Some(end)) => Some(AudioLoop::new(u64::from(start), u64::from(end))?),
                 _ => None,
             };
             Ok(PcmAudio {
@@ -335,8 +331,8 @@ pub fn load_audio(input: &Path) -> Result<PcmAudio> {
             })
         }
         "aud" => {
-            let aud = AudFile::load(&data)
-                .with_context(|| format!("failed to parse AUD {:?}", input))?;
+            let aud =
+                AudFile::load(&data).with_context(|| format!("failed to parse AUD {:?}", input))?;
             Ok(PcmAudio {
                 sample_rate: aud.sample_rate,
                 channels: aud.channels,
@@ -374,7 +370,11 @@ pub fn audio_to_wav(audio: &PcmAudio, loop_points: Option<AudioLoop>) -> Result<
 }
 
 /// Append a RIFF smpl chunk describing one forward loop.
-fn append_smpl_chunk(mut wav: Vec<u8>, sample_rate: u32, loop_points: AudioLoop) -> Result<Vec<u8>> {
+fn append_smpl_chunk(
+    mut wav: Vec<u8>,
+    sample_rate: u32,
+    loop_points: AudioLoop,
+) -> Result<Vec<u8>> {
     if wav.len() < 12 || &wav[0..4] != b"RIFF" || &wav[8..12] != b"WAVE" {
         bail!("cannot add loop points: encoder did not produce a RIFF/WAVE file");
     }
@@ -410,16 +410,23 @@ fn append_smpl_chunk(mut wav: Vec<u8>, sample_rate: u32, loop_points: AudioLoop)
 }
 
 /// Encode PCM to an Ogg Vorbis stream, writing loop points as Vorbis comments.
-pub fn audio_to_ogg(audio: &PcmAudio, quality: f32, loop_points: Option<AudioLoop>) -> Result<Vec<u8>> {
+pub fn audio_to_ogg(
+    audio: &PcmAudio,
+    quality: f32,
+    loop_points: Option<AudioLoop>,
+) -> Result<Vec<u8>> {
     if audio.channels == 0 || audio.channels > 8 {
-        bail!("unsupported channel count {} for Ogg Vorbis", audio.channels);
+        bail!(
+            "unsupported channel count {} for Ogg Vorbis",
+            audio.channels
+        );
     }
     if audio.frames() == 0 {
         bail!("audio contains no samples");
     }
-    let sample_rate =
-        NonZeroU32::new(audio.sample_rate).context("sample rate must be non-zero")?;
-    let channels = NonZeroU8::new(audio.channels as u8).context("channel count must be non-zero")?;
+    let sample_rate = NonZeroU32::new(audio.sample_rate).context("sample rate must be non-zero")?;
+    let channels =
+        NonZeroU8::new(audio.channels as u8).context("channel count must be non-zero")?;
 
     let mut builder = VorbisEncoderBuilder::new(sample_rate, channels, Vec::<u8>::new())
         .context("failed to create the Vorbis encoder")?;
@@ -445,7 +452,9 @@ pub fn audio_to_ogg(audio: &PcmAudio, quality: f32, loop_points: Option<AudioLoo
             .context("failed to encode an Ogg Vorbis block")?;
         start = end;
     }
-    encoder.finish().context("failed to finish the Ogg Vorbis stream")
+    encoder
+        .finish()
+        .context("failed to finish the Ogg Vorbis stream")
 }
 
 /// Convert a .voc or .aud file into WAV or Ogg, preserving or overriding loops.
@@ -517,7 +526,11 @@ pub fn extract_mix(input: &Path, output_dir: &Path) -> Result<Vec<String>> {
     let archive =
         MixArchive::load(input).with_context(|| format!("failed to parse MIX {:?}", input))?;
     archive.extract_all(output_dir)?;
-    Ok(archive.list().iter().map(|name| (*name).to_string()).collect())
+    Ok(archive
+        .list()
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect())
 }
 
 /// Supported batch conversion kinds.
@@ -645,7 +658,13 @@ fn walk_and_convert(
         let path = entry.path();
         let name = entry.file_name();
         if path.is_dir() {
-            walk_and_convert(&path, &relative_dir.join(&name), output_root, options, report)?;
+            walk_and_convert(
+                &path,
+                &relative_dir.join(&name),
+                output_root,
+                options,
+                report,
+            )?;
         } else if path.is_file() {
             let output_dir = output_root.join(relative_dir);
             convert_single(&path, &output_dir, options, report);
@@ -654,7 +673,12 @@ fn walk_and_convert(
     Ok(())
 }
 
-fn convert_single(path: &Path, output_dir: &Path, options: &BatchOptions, report: &mut BatchReport) {
+fn convert_single(
+    path: &Path,
+    output_dir: &Path,
+    options: &BatchOptions,
+    report: &mut BatchReport,
+) {
     let extension = path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -667,7 +691,10 @@ fn convert_single(path: &Path, output_dir: &Path, options: &BatchOptions, report
     let result = (|| -> Result<()> {
         match kind {
             AssetKind::Mix => {
-                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("archive");
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("archive");
                 extract_mix(path, &output_dir.join(stem))?;
             }
             AssetKind::Shp => {
@@ -681,7 +708,8 @@ fn convert_single(path: &Path, output_dir: &Path, options: &BatchOptions, report
             }
             AssetKind::Voc | AssetKind::Aud => {
                 let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
-                let output = output_dir.join(format!("{stem}.{}", options.audio_format.extension()));
+                let output =
+                    output_dir.join(format!("{stem}.{}", options.audio_format.extension()));
                 write_audio(
                     path,
                     &output,
@@ -691,7 +719,10 @@ fn convert_single(path: &Path, output_dir: &Path, options: &BatchOptions, report
                 )?;
             }
             AssetKind::Pal => {
-                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("palette");
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("palette");
                 let pal = PalFile::load_file(path)?;
                 fs::create_dir_all(output_dir)?;
                 fs::write(
@@ -752,9 +783,10 @@ mod tests {
             cursor += u32::from(*width) * u32::from(*height);
         }
         for (width, height, color) in frames {
-            out.extend(
-                std::iter::repeat(*color).take(usize::from(*width) * usize::from(*height)),
-            );
+            out.extend(std::iter::repeat_n(
+                *color,
+                usize::from(*width) * usize::from(*height),
+            ));
         }
         out
     }
@@ -1068,7 +1100,11 @@ mod audio_tests {
         assert_eq!(read_u32(&wav, smpl + 8 + 8), 1_000_000_000 / 22_050);
         assert_eq!(read_u32(&wav, smpl + 8 + 28), 1, "number of loops");
         assert_eq!(read_u32(&wav, smpl + 8 + 44), 50, "loop start");
-        assert_eq!(read_u32(&wav, smpl + 8 + 48), 1_499, "loop end is inclusive");
+        assert_eq!(
+            read_u32(&wav, smpl + 8 + 48),
+            1_499,
+            "loop end is inclusive"
+        );
     }
 
     #[test]
@@ -1135,7 +1171,10 @@ mod audio_tests {
         let wav = dir.join("music.wav");
         write_audio(&voc, &wav, AudioFormat::Wav, None, 0.4).unwrap();
         let bytes = fs::read(&wav).unwrap();
-        let smpl = bytes.windows(4).position(|window| window == b"smpl").unwrap();
+        let smpl = bytes
+            .windows(4)
+            .position(|window| window == b"smpl")
+            .unwrap();
         assert_eq!(read_u32(&bytes, smpl + 8 + 44), 120);
         fs::remove_dir_all(&dir).unwrap();
     }

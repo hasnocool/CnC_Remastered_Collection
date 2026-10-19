@@ -11,8 +11,8 @@
 //!   (override with `CNC_TD_CAMPAIGN` / `CNC_RA_CAMPAIGN`).
 //! - Local Game starts a TD skirmish or the RA skirmish setup screen.
 //! - Online Game opens the RA host/join network lobby.
-//! Esc on a game's menu-owned screen (mission select, skirmish setup, campaign
-//! select, lobby) returns to the main menu; `--menu` requests it explicitly.
+//!   Esc on a game's menu-owned screen (mission select, skirmish setup, campaign
+//!   select, lobby) returns to the main menu; `--menu` requests it explicitly.
 //!
 //! Passing a launch-mode flag keeps the direct CLI paths: `--mission FILE`,
 //! `--mission-dir DIR`, `--campaign DIR`, `--scenario FILE`, `--replay FILE`,
@@ -25,7 +25,10 @@
 //! cnc-red-alert's Game with naval/air movement, production, Tesla defenses and
 //! superweapons.
 
-
+// The HUD/draw helpers thread renderer + tileset + cell geometry + fallback
+// color explicitly; a struct would just reshuffle the same parameters across
+// every screen.
+#![allow(clippy::too_many_arguments)]
 use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
@@ -34,12 +37,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use cnc_asset::{AssetRegistry, AtlasStyle, SpriteAtlas};
+use cnc_asset::{AssetRegistry, AtlasStyle, SpriteAtlas, TilesetPack};
 use cnc_audio::AudioMixer;
 use cnc_core::rules::RulesDatabase;
 use cnc_core::{Fixed16_16, Vec2, Vec2i};
-use cnc_renderer::{Camera, Renderer, SoftwareRenderer, WgpuRenderer};
 use cnc_red_alert::{Country, Game as RaGame, GameCommand, TILE_SIZE as RA_TILE_SIZE};
+use cnc_renderer::{Camera, Renderer, SoftwareRenderer, Sprite, WgpuRenderer};
 use cnc_tiberian_dawn::network::{
     Command as NetCommandKind, LiveEvent, LiveSession, NetCommand, NetPacket, NetworkConfig,
 };
@@ -154,10 +157,7 @@ impl GameKind {
         match value.to_ascii_lowercase().as_str() {
             "td" | "tiberian-dawn" | "tiberiandawn" => Ok(Self::TiberianDawn),
             "ra" | "red-alert" | "redalert" => Ok(Self::RedAlert),
-            other => Err(anyhow!(
-                "unknown game '{}' (expected 'td' or 'ra')",
-                other
-            )),
+            other => Err(anyhow!("unknown game '{}' (expected 'td' or 'ra')", other)),
         }
     }
 }
@@ -279,6 +279,9 @@ fn default_td_progress_path() -> PathBuf {
     PathBuf::from(dir).join("td_campaign.ini")
 }
 
+// Slot 0 wrapper for future save-menu wiring; the slot-aware variant is used
+// by the quick-save hotkeys.
+#[allow(dead_code)]
 fn ra_save_path() -> PathBuf {
     ra_save_path_for(0)
 }
@@ -300,20 +303,24 @@ fn ra_save_path_for(slot: usize) -> PathBuf {
     PathBuf::from(dir).join(file)
 }
 
-fn draw_td_briefing(
-    renderer: &mut dyn Renderer,
-    mission: &Mission,
-    width: u32,
-    height: u32,
-) {
+fn draw_td_briefing(renderer: &mut dyn Renderer, mission: &Mission, width: u32, height: u32) {
     let w = width as f32;
     let h = height as f32;
     renderer.draw_rect(0.0, 0.0, w, h, [0.05, 0.05, 0.07, 1.0]);
     renderer.draw_rect(0.0, 110.0, w, 2.0, [0.70, 0.55, 0.25, 1.0]);
-    renderer.draw_text("MISSION BRIEFING", 60.0, 40.0, 24.0, [0.95, 0.70, 0.30, 1.0]);
+    renderer.draw_text(
+        "MISSION BRIEFING",
+        60.0,
+        40.0,
+        24.0,
+        [0.95, 0.70, 0.30, 1.0],
+    );
     renderer.draw_text(&mission.name, 60.0, 82.0, 15.0, [0.90, 0.93, 0.98, 1.0]);
     renderer.draw_text(
-        &format!("Player: {}", if mission.player == 0 { "GDI" } else { "Nod" }),
+        &format!(
+            "Player: {}",
+            if mission.player == 0 { "GDI" } else { "Nod" }
+        ),
         60.0,
         108.0,
         10.0,
@@ -349,10 +356,295 @@ fn draw_td_briefing(
     );
 }
 
+/// Tileset palette a screen needs. LauncherApp draws the TD screens and
+/// RaLauncherApp the RA screens, so each shell binds exactly one palette.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TilesetPalette {
+    Ra,
+    Td,
+}
+
+/// Terrain class normalized for tileset family lookup. The row constants match
+/// the mapping used by the map editor's `terrain_family` and the RA game's
+/// `terrain_tile` helper (both in other crates): grass/sand/rock live in the
+/// `terrain` category, deep water in `water_edges`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PackTerrain {
+    Grass,
+    Water,
+    Sand,
+    Rock,
+}
+
+impl PackTerrain {
+    /// (category, family, fallback manifest row) for the tileset pack.
+    fn tile(self) -> (&'static str, &'static str, u8) {
+        match self {
+            PackTerrain::Grass => ("terrain", "grass", 0),
+            PackTerrain::Water => ("water_edges", "deep_water", 0),
+            PackTerrain::Sand => ("terrain", "sand", 2),
+            PackTerrain::Rock => ("terrain", "rock", 4),
+        }
+    }
+
+    /// RA terrain cell class (Beach renders as the sand family, matching the
+    /// RA game's terrain_tile helper).
+    fn from_ra(terrain: cnc_red_alert::Terrain) -> Self {
+        match terrain {
+            cnc_red_alert::Terrain::Grass => PackTerrain::Grass,
+            cnc_red_alert::Terrain::Water => PackTerrain::Water,
+            cnc_red_alert::Terrain::Beach => PackTerrain::Sand,
+            cnc_red_alert::Terrain::Rock => PackTerrain::Rock,
+        }
+    }
+
+    /// TD terrain byte: `0` renders the rock family, every other value the
+    /// sand family — the same split the engine's `render_with_tiles` uses and
+    /// the launcher's flat minimap colours imply (grey vs. brown).
+    fn from_td(terrain_type: u8) -> Self {
+        if terrain_type == 0 {
+            PackTerrain::Rock
+        } else {
+            PackTerrain::Sand
+        }
+    }
+
+    /// Raw campaign INI terrain code (RA campaign preview): 1 water, 2 sand,
+    /// 4 rock, everything else grass — matching the flat colours in
+    /// `draw_ra_campaign`.
+    fn from_campaign(id: u8) -> Self {
+        match id {
+            1 => PackTerrain::Water,
+            2 => PackTerrain::Sand,
+            4 => PackTerrain::Rock,
+            _ => PackTerrain::Grass,
+        }
+    }
+}
+
+/// Draw one map cell as a tileset sprite when the pack is loaded and the
+/// renderer's tileset texture slot is ready; otherwise fall back to the legacy
+/// flat-coloured rect (`fallback_color`), preserving the pre-tileset look.
+///
+/// Returns true when a tileset sprite was drawn. Callers composite their ore /
+/// tiberium markers *on top* only in that case; the flat fallback keeps the
+/// original opaque marker colour semantics.
+///
+/// Callers pick the tileset family themselves via [`PackTerrain::tile`] for
+/// base terrain (grass/sand/rock/water), water_edges shore rows for shore
+/// water, and transitions sand_shore for Beach.
+fn draw_pack_tile_family(
+    renderer: &mut dyn Renderer,
+    tileset: Option<&TilesetPack>,
+    category: &str,
+    family: &str,
+    fallback_row: u8,
+    cell_x: u32,
+    cell_y: u32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    fallback_color: [f32; 4],
+) -> bool {
+    use cnc_asset::tileset_pack::GRID;
+    let Some(pack) = tileset.filter(|_| renderer.texture_ready(cnc_renderer::TILESET_TEXTURE_ID))
+    else {
+        renderer.draw_rect(x, y, w, h, fallback_color);
+        return false;
+    };
+    let row = pack
+        .family_row(category, family)
+        .unwrap_or(fallback_row)
+        .min((GRID - 1) as u8);
+    let grid = GRID as usize;
+    // Deterministic per-cell column variant, same scheme as the engine and
+    // editor terrain code: (x * 7 + y * 13) mod 16.
+    let col = ((cell_x as usize % grid) * 7 + (cell_y as usize % grid) * 13) % grid;
+    let Some((px, py, pw, ph)) = pack.tile_px_rect(category, row, col as u8) else {
+        renderer.draw_rect(x, y, w, h, fallback_color);
+        return false;
+    };
+    let mut sprite = Sprite::new(
+        cnc_renderer::TILESET_TEXTURE_ID,
+        Vec2::new(Fixed16_16::from_f32(x), Fixed16_16::from_f32(y)),
+        Vec2::new(Fixed16_16::from_f32(w + 0.5), Fixed16_16::from_f32(h + 0.5)),
+    );
+    sprite.uv_rect = cnc_core::Rect::new(px as i32, py as i32, pw as i32, ph as i32);
+    renderer.draw_sprite(&sprite);
+    true
+}
+
+/// Draw a `resources_fx` sprite (ore chunks, tiberium growth stages) over an
+/// already drawn terrain tile. Only draws when the pack is loaded and the
+/// tileset texture is ready; returns false otherwise so callers keep their
+/// legacy flat marker exactly as before (RGBA fx sheets composite over the
+/// terrain tiles in the combined atlas).
+fn draw_pack_fx(
+    renderer: &mut dyn Renderer,
+    tileset: Option<&TilesetPack>,
+    family: &str,
+    fallback_row: u8,
+    cell_x: u32,
+    cell_y: u32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> bool {
+    let pack_ready = tileset.is_some() && renderer.texture_ready(cnc_renderer::TILESET_TEXTURE_ID);
+    if !pack_ready {
+        return false;
+    }
+    draw_pack_tile_family(
+        renderer,
+        tileset,
+        "resources_fx",
+        family,
+        fallback_row,
+        cell_x,
+        cell_y,
+        x,
+        y,
+        w,
+        h,
+        // Never visible: draw_pack_tile_family only reaches the fallback
+        // rect when the tileset cannot supply the tile, and fx callers treat
+        // that as "no sprite" and fall back themselves.
+        [0.0, 0.0, 0.0, 0.0],
+    )
+}
+
+/// The eight neighbours of a cell classified by `is_land`, in
+/// (n, e, s, w, nw, ne, sw, se) order. `is_land` must treat out-of-map
+/// coordinates as water so shore edges only point at real land.
+fn land_neighbours(cx: i32, cy: i32, is_land: impl Fn(i32, i32) -> bool) -> [bool; 8] {
+    [
+        is_land(cx, cy - 1),
+        is_land(cx + 1, cy),
+        is_land(cx, cy + 1),
+        is_land(cx - 1, cy),
+        is_land(cx - 1, cy - 1),
+        is_land(cx + 1, cy - 1),
+        is_land(cx - 1, cy + 1),
+        is_land(cx + 1, cy + 1),
+    ]
+}
+
+/// Water-edge family for a water cell given land-contact booleans in
+/// (n, e, s, w, nw, ne, sw, se) order. Orthogonal contacts win over diagonal
+/// corners; the fixed priority keeps the tile choice deterministic per cell
+/// regardless of draw order. Returns None for open water (plain deep_water).
+fn water_shore_family(neighbours: [bool; 8]) -> Option<(&'static str, u8)> {
+    let [n, e, s, w, nw, ne, sw, se] = neighbours;
+    if n {
+        Some(("shore_north", 2))
+    } else if e {
+        Some(("shore_east", 3))
+    } else if s {
+        Some(("shore_south", 4))
+    } else if w {
+        Some(("shore_west", 5))
+    } else if nw {
+        Some(("shore_nw", 6))
+    } else if ne {
+        Some(("shore_ne", 7))
+    } else if sw {
+        Some(("shore_sw", 8))
+    } else if se {
+        Some(("shore_se", 9))
+    } else {
+        None
+    }
+}
+
+/// Tileset family for one RA terrain cell at (`px`, `py`): water against land
+/// picks water_edges shore rows computed directly from `map.terrain`, open
+/// water stays deep_water; Beach renders the transitions sand_shore row; the
+/// rest use the base terrain families.
+fn ra_terrain_tile(map: &cnc_red_alert::Map, px: u32, py: u32) -> (&'static str, &'static str, u8) {
+    let is_land = |cx: i32, cy: i32| -> bool {
+        if cx < 0 || cy < 0 || cx as u32 >= map.width || cy as u32 >= map.height {
+            return false;
+        }
+        map.terrain
+            .get(cy as usize * map.width as usize + cx as usize)
+            .copied()
+            .unwrap_or(cnc_red_alert::Terrain::Water)
+            != cnc_red_alert::Terrain::Water
+    };
+    let terrain = map
+        .terrain
+        .get(py as usize * map.width as usize + px as usize)
+        .copied()
+        .unwrap_or(cnc_red_alert::Terrain::Grass);
+    if terrain == cnc_red_alert::Terrain::Water {
+        if let Some((family, row)) =
+            water_shore_family(land_neighbours(px as i32, py as i32, is_land))
+        {
+            return ("water_edges", family, row);
+        }
+        return ("water_edges", "deep_water", 0);
+    }
+    if terrain == cnc_red_alert::Terrain::Beach {
+        return ("transitions", "sand_shore", 10);
+    }
+    PackTerrain::from_ra(terrain).tile()
+}
+
+/// Tileset family for one raw campaign terrain cell (codes: 1 water, 2 sand,
+/// 4 rock, otherwise grass): water against land picks water_edges shore rows
+/// computed over the campaign grid, open water stays deep_water, the rest use
+/// the base terrain families.
+fn campaign_terrain_tile(
+    terrain: &[u8],
+    width: u32,
+    height: u32,
+    px: u32,
+    py: u32,
+) -> (&'static str, &'static str, u8) {
+    let code = |cx: i32, cy: i32| -> u8 {
+        if cx < 0 || cy < 0 || cx as u32 >= width || cy as u32 >= height {
+            return 0;
+        }
+        terrain
+            .get(cy as usize * width as usize + cx as usize)
+            .copied()
+            .unwrap_or(0)
+    };
+    if code(px as i32, py as i32) == 1 {
+        let is_land = |cx: i32, cy: i32| -> bool {
+            let in_map = cx >= 0 && cy >= 0 && (cx as u32) < width && (cy as u32) < height;
+            in_map && code(cx, cy) != 1
+        };
+        if let Some((family, row)) =
+            water_shore_family(land_neighbours(px as i32, py as i32, is_land))
+        {
+            return ("water_edges", family, row);
+        }
+        return ("water_edges", "deep_water", 0);
+    }
+    PackTerrain::from_campaign(code(px as i32, py as i32)).tile()
+}
+
+/// resources_fx family for a TD tiberium cell chosen by amount bucket
+/// (amount 0-255, the same range the engine's tiberium stages use): early
+/// growth draws a sprout, mid growth a cluster, mature cells a bloom.
+fn tiberium_fx_family(amount: u8) -> (&'static str, u8) {
+    if amount < 86 {
+        ("tiberium_sprout", 0)
+    } else if amount < 171 {
+        ("tiberium_cluster", 1)
+    } else {
+        ("tiberium_bloom", 14)
+    }
+}
+
 /// Bottom-right terrain/unit minimap for the TD game view.
 fn draw_td_minimap(
     renderer: &mut dyn Renderer,
     game: &Game,
+    tileset: Option<&TilesetPack>,
     player: u8,
     center: Vec2,
     view_w: f32,
@@ -368,29 +660,67 @@ fn draw_td_minimap(
     // Bottom-left keeps the minimap clear of the right-hand build menu. The
     // panel is placed in screen-sized HUD space; the view box below uses the
     // real world view, which shrinks as the camera zooms in.
-    let (x, y, panel_w, panel_h) =
-        minimap_origin(map_w, map_h, left, top, hud_w, hud_h, false);
-    renderer.draw_rect(x - 4.0, y - 4.0, panel_w + 8.0, panel_h + 8.0, [0.02, 0.03, 0.05, 1.0]);
+    let (x, y, panel_w, panel_h) = minimap_origin(map_w, map_h, left, top, hud_w, hud_h, false);
+    renderer.draw_rect(
+        x - 4.0,
+        y - 4.0,
+        panel_w + 8.0,
+        panel_h + 8.0,
+        [0.02, 0.03, 0.05, 1.0],
+    );
     for py in (0..map_h).step_by(step as usize) {
         for px in (0..map_w).step_by(step as usize) {
             let index = py as usize * map_w as usize + px as usize;
             let Some(cell) = game.map.grid.cells.get(index) else {
                 continue;
             };
-            let color = if cell.has_tiberium {
+            // Base terrain: rock family for terrain_type 0, sand otherwise —
+            // mirroring the engine's tile mapping. Tiberium cells use the
+            // tiberium_ground family as the underlay (terrain and resources_fx
+            // category sheets compose over each other). The flat fallback
+            // colours keep the legacy look when no tile art is available.
+            let (category, family, fallback_row) = if cell.has_tiberium {
+                ("terrain", "tiberium_ground", 5)
+            } else {
+                PackTerrain::from_td(cell.terrain_type).tile()
+            };
+            let fallback = if cell.has_tiberium {
                 [0.10, 0.60, 0.15, 1.0]
             } else if cell.terrain_type == 0 {
                 [0.30, 0.30, 0.30, 1.0]
             } else {
                 [0.45, 0.40, 0.25, 1.0]
             };
-            renderer.draw_rect(
-                x + px as f32 * scale,
-                y + py as f32 * scale,
-                scale * step as f32,
-                scale * step as f32,
-                color,
+            let tile_x = x + px as f32 * scale;
+            let tile_y = y + py as f32 * scale;
+            let tile_s = scale * step as f32;
+            let cell_x = px;
+            let cell_y = py;
+            let drew_tile = draw_pack_tile_family(
+                renderer,
+                tileset,
+                category,
+                family,
+                fallback_row,
+                cell_x,
+                cell_y,
+                tile_x,
+                tile_y,
+                tile_s,
+                tile_s,
+                fallback,
             );
+            // Growth-stage sprite replaces the flat green tint; the legacy
+            // translucent tint stays whenever no tile art is available.
+            if cell.has_tiberium && drew_tile {
+                let (fx_family, fx_row) = tiberium_fx_family(cell.tiberium_amount);
+                if !draw_pack_fx(
+                    renderer, tileset, fx_family, fx_row, cell_x, cell_y, tile_x, tile_y, tile_s,
+                    tile_s,
+                ) {
+                    renderer.draw_rect(tile_x, tile_y, tile_s, tile_s, [0.10, 0.60, 0.15, 0.55]);
+                }
+            }
         }
     }
     for building in &game.buildings {
@@ -436,7 +766,13 @@ fn draw_td_minimap(
     let view_cells_w = view_w / cnc_tiberian_dawn::map::TILE_SIZE;
     let view_cells_h = view_h / cnc_tiberian_dawn::map::TILE_SIZE;
     let border = [0.95, 0.90, 0.75, 1.0];
-    renderer.draw_rect(x + view_left * scale, y + view_top * scale, view_cells_w * scale, 1.0, border);
+    renderer.draw_rect(
+        x + view_left * scale,
+        y + view_top * scale,
+        view_cells_w * scale,
+        1.0,
+        border,
+    );
     renderer.draw_rect(
         x + view_left * scale,
         y + (view_top + view_cells_h) * scale - 1.0,
@@ -444,7 +780,13 @@ fn draw_td_minimap(
         1.0,
         border,
     );
-    renderer.draw_rect(x + view_left * scale, y + view_top * scale, 1.0, view_cells_h * scale, border);
+    renderer.draw_rect(
+        x + view_left * scale,
+        y + view_top * scale,
+        1.0,
+        view_cells_h * scale,
+        border,
+    );
     renderer.draw_rect(
         x + (view_left + view_cells_w) * scale - 1.0,
         y + view_top * scale,
@@ -474,7 +816,13 @@ fn draw_td_pause(
     let panel_y = (h - panel_h) * 0.5;
     renderer.draw_rect(panel_x, panel_y, panel_w, panel_h, [0.07, 0.09, 0.13, 1.0]);
     renderer.draw_rect(panel_x, panel_y, panel_w, 2.0, [0.70, 0.55, 0.25, 1.0]);
-    renderer.draw_text("PAUSED", panel_x + 24.0, panel_y + 20.0, 22.0, [0.95, 0.85, 0.60, 1.0]);
+    renderer.draw_text(
+        "PAUSED",
+        panel_x + 24.0,
+        panel_y + 20.0,
+        22.0,
+        [0.95, 0.85, 0.60, 1.0],
+    );
     let status = game.status();
     renderer.draw_text(
         &format!(
@@ -489,7 +837,7 @@ fn draw_td_pause(
         10.0,
         [0.78, 0.86, 0.95, 1.0],
     );
-    let options = vec![
+    let options = [
         "Resume".to_string(),
         "Save game".to_string(),
         "Load game".to_string(),
@@ -623,8 +971,20 @@ fn draw_td_mission_preview(
     );
     for step in (0..=extent).step_by(8) {
         let line = step as f32 * scale;
-        renderer.draw_rect(grid_x + line, grid_y, 1.0, extent as f32 * scale, [0.14, 0.16, 0.20, 1.0]);
-        renderer.draw_rect(grid_x, grid_y + line, extent as f32 * scale, 1.0, [0.14, 0.16, 0.20, 1.0]);
+        renderer.draw_rect(
+            grid_x + line,
+            grid_y,
+            1.0,
+            extent as f32 * scale,
+            [0.14, 0.16, 0.20, 1.0],
+        );
+        renderer.draw_rect(
+            grid_x,
+            grid_y + line,
+            extent as f32 * scale,
+            1.0,
+            [0.14, 0.16, 0.20, 1.0],
+        );
     }
     for spawn in &choice.spawns {
         let color = if spawn.owner == 0 {
@@ -672,13 +1032,7 @@ fn draw_td_mission_select(
     renderer.draw_rect(0.0, 0.0, w, h, [0.05, 0.05, 0.07, 1.0]);
     renderer.draw_rect(0.0, 110.0, w, 2.0, [0.70, 0.55, 0.25, 1.0]);
     renderer.draw_text("TIBERIAN DAWN", 60.0, 40.0, 28.0, [0.95, 0.70, 0.30, 1.0]);
-    renderer.draw_text(
-        "Select Mission",
-        60.0,
-        84.0,
-        15.0,
-        [0.88, 0.90, 0.95, 1.0],
-    );
+    renderer.draw_text("Select Mission", 60.0, 84.0, 15.0, [0.88, 0.90, 0.95, 1.0]);
     if choices.is_empty() {
         renderer.draw_text(
             "No missions found in this directory.",
@@ -807,7 +1161,13 @@ fn draw_td_stats(
     let h = height as f32;
     renderer.draw_rect(0.0, 0.0, w, h, [0.05, 0.05, 0.07, 1.0]);
     renderer.draw_rect(0.0, 110.0, w, 2.0, [0.70, 0.55, 0.25, 1.0]);
-    renderer.draw_text("TD CAMPAIGN STATS", 60.0, 40.0, 24.0, [0.95, 0.70, 0.30, 1.0]);
+    renderer.draw_text(
+        "TD CAMPAIGN STATS",
+        60.0,
+        40.0,
+        24.0,
+        [0.95, 0.70, 0.30, 1.0],
+    );
     let cleared = completed.iter().filter(|done| **done).count();
     renderer.draw_text(
         &format!("{cleared}/{} missions cleared", choices.len()),
@@ -985,17 +1345,17 @@ fn health_bar_color(fraction: f32) -> [f32; 4] {
 }
 
 /// Draw a small health bar above a world-space entity.
-fn draw_health_bar(
-    renderer: &mut dyn Renderer,
-    center_x: f32,
-    y: f32,
-    fraction: f32,
-    width: f32,
-) {
+fn draw_health_bar(renderer: &mut dyn Renderer, center_x: f32, y: f32, fraction: f32, width: f32) {
     if fraction >= 0.999 {
         return;
     }
-    renderer.draw_rect(center_x - width * 0.5, y, width, 3.0, [0.04, 0.04, 0.05, 1.0]);
+    renderer.draw_rect(
+        center_x - width * 0.5,
+        y,
+        width,
+        3.0,
+        [0.04, 0.04, 0.05, 1.0],
+    );
     renderer.draw_rect(
         center_x - width * 0.5 + 1.0,
         y + 1.0,
@@ -1055,6 +1415,7 @@ fn ra_setup_preview(size: u32) -> cnc_red_alert::Map {
 fn draw_ra_setup_preview(
     renderer: &mut dyn Renderer,
     map: &cnc_red_alert::Map,
+    tileset: Option<&TilesetPack>,
     x: f32,
     y: f32,
     size: f32,
@@ -1062,24 +1423,66 @@ fn draw_ra_setup_preview(
     let (step, scale) = minimap_layout(map.width, map.height, size);
     let panel_w = map.width as f32 * scale;
     let panel_h = map.height as f32 * scale;
-    renderer.draw_rect(x - 4.0, y - 4.0, panel_w + 8.0, panel_h + 8.0, [0.03, 0.04, 0.06, 1.0]);
+    renderer.draw_rect(
+        x - 4.0,
+        y - 4.0,
+        panel_w + 8.0,
+        panel_h + 8.0,
+        [0.03, 0.04, 0.06, 1.0],
+    );
     for py in (0..map.height).step_by(step as usize) {
         for px in (0..map.width).step_by(step as usize) {
             let index = py as usize * map.width as usize + px as usize;
             let Some(terrain) = map.terrain.get(index).copied() else {
                 continue;
             };
-            let mut color = terrain.color();
-            if map.ore.get(index).copied().unwrap_or(0) > 0 {
-                color = [0.62, 0.55, 0.18, 1.0];
-            }
-            renderer.draw_rect(
+            let ore = map.ore.get(index).copied().unwrap_or(0) > 0;
+            let base = terrain.color();
+            let fallback = if ore { [0.62, 0.55, 0.18, 1.0] } else { base };
+            // Water against land gets shore edge tiles, Beach transitions to
+            // sand_shore, the rest keep the base terrain family.
+            let (category, family, fallback_row) = ra_terrain_tile(map, px, py);
+            let tile_s = scale * step as f32;
+            let drew_tile = draw_pack_tile_family(
+                renderer,
+                tileset,
+                category,
+                family,
+                fallback_row,
+                px,
+                py,
                 x + px as f32 * scale,
                 y + py as f32 * scale,
-                scale * step as f32,
-                scale * step as f32,
-                color,
+                tile_s,
+                tile_s,
+                fallback,
             );
+            // Ore chunks sprite on top of the terrain tile; without tileset
+            // art the flat fallback colour already carries the ore marker
+            // exactly as the pre-tileset renderer did.
+            if ore && drew_tile {
+                let fx_drawn = draw_pack_fx(
+                    renderer,
+                    tileset,
+                    "ore_chunks",
+                    3,
+                    px,
+                    py,
+                    x + px as f32 * scale,
+                    y + py as f32 * scale,
+                    tile_s,
+                    tile_s,
+                );
+                if !fx_drawn {
+                    renderer.draw_rect(
+                        x + px as f32 * scale,
+                        y + py as f32 * scale,
+                        tile_s,
+                        tile_s,
+                        [0.62, 0.55, 0.18, 0.7],
+                    );
+                }
+            }
         }
     }
     renderer.draw_text("MAP PREVIEW", x, y - 14.0, 9.0, [0.60, 0.75, 0.95, 1.0]);
@@ -1088,6 +1491,7 @@ fn draw_ra_setup_preview(
 fn draw_ra_setup(
     renderer: &mut dyn Renderer,
     setup: &SkirmishSetup,
+    tileset: Option<&TilesetPack>,
     width: u32,
     height: u32,
 ) {
@@ -1096,13 +1500,7 @@ fn draw_ra_setup(
     renderer.draw_rect(0.0, 0.0, w, h, [0.04, 0.05, 0.08, 1.0]);
     renderer.draw_rect(0.0, 112.0, w, 2.0, [0.25, 0.45, 0.75, 1.0]);
     renderer.draw_text("RED ALERT", 60.0, 42.0, 30.0, [0.95, 0.55, 0.35, 1.0]);
-    renderer.draw_text(
-        "Skirmish Setup",
-        60.0,
-        84.0,
-        15.0,
-        [0.85, 0.90, 1.0, 1.0],
-    );
+    renderer.draw_text("Skirmish Setup", 60.0, 84.0, 15.0, [0.85, 0.90, 1.0, 1.0]);
     let rows = [
         format!(
             "Map size: {} x {}          (+ / -)",
@@ -1136,6 +1534,7 @@ fn draw_ra_setup(
     draw_ra_setup_preview(
         renderer,
         &preview,
+        tileset,
         (w - 320.0).max(60.0),
         150.0,
         280.0,
@@ -1248,8 +1647,12 @@ fn draw_net_lobby(
     }
     renderer.draw_text(
         match lobby.role {
-            NetRole::Host => "Host: peer address is the JOIN player's address (e.g. 127.0.0.1:47871).",
-            NetRole::Join => "Join: host address is the HOST player's address (e.g. 127.0.0.1:47870).",
+            NetRole::Host => {
+                "Host: peer address is the JOIN player's address (e.g. 127.0.0.1:47871)."
+            }
+            NetRole::Join => {
+                "Join: host address is the HOST player's address (e.g. 127.0.0.1:47870)."
+            }
         },
         60.0,
         h - 84.0,
@@ -1304,6 +1707,7 @@ fn draw_mission_emblem(
 fn draw_ra_campaign(
     renderer: &mut dyn Renderer,
     campaign: &[CampaignEntry],
+    tileset: Option<&TilesetPack>,
     selected: usize,
     completed: &[bool],
     best_times: &[Option<i32>],
@@ -1354,7 +1758,6 @@ fn draw_ra_campaign(
         }
         for index in visible {
             let entry = &campaign[index];
-            let index = index as usize;
             let done = completed.get(index).copied().unwrap_or(false);
             let color = if index == selected {
                 [1.0, 0.90, 0.45, 1.0]
@@ -1401,7 +1804,11 @@ fn draw_ra_campaign(
             renderer.draw_text(
                 &format!(
                     "Side: {}",
-                    if entry.player == 0 { "Allies" } else { "Soviet" }
+                    if entry.player == 0 {
+                        "Allies"
+                    } else {
+                        "Soviet"
+                    }
                 ),
                 60.0,
                 y,
@@ -1446,8 +1853,8 @@ fn draw_ra_campaign(
 
             if !entry.terrain.is_empty() && entry.width > 0 && entry.height > 0 {
                 let preview_w = 240.0f32;
-                let preview_h = (preview_w * entry.height as f32 / entry.width as f32)
-                    .clamp(90.0, 180.0);
+                let preview_h =
+                    (preview_w * entry.height as f32 / entry.width as f32).clamp(90.0, 180.0);
                 let preview_x = 60.0;
                 let preview_y = y + 12.0;
                 let cell_w = preview_w / entry.width as f32;
@@ -1461,27 +1868,61 @@ fn draw_ra_campaign(
                     while px < entry.width {
                         let index = py as usize * entry.width as usize + px as usize;
                         let terrain = entry.terrain.get(index).copied().unwrap_or(0);
-                        let color = match terrain {
+                        let base = match terrain {
                             1 => [0.10, 0.24, 0.48, 1.0],
                             2 => [0.56, 0.50, 0.32, 1.0],
                             4 => [0.38, 0.38, 0.40, 1.0],
                             _ => [0.22, 0.36, 0.20, 1.0],
                         };
-                        renderer.draw_rect(
+                        let ore = entry.ore.get(index).copied().unwrap_or(0) > 0;
+                        let fallback = if ore { [0.85, 0.72, 0.22, 1.0] } else { base };
+                        // Water against land gets shore edge tiles computed
+                        // over the campaign grid, open water stays deep_water.
+                        let (category, family, fallback_row) = campaign_terrain_tile(
+                            &entry.terrain,
+                            entry.width,
+                            entry.height,
+                            px,
+                            py,
+                        );
+                        let drew_tile = draw_pack_tile_family(
+                            renderer,
+                            tileset,
+                            category,
+                            family,
+                            fallback_row,
+                            px,
+                            py,
                             preview_x + px as f32 * cell_w,
                             preview_y + py as f32 * cell_h,
                             block_w,
                             block_h,
-                            color,
+                            fallback,
                         );
-                        if entry.ore.get(index).copied().unwrap_or(0) > 0 {
-                            renderer.draw_rect(
+                        // Ore marker on top of the terrain tile; without
+                        // tileset art the legacy flat inset marker stays
+                        // exactly as before.
+                        if ore && drew_tile {
+                            let (fx_x, fx_y) = (
                                 preview_x + px as f32 * cell_w + block_w * 0.25,
                                 preview_y + py as f32 * cell_h + block_h * 0.25,
-                                (block_w * 0.5).max(1.0),
-                                (block_h * 0.5).max(1.0),
-                                [0.85, 0.72, 0.22, 1.0],
                             );
+                            let (fx_w, fx_h) = ((block_w * 0.5).max(1.0), (block_h * 0.5).max(1.0));
+                            let fx_drawn = draw_pack_fx(
+                                renderer,
+                                tileset,
+                                "ore_chunks",
+                                3,
+                                px,
+                                py,
+                                fx_x,
+                                fx_y,
+                                fx_w,
+                                fx_h,
+                            );
+                            if !fx_drawn {
+                                renderer.draw_rect(fx_x, fx_y, fx_w, fx_h, [0.85, 0.72, 0.22, 0.8]);
+                            }
                         }
                         px += step;
                     }
@@ -1489,9 +1930,21 @@ fn draw_ra_campaign(
                 }
                 let border = [0.35, 0.50, 0.65, 1.0];
                 renderer.draw_rect(preview_x, preview_y, preview_w, 1.0, border);
-                renderer.draw_rect(preview_x, preview_y + preview_h - 1.0, preview_w, 1.0, border);
+                renderer.draw_rect(
+                    preview_x,
+                    preview_y + preview_h - 1.0,
+                    preview_w,
+                    1.0,
+                    border,
+                );
                 renderer.draw_rect(preview_x, preview_y, 1.0, preview_h, border);
-                renderer.draw_rect(preview_x + preview_w - 1.0, preview_y, 1.0, preview_h, border);
+                renderer.draw_rect(
+                    preview_x + preview_w - 1.0,
+                    preview_y,
+                    1.0,
+                    preview_h,
+                    border,
+                );
             }
         }
     }
@@ -1679,7 +2132,8 @@ fn minimap_cell_at(
     view_h: f32,
     bottom_right: bool,
 ) -> Option<Vec2i> {
-    let (x, y, panel_w, panel_h) = minimap_origin(map_w, map_h, left, top, view_w, view_h, bottom_right);
+    let (x, y, panel_w, panel_h) =
+        minimap_origin(map_w, map_h, left, top, view_w, view_h, bottom_right);
     let rel_x = world.x.to_f32() - x;
     let rel_y = world.y.to_f32() - y;
     if rel_x < 0.0 || rel_y < 0.0 || rel_x >= panel_w || rel_y >= panel_h {
@@ -1696,6 +2150,7 @@ fn minimap_cell_at(
 fn draw_ra_minimap(
     renderer: &mut dyn Renderer,
     game: &RaGame,
+    tileset: Option<&TilesetPack>,
     player: usize,
     center: Vec2,
     view_w: f32,
@@ -1708,24 +2163,70 @@ fn draw_ra_minimap(
     let map_w = game.map.width.max(1);
     let map_h = game.map.height.max(1);
     let (step, scale) = minimap_layout(map_w, map_h, 150.0);
-    let (x, y, panel_w, panel_h) =
-        minimap_origin(map_w, map_h, left, top, hud_w, hud_h, true);
-    renderer.draw_rect(x - 4.0, y - 4.0, panel_w + 8.0, panel_h + 8.0, [0.02, 0.03, 0.05, 1.0]);
+    let (x, y, panel_w, panel_h) = minimap_origin(map_w, map_h, left, top, hud_w, hud_h, true);
+    renderer.draw_rect(
+        x - 4.0,
+        y - 4.0,
+        panel_w + 8.0,
+        panel_h + 8.0,
+        [0.02, 0.03, 0.05, 1.0],
+    );
     for py in (0..map_h).step_by(step as usize) {
         for px in (0..map_w).step_by(step as usize) {
             let index = py as usize * map_w as usize + px as usize;
-            let terrain = game.map.terrain.get(index).copied().unwrap_or(cnc_red_alert::Terrain::Grass);
-            let mut color = terrain.color();
-            if game.map.ore.get(index).copied().unwrap_or(0) > 0 {
-                color = [0.62, 0.55, 0.18, 1.0];
-            }
-            renderer.draw_rect(
+            let terrain = game
+                .map
+                .terrain
+                .get(index)
+                .copied()
+                .unwrap_or(cnc_red_alert::Terrain::Grass);
+            let ore = game.map.ore.get(index).copied().unwrap_or(0) > 0;
+            let base = terrain.color();
+            let fallback = if ore { [0.62, 0.55, 0.18, 1.0] } else { base };
+            // Water against land gets shore edge tiles, Beach transitions to
+            // sand_shore, the rest keep the base terrain family.
+            let (category, family, fallback_row) = ra_terrain_tile(&game.map, px, py);
+            let tile_s = scale * step as f32;
+            let drew_tile = draw_pack_tile_family(
+                renderer,
+                tileset,
+                category,
+                family,
+                fallback_row,
+                px,
+                py,
                 x + px as f32 * scale,
                 y + py as f32 * scale,
-                scale * step as f32,
-                scale * step as f32,
-                color,
+                tile_s,
+                tile_s,
+                fallback,
             );
+            // Ore chunks sprite on top of terrain art; without tileset art
+            // the legacy flat marker colours stay untouched (solid marker in
+            // the fallback, marker rect preserved whenever fx drawing fails).
+            if ore && drew_tile {
+                let fx_drawn = draw_pack_fx(
+                    renderer,
+                    tileset,
+                    "ore_chunks",
+                    3,
+                    px,
+                    py,
+                    x + px as f32 * scale,
+                    y + py as f32 * scale,
+                    tile_s,
+                    tile_s,
+                );
+                if !fx_drawn {
+                    renderer.draw_rect(
+                        x + px as f32 * scale,
+                        y + py as f32 * scale,
+                        tile_s,
+                        tile_s,
+                        [0.62, 0.55, 0.18, 0.7],
+                    );
+                }
+            }
         }
     }
     for structure in &game.structures {
@@ -1767,7 +2268,13 @@ fn draw_ra_minimap(
     let view_cells_w = view_w / RA_TILE_SIZE;
     let view_cells_h = view_h / RA_TILE_SIZE;
     let border = [0.95, 0.90, 0.75, 1.0];
-    renderer.draw_rect(x + view_left * scale, y + view_top * scale, view_cells_w * scale, 1.0, border);
+    renderer.draw_rect(
+        x + view_left * scale,
+        y + view_top * scale,
+        view_cells_w * scale,
+        1.0,
+        border,
+    );
     renderer.draw_rect(
         x + view_left * scale,
         y + (view_top + view_cells_h) * scale - 1.0,
@@ -1775,7 +2282,13 @@ fn draw_ra_minimap(
         1.0,
         border,
     );
-    renderer.draw_rect(x + view_left * scale, y + view_top * scale, 1.0, view_cells_h * scale, border);
+    renderer.draw_rect(
+        x + view_left * scale,
+        y + view_top * scale,
+        1.0,
+        view_cells_h * scale,
+        border,
+    );
     renderer.draw_rect(
         x + (view_left + view_cells_w) * scale - 1.0,
         y + view_top * scale,
@@ -1804,7 +2317,13 @@ fn draw_ra_pause(
     let panel_y = (h - panel_h) * 0.5;
     renderer.draw_rect(panel_x, panel_y, panel_w, panel_h, [0.07, 0.09, 0.13, 1.0]);
     renderer.draw_rect(panel_x, panel_y, panel_w, 2.0, [0.35, 0.55, 0.85, 1.0]);
-    renderer.draw_text("PAUSED", panel_x + 24.0, panel_y + 20.0, 22.0, [0.95, 0.85, 0.60, 1.0]);
+    renderer.draw_text(
+        "PAUSED",
+        panel_x + 24.0,
+        panel_y + 20.0,
+        22.0,
+        [0.95, 0.85, 0.60, 1.0],
+    );
     renderer.draw_text(
         &format!(
             "t={}s   {} units   {} structures   {} credits",
@@ -1820,7 +2339,7 @@ fn draw_ra_pause(
         10.0,
         [0.78, 0.86, 0.95, 1.0],
     );
-    let options = vec![
+    let options = [
         "Resume".to_string(),
         "Restart mission".to_string(),
         "Abort to menu".to_string(),
@@ -1865,20 +2384,23 @@ fn draw_ra_briefing(
     let h = height as f32;
     renderer.draw_rect(0.0, 0.0, w, h, [0.04, 0.05, 0.08, 1.0]);
     renderer.draw_rect(0.0, 112.0, w, 2.0, [0.25, 0.45, 0.75, 1.0]);
-    renderer.draw_text("MISSION BRIEFING", 60.0, 42.0, 26.0, [0.95, 0.55, 0.35, 1.0]);
-    renderer.draw_text(mission, 60.0, 82.0, 15.0, [0.90, 0.93, 0.98, 1.0]);
-    draw_mission_emblem(
-        renderer,
-        w - 170.0,
-        34.0,
-        110.0,
-        game.player_owner,
-        index,
+    renderer.draw_text(
+        "MISSION BRIEFING",
+        60.0,
+        42.0,
+        26.0,
+        [0.95, 0.55, 0.35, 1.0],
     );
+    renderer.draw_text(mission, 60.0, 82.0, 15.0, [0.90, 0.93, 0.98, 1.0]);
+    draw_mission_emblem(renderer, w - 170.0, 34.0, 110.0, game.player_owner, index);
     renderer.draw_text(
         &format!(
             "Side: {}",
-            if game.player_owner == 0 { "Allies" } else { "Soviet" }
+            if game.player_owner == 0 {
+                "Allies"
+            } else {
+                "Soviet"
+            }
         ),
         60.0,
         112.0,
@@ -1926,6 +2448,16 @@ struct LauncherApp {
     camera: Camera,
     game: Game,
     sprite_atlas: Option<SpriteAtlas>,
+    /// RTS 16×16 tileset packs, one per palette: `ra_inspired` backs the RA
+    /// screens, `td_inspired` the TD screens. `load_default` honors
+    /// `CNC_TILESET_DIR` / `CNC_TILESET_PALETTE`; None falls back to the flat
+    /// terrain colours in the draw paths.
+    ra_tileset: Option<TilesetPack>,
+    td_tileset: Option<TilesetPack>,
+    /// Palette currently resident in the renderer's tileset texture slot
+    /// (1 = RA, 2 = TD): None until the first successful upload. Keeps the
+    /// upload-once-per-screen-context behaviour instead of per-frame uploads.
+    tileset_slot: Option<u8>,
     // Kept alive for the upcoming asset/audio integration pass.
     #[allow(dead_code)]
     assets: AssetRegistry,
@@ -1996,6 +2528,9 @@ impl LauncherApp {
             camera,
             game,
             sprite_atlas: None,
+            ra_tileset: cnc_asset::tileset_pack::load_default("ra_inspired"),
+            td_tileset: cnc_asset::tileset_pack::load_default("td_inspired"),
+            tileset_slot: None,
             assets: AssetRegistry::new(),
             mixer: AudioMixer::new()?,
             cursor: None,
@@ -2132,12 +2667,8 @@ impl LauncherApp {
         let max_x = self.game.map.width as f32 * cnc_tiberian_dawn::map::TILE_SIZE;
         let max_y = self.game.map.height as f32 * cnc_tiberian_dawn::map::TILE_SIZE;
         self.camera.position = Vec2::new(
-            Fixed16_16::from_f32(
-                (self.camera.position.x.to_f32() + dx * step).clamp(0.0, max_x),
-            ),
-            Fixed16_16::from_f32(
-                (self.camera.position.y.to_f32() + dy * step).clamp(0.0, max_y),
-            ),
+            Fixed16_16::from_f32((self.camera.position.x.to_f32() + dx * step).clamp(0.0, max_x)),
+            Fixed16_16::from_f32((self.camera.position.y.to_f32() + dy * step).clamp(0.0, max_y)),
         );
     }
 
@@ -2200,10 +2731,8 @@ impl LauncherApp {
         let player = self.game.player_owner;
         match self.game.sell_building(player, index) {
             Some(refund) => {
-                self.td_notice = Some((
-                    format!("Building sold (+{refund} credits)"),
-                    Instant::now(),
-                ));
+                self.td_notice =
+                    Some((format!("Building sold (+{refund} credits)"), Instant::now()));
                 tracing::info!(index, refund, "TD building sold");
             }
             None => {
@@ -2215,7 +2744,10 @@ impl LauncherApp {
     /// Adjust the TD simulation speed (0.25x .. 3x).
     fn adjust_td_speed(&mut self, delta: f32) {
         self.game_speed = (self.game_speed + delta).clamp(0.25, 3.0);
-        self.td_notice = Some((format!("Game speed {:.2}x", self.game_speed), Instant::now()));
+        self.td_notice = Some((
+            format!("Game speed {:.2}x", self.game_speed),
+            Instant::now(),
+        ));
     }
 
     /// Store the selected TD units in a control group (by unit index).
@@ -2269,6 +2801,9 @@ impl LauncherApp {
         }
     }
 
+    // Slot 0 wrapper kept alongside the slot-aware variant for the upcoming
+    // quick-save sidebar button.
+    #[allow(dead_code)]
     fn quick_save_path() -> PathBuf {
         Self::quick_save_path_for(0)
     }
@@ -2333,6 +2868,9 @@ impl LauncherApp {
     // ----- Tiberian Dawn network lobby and lockstep -----------------------
 
     /// Open the TD host/join lobby (menu "Online Game" choice).
+    // Wired by the menu shell integration that is still pending; kept so the
+    // lobby state plumbing stays in place.
+    #[allow(dead_code)]
     fn open_td_lobby(&mut self) {
         self.td_lobby_open = true;
         self.td_lobby_error = None;
@@ -2411,13 +2949,16 @@ impl LauncherApp {
         let mut session = LiveSession::new(local_player, 2, local_address)
             .map_err(|error| anyhow!("network session setup failed: {error:?}"))?;
         if local_player == 0 {
-            let mut index = 0usize;
-            for peer in setup.peers.iter().filter(|peer| !peer.trim().is_empty()) {
+            for (index, peer) in setup
+                .peers
+                .iter()
+                .filter(|peer| !peer.trim().is_empty())
+                .enumerate()
+            {
                 let address = peer
                     .parse::<SocketAddr>()
                     .with_context(|| format!("invalid peer '{peer}'"))?;
                 session.register_peer((1 + index) as u8, address);
-                index += 1;
             }
         } else {
             let host = setup
@@ -2552,6 +3093,8 @@ impl LauncherApp {
     }
 
     /// Place a completed structure locally and broadcast the placement.
+    // Engaged once map mirroring plumbing is complete (in progress).
+    #[allow(dead_code)]
     fn place_td_building(&mut self, cell: Vec2i) -> bool {
         let player = self.game.player_owner;
         let placed = self.game.place_ready_building(player, cell);
@@ -2621,10 +3164,9 @@ impl LauncherApp {
                         let Some((index, seconds)) = entry.trim().split_once(':') else {
                             continue;
                         };
-                        let (Ok(index), Ok(seconds)) = (
-                            index.trim().parse::<usize>(),
-                            seconds.trim().parse::<i32>(),
-                        ) else {
+                        let (Ok(index), Ok(seconds)) =
+                            (index.trim().parse::<usize>(), seconds.trim().parse::<i32>())
+                        else {
                             continue;
                         };
                         if let Some(slot) = self.td_best.get_mut(index) {
@@ -2796,8 +3338,8 @@ impl LauncherApp {
         self.selecting_mission = false;
         self.selected_building = None;
         self.td_recorded = false;
-        self.td_briefing_open = !self.game.mission.briefing.is_empty()
-            || !self.game.mission.objectives.is_empty();
+        self.td_briefing_open =
+            !self.game.mission.briefing.is_empty() || !self.game.mission.objectives.is_empty();
         self.camera.position = self.game.world_center();
         self.last_produced = self.game.units_produced;
         self.last_harvested = self.game.harvested_credits;
@@ -2862,7 +3404,9 @@ impl LauncherApp {
                 action: BuildAction::Structure(structure),
                 label: build_label(option.buildable),
                 cost: option.cost,
-                enabled: self.game.can_queue_building(self.game.player_owner, structure),
+                enabled: self
+                    .game
+                    .can_queue_building(self.game.player_owner, structure),
             });
             row_y += SIDEBAR_ROW_HEIGHT;
         }
@@ -2912,9 +3456,51 @@ impl LauncherApp {
         }
     }
 
+    /// Bind the tileset pack a screen needs to the renderer's tileset texture
+    /// slot. Uploads are tagged and rare: the slot keeps its contents across
+    /// frames and is only (re)uploaded when the active palette changes, so this
+    /// runs once per renderer lifetime for every shell whose screens share one
+    /// palette — the same upload-once pattern as the SpriteAtlas in `resumed`.
+    fn bind_tileset(&mut self, palette: TilesetPalette) {
+        let tag = match palette {
+            TilesetPalette::Ra => 1,
+            TilesetPalette::Td => 2,
+        };
+        if self.tileset_slot == Some(tag) {
+            return;
+        }
+        let pack = match palette {
+            TilesetPalette::Ra => self.ra_tileset.as_ref(),
+            TilesetPalette::Td => self.td_tileset.as_ref(),
+        };
+        let Some(pack) = pack else {
+            return;
+        };
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        if !renderer.uses_sprites() {
+            // Sprites never draw on this backend; the draw paths keep flat
+            // colours, so there is nothing to upload.
+            return;
+        }
+        match renderer.set_atlas_texture(
+            cnc_renderer::TILESET_TEXTURE_ID,
+            pack.width(),
+            pack.height(),
+            pack.rgba(),
+        ) {
+            Ok(()) => {
+                tracing::info!(palette = pack.palette(), "terrain tileset atlas ready");
+                self.tileset_slot = Some(tag);
+            }
+            Err(error) => tracing::warn!(%error, "failed to upload terrain tileset atlas"),
+        }
+    }
+
     fn draw(&mut self) {
         let now = Instant::now();
-        let delta = (now - self.last_frame).as_secs_f32().min(0.1).max(1.0e-4);
+        let delta = (now - self.last_frame).as_secs_f32().clamp(1.0e-4, 0.1);
         self.last_frame = now;
         if self.td_lobby_open {
             self.poll_td_lan_scan();
@@ -3019,7 +3605,12 @@ impl LauncherApp {
             };
             renderer.begin_frame();
             renderer.set_camera(&screen_camera(self.width, self.height));
-            draw_td_briefing(renderer.as_mut(), &self.game.mission, self.width, self.height);
+            draw_td_briefing(
+                renderer.as_mut(),
+                &self.game.mission,
+                self.width,
+                self.height,
+            );
             if let Err(error) = renderer.end_frame() {
                 tracing::warn!(%error, "TD briefing frame presentation failed");
             }
@@ -3146,7 +3737,11 @@ impl LauncherApp {
             }
         }
 
-        if self.game.ready_building_for(self.game.player_owner).is_some() {
+        if self
+            .game
+            .ready_building_for(self.game.player_owner)
+            .is_some()
+        {
             if let Some(world) = cursor {
                 let tile = cnc_tiberian_dawn::map::TILE_SIZE;
                 let cell = Vec2i::new(
@@ -3236,13 +3831,7 @@ impl LauncherApp {
         );
         if let Some((notice, at)) = &self.td_notice {
             if at.elapsed() < Duration::from_secs(4) {
-                renderer.draw_text(
-                    notice,
-                    left + 16.0,
-                    top + 72.0,
-                    9.0,
-                    [1.0, 0.76, 0.35, 1.0],
-                );
+                renderer.draw_text(notice, left + 16.0, top + 72.0, 9.0, [1.0, 0.76, 0.35, 1.0]);
             }
         }
 
@@ -3347,7 +3936,7 @@ impl LauncherApp {
         );
 
         for entry in &sidebar.entries {
-            let hovered = hud_cursor.map_or(false, |hover| {
+            let hovered = hud_cursor.is_some_and(|hover| {
                 let x = hover.x.to_f32();
                 let y = hover.y.to_f32();
                 x >= entry.x && x <= entry.x + entry.w && y >= entry.y && y <= entry.y + entry.h
@@ -3376,6 +3965,7 @@ impl LauncherApp {
         draw_td_minimap(
             renderer.as_mut(),
             &self.game,
+            self.td_tileset.as_ref(),
             self.game.player_owner,
             self.camera.position,
             self.camera.viewport_width as f32 / zoom,
@@ -3465,6 +4055,10 @@ impl ApplicationHandler for LauncherApp {
                 }
             }
         }
+
+        // Terrain screens in this shell are TD; bind the TD pack once here so
+        // the first frame's tileset sprites sample a resident texture.
+        self.bind_tileset(TilesetPalette::Td);
 
         self.window = Some(window);
         self.last_frame = Instant::now();
@@ -3622,7 +4216,11 @@ impl ApplicationHandler for LauncherApp {
                             self.handle_sidebar_click(world);
                         } else if started_in_sidebar {
                             // Drag started on the build menu: ignore.
-                        } else if self.game.ready_building_for(self.game.player_owner).is_some() {
+                        } else if self
+                            .game
+                            .ready_building_for(self.game.player_owner)
+                            .is_some()
+                        {
                             let tile = cnc_tiberian_dawn::map::TILE_SIZE;
                             let cell = Vec2i::new(
                                 (world.x.to_f32() / tile).floor() as i32,
@@ -3712,8 +4310,8 @@ impl ApplicationHandler for LauncherApp {
                             Key::Named(NamedKey::ArrowUp) => {
                                 if let Some(scan) = self.td_lan_scan.as_mut() {
                                     if !scan.hosts.is_empty() {
-                                        scan.selected =
-                                            (scan.selected + scan.hosts.len() - 1) % scan.hosts.len();
+                                        scan.selected = (scan.selected + scan.hosts.len() - 1)
+                                            % scan.hosts.len();
                                     }
                                 }
                             }
@@ -3862,23 +4460,29 @@ impl ApplicationHandler for LauncherApp {
                             tracing::debug!(count, "select all GDI units");
                         }
                         Key::Character(text) if text.eq_ignore_ascii_case("1") => {
-                            let queued = self.queue_td_buildable(Buildable::Unit(UnitType::InfantryE1));
+                            let queued =
+                                self.queue_td_buildable(Buildable::Unit(UnitType::InfantryE1));
                             tracing::debug!(queued, "queue GDI infantry");
                         }
                         Key::Character(text) if text.eq_ignore_ascii_case("2") => {
-                            let queued = self.queue_td_buildable(Buildable::Unit(UnitType::MediumTank));
+                            let queued =
+                                self.queue_td_buildable(Buildable::Unit(UnitType::MediumTank));
                             tracing::debug!(queued, "queue GDI medium tank");
                         }
                         Key::Character(text) if text.eq_ignore_ascii_case("3") => {
-                            let queued = self.queue_td_buildable(Buildable::Unit(UnitType::MammothTank));
+                            let queued =
+                                self.queue_td_buildable(Buildable::Unit(UnitType::MammothTank));
                             tracing::debug!(queued, "queue GDI mammoth tank");
                         }
                         Key::Character(text) if text.eq_ignore_ascii_case("4") => {
-                            let queued = self.queue_td_buildable(Buildable::Unit(UnitType::Harvester));
+                            let queued =
+                                self.queue_td_buildable(Buildable::Unit(UnitType::Harvester));
                             tracing::debug!(queued, "queue GDI harvester");
                         }
                         Key::Character(text) if text.eq_ignore_ascii_case("5") => {
-                            let queued = self.queue_td_buildable(Buildable::Structure(StructureType::PowerPlant));
+                            let queued = self.queue_td_buildable(Buildable::Structure(
+                                StructureType::PowerPlant,
+                            ));
                             let status = self.game.status();
                             tracing::debug!(
                                 queued,
@@ -3888,19 +4492,24 @@ impl ApplicationHandler for LauncherApp {
                             );
                         }
                         Key::Character(text) if text.eq_ignore_ascii_case("6") => {
-                            let queued = self.queue_td_buildable(Buildable::Structure(StructureType::Refinery));
+                            let queued = self
+                                .queue_td_buildable(Buildable::Structure(StructureType::Refinery));
                             tracing::debug!(queued, "queue GDI refinery");
                         }
                         Key::Character(text) if text.eq_ignore_ascii_case("7") => {
-                            let queued = self.queue_td_buildable(Buildable::Structure(StructureType::Barracks));
+                            let queued = self
+                                .queue_td_buildable(Buildable::Structure(StructureType::Barracks));
                             tracing::debug!(queued, "queue GDI barracks");
                         }
                         Key::Character(text) if text.eq_ignore_ascii_case("8") => {
-                            let queued = self.queue_td_buildable(Buildable::Structure(StructureType::WarFactory));
+                            let queued = self.queue_td_buildable(Buildable::Structure(
+                                StructureType::WarFactory,
+                            ));
                             tracing::debug!(queued, "queue GDI war factory");
                         }
                         Key::Character(text) if text.eq_ignore_ascii_case("9") => {
-                            let queued = self.queue_td_buildable(Buildable::Structure(StructureType::Silo));
+                            let queued =
+                                self.queue_td_buildable(Buildable::Structure(StructureType::Silo));
                             tracing::debug!(queued, "queue GDI silo");
                         }
                         Key::Character(text) if text.eq_ignore_ascii_case("0") => {
@@ -4186,7 +4795,8 @@ impl LanScan {
             label: format!("{name}  {address}"),
             address,
         });
-        self.hosts.sort_by(|left, right| left.address.cmp(&right.address));
+        self.hosts
+            .sort_by(|left, right| left.address.cmp(&right.address));
         self.hosts.truncate(8);
         if self.selected >= self.hosts.len() {
             self.selected = self.hosts.len().saturating_sub(1);
@@ -4440,7 +5050,8 @@ fn apply_net_build(
         (location.x.to_f32() / RA_TILE_SIZE).floor() as i32,
         (location.y.to_f32() / RA_TILE_SIZE).floor() as i32,
     );
-    game.place_structure(player as usize, class_id, cell).is_ok()
+    game.place_structure(player as usize, class_id, cell)
+        .is_ok()
 }
 
 /// Discriminator used by TD Produce commands to mark structure production.
@@ -4482,21 +5093,18 @@ fn td_produce_target(factory: u32, class_id: cnc_core::ClassId) -> Option<Builda
 fn apply_td_command(game: &mut Game, command: &NetCommand) -> bool {
     let player = command.player;
     match &command.command {
-        NetCommandKind::Move { units, target } => {
-            game.order_units_move(player, units, *target) > 0
-        }
+        NetCommandKind::Move { units, target } => game.order_units_move(player, units, *target) > 0,
         NetCommandKind::Attack { units, target } => {
             game.order_units_attack(player, units, *target as usize) > 0
         }
         NetCommandKind::Stop { units } => game.order_units_stop(player, units) > 0,
-        NetCommandKind::Produce {
-            factory,
-            unit_type,
-        } => match td_produce_target(*factory, *unit_type) {
-            Some(Buildable::Unit(unit)) => game.queue_unit(player, unit),
-            Some(Buildable::Structure(structure)) => game.queue_building(player, structure),
-            None => false,
-        },
+        NetCommandKind::Produce { factory, unit_type } => {
+            match td_produce_target(*factory, *unit_type) {
+                Some(Buildable::Unit(unit)) => game.queue_unit(player, unit),
+                Some(Buildable::Structure(structure)) => game.queue_building(player, structure),
+                None => false,
+            }
+        }
         NetCommandKind::PlaceBuilding { location } => {
             let tile = cnc_tiberian_dawn::map::TILE_SIZE;
             let cell = Vec2i::new(
@@ -4538,6 +5146,15 @@ struct RaLauncherApp {
     window: Option<Arc<Window>>,
     camera: Camera,
     game: RaGame,
+    /// RTS 16×16 tileset packs, one per palette (RA screens use `ra_inspired`,
+    /// TD screens `td_inspired`, honoring `CNC_TILESET_DIR` /
+    /// `CNC_TILESET_PALETTE`); None falls back to the flat terrain colours.
+    ra_tileset: Option<TilesetPack>,
+    td_tileset: Option<TilesetPack>,
+    /// Palette currently resident in the renderer's tileset texture slot
+    /// (1 = RA, 2 = TD); None until the first successful upload, keeping
+    /// uploads rare (screen context changes, never per frame).
+    tileset_slot: Option<u8>,
     scenario_name: String,
     mode: RaMode,
     setup: SkirmishSetup,
@@ -4604,6 +5221,9 @@ impl RaLauncherApp {
             renderer: None,
             camera,
             game,
+            ra_tileset: cnc_asset::tileset_pack::load_default("ra_inspired"),
+            td_tileset: cnc_asset::tileset_pack::load_default("td_inspired"),
+            tileset_slot: None,
             scenario_name: "Skirmish".to_string(),
             mode: RaMode::Setup,
             setup: SkirmishSetup::default(),
@@ -4830,12 +5450,16 @@ impl RaLauncherApp {
         (0..self.campaign.len())
             .filter(|index| match self.campaign_filter {
                 CampaignFilter::All => true,
-                CampaignFilter::Incomplete => {
-                    !self.campaign_completed.get(*index).copied().unwrap_or(false)
-                }
-                CampaignFilter::Completed => {
-                    self.campaign_completed.get(*index).copied().unwrap_or(false)
-                }
+                CampaignFilter::Incomplete => !self
+                    .campaign_completed
+                    .get(*index)
+                    .copied()
+                    .unwrap_or(false),
+                CampaignFilter::Completed => self
+                    .campaign_completed
+                    .get(*index)
+                    .copied()
+                    .unwrap_or(false),
             })
             .collect()
     }
@@ -4959,7 +5583,7 @@ impl RaLauncherApp {
 
     /// Apply queued gameplay commands (the seam a network session will feed).
     fn drain_pending_commands(&mut self) -> usize {
-        let commands: Vec<GameCommand> = self.pending_commands.drain(..).collect();
+        let commands: Vec<GameCommand> = std::mem::take(&mut self.pending_commands);
         let count = commands.len();
         for command in commands {
             self.game.apply_command(&command);
@@ -4992,13 +5616,16 @@ impl RaLauncherApp {
         let mut session = LiveSession::new(local_player, 2, local_address)
             .map_err(|error| anyhow!("network session setup failed: {error:?}"))?;
         if local_player == 0 {
-            let mut index = 0usize;
-            for peer in setup.peers.iter().filter(|peer| !peer.trim().is_empty()) {
+            for (index, peer) in setup
+                .peers
+                .iter()
+                .filter(|peer| !peer.trim().is_empty())
+                .enumerate()
+            {
                 let address = peer
                     .parse::<SocketAddr>()
                     .with_context(|| format!("invalid --net-peer '{peer}'"))?;
                 session.register_peer((1 + index) as u8, address);
-                index += 1;
             }
         } else {
             let host = setup
@@ -5009,13 +5636,16 @@ impl RaLauncherApp {
                 .parse::<SocketAddr>()
                 .with_context(|| format!("invalid --net-join '{host}'"))?;
             session.register_peer(0, address);
-            let mut index = 0usize;
-            for peer in setup.peers.iter().filter(|peer| !peer.trim().is_empty()) {
+            for (index, peer) in setup
+                .peers
+                .iter()
+                .filter(|peer| !peer.trim().is_empty())
+                .enumerate()
+            {
                 let address = peer
                     .parse::<SocketAddr>()
                     .with_context(|| format!("invalid --net-peer '{peer}'"))?;
                 session.register_peer((2 + index) as u8, address);
-                index += 1;
             }
         }
         if local_player == 1 {
@@ -5090,10 +5720,7 @@ impl RaLauncherApp {
         let frame = state.frame;
         state.frame = state.frame.wrapping_add(1);
         let mut applied = 0;
-        loop {
-            let Some(command) = state.commands.get(state.next).cloned() else {
-                break;
-            };
+        while let Some(command) = state.commands.get(state.next).cloned() {
             if command.frame > frame {
                 break;
             }
@@ -5192,10 +5819,8 @@ impl RaLauncherApp {
                         let before = net.rejoined;
                         register_join_peer(net, source, player);
                         if net.rejoined > before {
-                            self.notice = Some((
-                                format!("Peer {player} reconnected"),
-                                Instant::now(),
-                            ));
+                            self.notice =
+                                Some((format!("Peer {player} reconnected"), Instant::now()));
                         }
                         continue;
                     }
@@ -5229,8 +5854,7 @@ impl RaLauncherApp {
                                 .then_some(player)
                             });
                             let player = rejoining.or_else(|| {
-                                let taken: Vec<u8> =
-                                    net.session.peers.keys().copied().collect();
+                                let taken: Vec<u8> = net.session.peers.keys().copied().collect();
                                 (0..players)
                                     .find(|player| *player != local && !taken.contains(player))
                             });
@@ -5250,10 +5874,8 @@ impl RaLauncherApp {
                             net.session.relay.clear();
                             if was_lost {
                                 net.rejoined += 1;
-                                self.notice = Some((
-                                    format!("Peer {player} reconnected"),
-                                    Instant::now(),
-                                ));
+                                self.notice =
+                                    Some((format!("Peer {player} reconnected"), Instant::now()));
                                 tracing::info!(player, "network peer reconnected");
                             }
                         }
@@ -5335,10 +5957,7 @@ impl RaLauncherApp {
         if net.role == "join" && net.last_handshake.elapsed() >= Duration::from_secs(2) {
             net.last_handshake = Instant::now();
             if let Some(host) = net.session.peers.get(&0).copied() {
-                let text = format!(
-                    "{JOIN_HANDSHAKE_PREFIX} {}\n",
-                    net.session.local_player
-                );
+                let text = format!("{JOIN_HANDSHAKE_PREFIX} {}\n", net.session.local_player);
                 let _ = net.socket.send_to(text.as_bytes(), host);
             }
         }
@@ -5561,7 +6180,8 @@ impl RaLauncherApp {
             return;
         }
         if let Some(net) = self.network.as_mut() {
-            net.session.queue_local(NetCommandKind::Sell { building: id });
+            net.session
+                .queue_local(NetCommandKind::Sell { building: id });
         }
         self.pending_commands.push(GameCommand::Sell {
             owner: player,
@@ -5731,8 +6351,7 @@ impl RaLauncherApp {
     }
 
     fn cycle_campaign_difficulty(&mut self) {
-        self.campaign_difficulty =
-            (self.campaign_difficulty + 1) % DIFFICULTY_NAMES.len();
+        self.campaign_difficulty = (self.campaign_difficulty + 1) % DIFFICULTY_NAMES.len();
         self.save_campaign_progress(self.campaign_index);
     }
 
@@ -5782,7 +6401,8 @@ impl RaLauncherApp {
     }
 
     fn center_camera(&mut self) {
-        self.camera.set_viewport(self.width.max(1), self.height.max(1));
+        self.camera
+            .set_viewport(self.width.max(1), self.height.max(1));
         self.camera.zoom = Fixed16_16::from_f32(DEFAULT_GAME_ZOOM);
         self.camera.position = Vec2::new(
             Fixed16_16::from_f32(self.game.map.width as f32 * RA_TILE_SIZE * 0.5),
@@ -5922,12 +6542,8 @@ impl RaLauncherApp {
         let max_x = self.game.map.width as f32 * RA_TILE_SIZE;
         let max_y = self.game.map.height as f32 * RA_TILE_SIZE;
         self.camera.position = Vec2::new(
-            Fixed16_16::from_f32(
-                (self.camera.position.x.to_f32() + dx * step).clamp(0.0, max_x),
-            ),
-            Fixed16_16::from_f32(
-                (self.camera.position.y.to_f32() + dy * step).clamp(0.0, max_y),
-            ),
+            Fixed16_16::from_f32((self.camera.position.x.to_f32() + dx * step).clamp(0.0, max_x)),
+            Fixed16_16::from_f32((self.camera.position.y.to_f32() + dy * step).clamp(0.0, max_y)),
         );
     }
 
@@ -5941,7 +6557,10 @@ impl RaLauncherApp {
             return;
         }
         self.game_speed = (self.game_speed + delta).clamp(0.25, 3.0);
-        self.notice = Some((format!("Game speed {:.2}x", self.game_speed), Instant::now()));
+        self.notice = Some((
+            format!("Game speed {:.2}x", self.game_speed),
+            Instant::now(),
+        ));
     }
 
     /// Store the selected RA units in a control group.
@@ -6003,9 +6622,51 @@ impl RaLauncherApp {
         })
     }
 
+    /// Bind the tileset pack a screen needs to the renderer's tileset texture
+    /// slot. Uploads are tagged and rare: the slot keeps its contents across
+    /// frames and is only (re)uploaded when the active palette changes, so the
+    /// RA shell uploads once per renderer lifetime — the same upload-once
+    /// pattern as the SpriteAtlas in the TD shell's `resumed`.
+    fn bind_tileset(&mut self, palette: TilesetPalette) {
+        let tag = match palette {
+            TilesetPalette::Ra => 1,
+            TilesetPalette::Td => 2,
+        };
+        if self.tileset_slot == Some(tag) {
+            return;
+        }
+        let pack = match palette {
+            TilesetPalette::Ra => self.ra_tileset.as_ref(),
+            TilesetPalette::Td => self.td_tileset.as_ref(),
+        };
+        let Some(pack) = pack else {
+            return;
+        };
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        if !renderer.uses_sprites() {
+            // Sprites never draw on this backend; the draw paths keep flat
+            // colours, so there is nothing to upload.
+            return;
+        }
+        match renderer.set_atlas_texture(
+            cnc_renderer::TILESET_TEXTURE_ID,
+            pack.width(),
+            pack.height(),
+            pack.rgba(),
+        ) {
+            Ok(()) => {
+                tracing::info!(palette = pack.palette(), "terrain tileset atlas ready");
+                self.tileset_slot = Some(tag);
+            }
+            Err(error) => tracing::warn!(%error, "failed to upload terrain tileset atlas"),
+        }
+    }
+
     fn draw(&mut self) {
         let now = Instant::now();
-        let delta = (now - self.last_frame).as_secs_f32().min(0.1).max(1.0e-4);
+        let delta = (now - self.last_frame).as_secs_f32().clamp(1.0e-4, 0.1);
         self.last_frame = now;
         if self.mode == RaMode::Playing && !self.paused && !self.briefing_open {
             self.apply_ra_edge_pan(delta);
@@ -6033,7 +6694,13 @@ impl RaLauncherApp {
         if self.mode == RaMode::Setup {
             renderer.begin_frame();
             renderer.set_camera(&screen_camera(self.width, self.height));
-            draw_ra_setup(renderer.as_mut(), &self.setup, self.width, self.height);
+            draw_ra_setup(
+                renderer.as_mut(),
+                &self.setup,
+                self.ra_tileset.as_ref(),
+                self.width,
+                self.height,
+            );
             if let Err(error) = renderer.end_frame() {
                 tracing::warn!(%error, "setup frame presentation failed");
             }
@@ -6066,6 +6733,7 @@ impl RaLauncherApp {
             draw_ra_campaign(
                 renderer.as_mut(),
                 &self.campaign,
+                self.ra_tileset.as_ref(),
                 self.campaign_index,
                 &self.campaign_completed,
                 &self.campaign_best,
@@ -6273,7 +6941,11 @@ impl RaLauncherApp {
             8.0,
             [0.85, 0.88, 0.95, 1.0],
         );
-        let chat_hint = if self.network.is_some() { "  Y chat" } else { "" };
+        let chat_hint = if self.network.is_some() {
+            "  Y chat"
+        } else {
+            ""
+        };
         renderer.draw_text(
             &format!("LMB select / drag box  RMB move/attack  MMB drag pan  wheel zoom / edge-scroll  Ctrl+1-4 view  Ctrl+Shift+1-4 mark  1 rifle 2 tank 3 ship  Space light tank  A all  P/B/W/T build  LMB struct X sell R repair O power G scatter  Bksp cancel  S stop  Alt+1-4 group  D deploy MCV  C chrono  I curtain  F5/F9 save/load  +/- or wheel zoom  F6/F7 speed {:.2}x  ESC quit{chat_hint}", self.game_speed),
             left + 16.0,
@@ -6350,13 +7022,7 @@ impl RaLauncherApp {
         }
         if let Some((notice, at)) = &self.notice {
             if at.elapsed() < Duration::from_secs(4) {
-                renderer.draw_text(
-                    notice,
-                    left + 16.0,
-                    info_y,
-                    9.0,
-                    [1.0, 0.76, 0.35, 1.0],
-                );
+                renderer.draw_text(notice, left + 16.0, info_y, 9.0, [1.0, 0.76, 0.35, 1.0]);
                 info_y += 12.0;
             }
         }
@@ -6421,6 +7087,7 @@ impl RaLauncherApp {
         draw_ra_minimap(
             renderer.as_mut(),
             &self.game,
+            self.ra_tileset.as_ref(),
             self.game.player_owner,
             self.camera.position,
             self.camera.viewport_width as f32 / zoom,
@@ -6456,7 +7123,7 @@ impl RaLauncherApp {
             );
             self.software_warning_emitted = true;
         }
-        if self.frame_index % 120 == 0 {
+        if self.frame_index.is_multiple_of(120) {
             tracing::info!("RA {}", self.game.summary());
         }
     }
@@ -6486,10 +7153,18 @@ impl ApplicationHandler for RaLauncherApp {
             Fixed16_16::from_f32(self.game.map.width as f32 * RA_TILE_SIZE * 0.5),
             Fixed16_16::from_f32(self.game.map.height as f32 * RA_TILE_SIZE * 0.5),
         );
-        self.renderer = Some(create_renderer(self.kind, self.width, self.height, window.clone()));
+        self.renderer = Some(create_renderer(
+            self.kind,
+            self.width,
+            self.height,
+            window.clone(),
+        ));
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.set_camera(&self.camera);
         }
+        // Terrain screens in this shell are RA; bind the RA pack once here so
+        // setup/campaign previews and the minimap sample a resident texture.
+        self.bind_tileset(TilesetPalette::Ra);
         self.window = Some(window);
         self.last_frame = Instant::now();
         self.next_frame = Instant::now() + FRAME_INTERVAL;
@@ -6585,12 +7260,8 @@ impl ApplicationHandler for RaLauncherApp {
                             {
                                 Ok(id) => {
                                     let location = Vec2::new(
-                                        Fixed16_16::from_f32(
-                                            (cell.x as f32 + 0.5) * RA_TILE_SIZE,
-                                        ),
-                                        Fixed16_16::from_f32(
-                                            (cell.y as f32 + 0.5) * RA_TILE_SIZE,
-                                        ),
+                                        Fixed16_16::from_f32((cell.x as f32 + 0.5) * RA_TILE_SIZE),
+                                        Fixed16_16::from_f32((cell.y as f32 + 0.5) * RA_TILE_SIZE),
                                     );
                                     if let Some(net) = self.network.as_mut() {
                                         net.session.queue_local(NetCommandKind::Build {
@@ -7034,6 +7705,10 @@ struct LauncherShell {
     menu_window: Option<Arc<Window>>,
     menu_renderer: Option<Box<dyn Renderer>>,
     menu_cursor: (f32, f32),
+    /// True once a menu frame was successfully presented. Wayland only maps a
+    /// window after the first buffer commit, so redraws must be re-requested
+    /// until then (a single request during `resumed` can be dropped).
+    menu_presented: bool,
     session: ShellSession,
 }
 
@@ -7061,6 +7736,7 @@ impl LauncherShell {
             menu_window: None,
             menu_renderer: None,
             menu_cursor: (0.0, 0.0),
+            menu_presented: false,
             session: ShellSession::Menu,
         }
     }
@@ -7116,10 +7792,10 @@ impl LauncherShell {
         };
         renderer.begin_frame();
         renderer.set_camera(&screen_camera(self.width, self.height));
-        self.menu
-            .draw(renderer.as_mut(), self.width, self.height);
-        if let Err(error) = renderer.end_frame() {
-            tracing::warn!(%error, "menu frame presentation failed");
+        self.menu.draw(renderer.as_mut(), self.width, self.height);
+        match renderer.end_frame() {
+            Ok(()) => self.menu_presented = true,
+            Err(error) => tracing::warn!(%error, "menu frame presentation failed"),
         }
     }
 
@@ -7159,21 +7835,18 @@ impl LauncherShell {
                 }
             }
             LaunchTarget::Local(game) => match game {
-                GameChoice::TiberianDawn => {
-                    Ok(ShellSession::Td(Box::new(self.build_td()?)))
-                }
-                GameChoice::RedAlert => Ok(ShellSession::Ra(Box::new(
-                    RaLauncherApp::new(self.kind, self.width, self.height, self.frame_limit),
-                ))),
+                GameChoice::TiberianDawn => Ok(ShellSession::Td(Box::new(self.build_td()?))),
+                GameChoice::RedAlert => Ok(ShellSession::Ra(Box::new(RaLauncherApp::new(
+                    self.kind,
+                    self.width,
+                    self.height,
+                    self.frame_limit,
+                )))),
             },
             LaunchTarget::Online(game) => match game {
                 GameChoice::RedAlert => {
-                    let mut app = RaLauncherApp::new(
-                        self.kind,
-                        self.width,
-                        self.height,
-                        self.frame_limit,
-                    );
+                    let mut app =
+                        RaLauncherApp::new(self.kind, self.width, self.height, self.frame_limit);
                     app.open_lobby();
                     Ok(ShellSession::Ra(Box::new(app)))
                 }
@@ -7214,6 +7887,7 @@ impl LauncherShell {
                 tracing::warn!(%error, "main menu launch failed");
                 self.menu.set_notice(format!("{error}"));
                 self.session = ShellSession::Menu;
+                self.menu_presented = false;
                 if let Some(window) = &self.menu_window {
                     window.set_visible(true);
                     window.focus_window();
@@ -7228,6 +7902,8 @@ impl LauncherShell {
         tracing::info!("returning to the main menu");
         self.session = ShellSession::Menu;
         self.menu.reset();
+        // The hidden menu window must present again after being re-shown.
+        self.menu_presented = false;
         if let Some(window) = &self.menu_window {
             window.set_visible(true);
             window.focus_window();
@@ -7248,6 +7924,11 @@ impl ApplicationHandler for LauncherShell {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if matches!(self.session, ShellSession::Menu) {
             self.create_menu_window(event_loop);
+            // Wayland only maps a window after the first buffer is committed,
+            // so an initial redraw must be requested or the menu stays hidden.
+            if let Some(window) = &self.menu_window {
+                window.request_redraw();
+            }
         }
     }
 
@@ -7336,7 +8017,19 @@ impl ApplicationHandler for LauncherShell {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         match &mut self.session {
-            ShellSession::Menu => event_loop.set_control_flow(ControlFlow::Wait),
+            ShellSession::Menu => {
+                if !self.menu_presented {
+                    // Re-request redraws until the first frame is presented;
+                    // Wayland drops requests made before the initial configure.
+                    if let Some(window) = &self.menu_window {
+                        window.request_redraw();
+                    }
+                    event_loop
+                        .set_control_flow(ControlFlow::WaitUntil(Instant::now() + FRAME_INTERVAL));
+                } else {
+                    event_loop.set_control_flow(ControlFlow::Wait);
+                }
+            }
             ShellSession::Td(app) => app.about_to_wait(event_loop),
             ShellSession::Ra(app) => app.about_to_wait(event_loop),
         }
@@ -7465,12 +8158,7 @@ fn main() -> Result<()> {
             args.width,
             args.height
         );
-        let mut app = RaLauncherApp::new(
-            kind,
-            args.width.max(1),
-            args.height.max(1),
-            args.frames,
-        );
+        let mut app = RaLauncherApp::new(kind, args.width.max(1), args.height.max(1), args.frames);
         if let Some(dir) = &args.campaign {
             let count = app.load_campaign(dir);
             tracing::info!(
@@ -7480,9 +8168,8 @@ fn main() -> Result<()> {
             );
         }
         if let Some(path) = &args.scenario {
-            let scenario = cnc_red_alert::Scenario::from_file(path).with_context(|| {
-                format!("failed to load scenario from {}", path.display())
-            })?;
+            let scenario = cnc_red_alert::Scenario::from_file(path)
+                .with_context(|| format!("failed to load scenario from {}", path.display()))?;
             tracing::info!(
                 name = %scenario.name,
                 map = %format!("{}x{}", scenario.width, scenario.height),
@@ -7546,8 +8233,8 @@ fn main() -> Result<()> {
             .load_mission(path)
             .with_context(|| format!("failed to load mission from {}", path.display()))?;
         app.selecting_mission = false;
-        app.td_briefing_open = !app.game.mission.briefing.is_empty()
-            || !app.game.mission.objectives.is_empty();
+        app.td_briefing_open =
+            !app.game.mission.briefing.is_empty() || !app.game.mission.objectives.is_empty();
         tracing::info!(
             mission = %app.game.mission.name,
             triggers = app.game.mission.triggers.len(),
@@ -7585,12 +8272,7 @@ mod tests {
     fn menu_test_row(index: usize, width: u32) -> (f32, f32, f32, f32) {
         // Mirrors the layout constants used by MainMenu::draw.
         let item_width = (width as f32 - 120.0).clamp(320.0, 560.0);
-        (
-            60.0,
-            224.0 + index as f32 * (48.0 + 10.0),
-            item_width,
-            48.0,
-        )
+        (60.0, 224.0 + index as f32 * (48.0 + 10.0), item_width, 48.0)
     }
 
     #[test]
@@ -7601,10 +8283,7 @@ mod tests {
             GameKind::TiberianDawn
         );
         assert_eq!(GameKind::parse("RA").unwrap(), GameKind::RedAlert);
-        assert_eq!(
-            GameKind::parse("red-alert").unwrap(),
-            GameKind::RedAlert
-        );
+        assert_eq!(GameKind::parse("red-alert").unwrap(), GameKind::RedAlert);
         assert!(GameKind::parse("dune").is_err());
     }
 
@@ -7680,7 +8359,10 @@ mod tests {
 
         assert!(app.start_campaign_mission(0));
         assert_eq!(app.mode, RaMode::Playing);
-        assert!(app.briefing_open, "missions with briefings open the overlay");
+        assert!(
+            app.briefing_open,
+            "missions with briefings open the overlay"
+        );
         assert_eq!(app.game.map.width, 24);
         assert_eq!(app.game.ai.queue_timer, Fixed16_16::from_int(7));
         let saved = std::fs::read_to_string(&progress).unwrap();
@@ -8060,7 +8742,11 @@ mod tests {
             .is_ok());
         assert_eq!(host.game.player_owner, 0);
         assert_eq!(join.game.player_owner, 1);
-        assert_eq!(host.game.ai.owner, usize::MAX, "AI disabled for network play");
+        assert_eq!(
+            host.game.ai.owner,
+            usize::MAX,
+            "AI disabled for network play"
+        );
 
         let unit = join
             .game
@@ -8076,11 +8762,10 @@ mod tests {
             Fixed16_16::from_f32((cell.y as f32 + 3.0) * RA_TILE_SIZE),
         );
         let net = join.network.as_mut().unwrap();
-        net.session
-            .queue_local(NetCommandKind::Move {
-                units: vec![id],
-                target,
-            });
+        net.session.queue_local(NetCommandKind::Move {
+            units: vec![id],
+            target,
+        });
         let (_commands, bytes, targets) = net.session.advance().unwrap();
         assert_eq!(targets.len(), 1, "join knows the host address");
         for peer in targets {
@@ -8182,19 +8867,22 @@ mod tests {
             .place_structure(0, cnc_core::ClassId::PowerPlant, Vec2i::new(8, 8))
             .unwrap();
         assert!(apply_net_power(&mut game, 0, id, false));
-        assert!(!game
-            .structures
-            .iter()
-            .find(|structure| structure.id == id)
-            .unwrap()
-            .powered);
+        assert!(
+            !game
+                .structures
+                .iter()
+                .find(|structure| structure.id == id)
+                .unwrap()
+                .powered
+        );
         assert!(apply_net_power(&mut game, 0, id, true));
-        assert!(game
-            .structures
-            .iter()
-            .find(|structure| structure.id == id)
-            .unwrap()
-            .powered);
+        assert!(
+            game.structures
+                .iter()
+                .find(|structure| structure.id == id)
+                .unwrap()
+                .powered
+        );
         assert!(!apply_net_power(&mut game, 1, id, false), "wrong owner");
     }
 
@@ -8246,9 +8934,7 @@ mod tests {
         let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
         app.start_skirmish();
         let cell = Vec2i::new(26, 26);
-        let mcv = app
-            .game
-            .spawn_unit(0, cnc_core::ClassId::VehicleE7, cell);
+        let mcv = app.game.spawn_unit(0, cnc_core::ClassId::VehicleE7, cell);
         for unit in &mut app.game.units {
             unit.selected = unit.id == mcv;
         }
@@ -8257,8 +8943,7 @@ mod tests {
         assert_eq!(app.drain_pending_commands(), 1);
         assert!(app.game.unit(mcv).is_none());
         assert!(app.game.structures.iter().any(|structure| {
-            structure.class_id == cnc_core::ClassId::ConstructionYard
-                && structure.cell == cell
+            structure.class_id == cnc_core::ClassId::ConstructionYard && structure.cell == cell
         }));
     }
 
@@ -8396,13 +9081,8 @@ mod tests {
 
     #[test]
     fn td_pause_menu_resumes_and_returns_to_selector() {
-        let mut app = LauncherApp::new(
-            RendererKind::Software,
-            320,
-            240,
-            RulesDatabase::default(),
-        )
-        .unwrap();
+        let mut app =
+            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
         let maps = Path::new(env!("CARGO_MANIFEST_DIR")).join("../maps/td_campaign");
         app.load_mission_dir(&maps).unwrap();
         assert!(app.activate_selected_mission().unwrap());
@@ -8425,8 +9105,8 @@ mod tests {
     fn td_campaign_completion_shows_final_screen() {
         let progress = std::env::temp_dir().join(format!("td-done-{}.dat", std::process::id()));
         let _ = std::fs::remove_file(&progress);
-        let mut app = LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default())
-            .unwrap();
+        let mut app =
+            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
         app.td_progress_path = progress.clone();
         let maps = Path::new(env!("CARGO_MANIFEST_DIR")).join("../maps/td_campaign");
         assert_eq!(app.load_mission_dir(&maps).unwrap(), 9);
@@ -8450,13 +9130,8 @@ mod tests {
     fn td_mission_finish_returns_to_selector_and_advances() {
         let progress = std::env::temp_dir().join(format!("td-finish-{}.dat", std::process::id()));
         let _ = std::fs::remove_file(&progress);
-        let mut app = LauncherApp::new(
-            RendererKind::Software,
-            320,
-            240,
-            RulesDatabase::default(),
-        )
-        .unwrap();
+        let mut app =
+            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
         app.td_progress_path = progress.clone();
         let maps = Path::new(env!("CARGO_MANIFEST_DIR")).join("../maps/td_campaign");
         assert_eq!(app.load_mission_dir(&maps).unwrap(), 9);
@@ -8489,13 +9164,8 @@ mod tests {
         std::fs::copy(maps.join("02.ini"), dir.join("02.ini")).unwrap();
 
         let progress = dir.join("td_progress.dat");
-        let mut app = LauncherApp::new(
-            RendererKind::Software,
-            320,
-            240,
-            RulesDatabase::default(),
-        )
-        .unwrap();
+        let mut app =
+            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
         app.td_progress_path = progress.clone();
         assert_eq!(app.load_mission_dir(&dir).unwrap(), 2);
         assert!(app.selecting_mission);
@@ -8541,13 +9211,8 @@ mod tests {
         assert!(saved.contains("1:60"), "{saved}");
 
         // A fresh launcher resumes the saved completion/best time.
-        let mut resumed = LauncherApp::new(
-            RendererKind::Software,
-            320,
-            240,
-            RulesDatabase::default(),
-        )
-        .unwrap();
+        let mut resumed =
+            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
         resumed.td_progress_path = progress.clone();
         assert_eq!(resumed.load_mission_dir(&dir).unwrap(), 2);
         assert!(resumed.td_completed[1]);
@@ -8601,8 +9266,7 @@ mod tests {
         let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
         app.start_skirmish();
         assert_eq!(app.mode, RaMode::Playing);
-        let scenario = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../maps/ra_campaign/01.ini");
+        let scenario = Path::new(env!("CARGO_MANIFEST_DIR")).join("../maps/ra_campaign/01.ini");
         app.active_scenario_path = Some(scenario);
         app.campaign_active = false;
 
@@ -8675,10 +9339,7 @@ mod tests {
         app.send_chat();
         assert!(!app.chat_open);
         assert!(app.chat_input.is_empty());
-        assert_eq!(
-            app.chat_log.last(),
-            Some(&(0, "rally north".to_string()))
-        );
+        assert_eq!(app.chat_log.last(), Some(&(0, "rally north".to_string())));
         let len = app.chat_log.len();
         app.chat_input.clear();
         app.send_chat();
@@ -8687,8 +9348,8 @@ mod tests {
 
     #[test]
     fn td_repair_selected_building_costs_and_notices() {
-        let mut app = LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default())
-            .unwrap();
+        let mut app =
+            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
         let player = app.game.player_owner;
         let index = app
             .game
@@ -8717,8 +9378,8 @@ mod tests {
 
     #[test]
     fn td_sell_selected_building_refunds_and_notices() {
-        let mut app = LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default())
-            .unwrap();
+        let mut app =
+            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
         let player = app.game.player_owner;
         let index = app
             .game
@@ -8762,8 +9423,8 @@ mod tests {
         assert!(ra.game.unit(id).unwrap().selected);
         assert!(!ra.recall_control_group(1), "empty group");
 
-        let mut td = LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default())
-            .unwrap();
+        let mut td =
+            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
         let player = td.game.player_owner;
         let index = td
             .game
@@ -8812,8 +9473,8 @@ mod tests {
         ra.apply_ra_edge_pan(0.1);
         assert!(ra.camera.position.x < before);
 
-        let mut td = LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default())
-            .unwrap();
+        let mut td =
+            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
         let before = td.camera.position.x;
         td.cursor = Some(winit::dpi::PhysicalPosition::new(318.0, 120.0));
         td.apply_td_edge_pan(0.1);
@@ -8925,7 +9586,8 @@ mod tests {
         .unwrap();
         {
             let net = app.network.as_mut().unwrap();
-            net.session.queue_local(NetCommandKind::Stop { units: Vec::new() });
+            net.session
+                .queue_local(NetCommandKind::Stop { units: Vec::new() });
             net.last_tick = Instant::now() - Duration::from_secs(1);
         }
         app.poll_network();
@@ -8966,8 +9628,8 @@ mod tests {
         ra.activate_pause_choice();
         assert_eq!(ra.save_slot, 1, "pause menu cycles the slot");
 
-        let mut td = LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default())
-            .unwrap();
+        let mut td =
+            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
         assert_eq!(td.save_slot, 0);
         td.cycle_td_save_slot();
         assert_eq!(td.save_slot, 1);
@@ -9011,8 +9673,8 @@ mod tests {
             .as_ref()
             .is_some_and(|(text, _)| text.contains("locked")));
 
-        let mut td = LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default())
-            .unwrap();
+        let mut td =
+            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
         td.adjust_td_speed(0.5);
         assert_eq!(td.game_speed, 1.5);
         td.adjust_td_speed(10.0);
@@ -9035,8 +9697,8 @@ mod tests {
         assert_eq!(ra.camera.position, saved);
         assert!(!ra.jump_ra_bookmark(1), "empty slot");
 
-        let mut td = LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default())
-            .unwrap();
+        let mut td =
+            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
         let saved = Vec2::new(Fixed16_16::from_int(120), Fixed16_16::from_int(240));
         td.camera.position = saved;
         td.save_td_bookmark(2);
@@ -9077,8 +9739,8 @@ mod tests {
         assert!((ra.camera.position.y.to_f32() - 6.5 * RA_TILE_SIZE).abs() < 0.01);
         assert!(!ra.ra_minimap_click(Vec2::new(Fixed16_16::ZERO, Fixed16_16::ZERO)));
 
-        let mut td = LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default())
-            .unwrap();
+        let mut td =
+            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
         td.camera.zoom = Fixed16_16::ONE;
         let zoom = td.camera.zoom.to_f32().max(1.0e-6);
         let view_w = td.camera.viewport_width as f32 / zoom;
@@ -9100,8 +9762,12 @@ mod tests {
             Fixed16_16::from_f32(y + 4.5 * scale),
         );
         assert!(td.td_minimap_click(target));
-        assert!((td.camera.position.x.to_f32() - 3.5 * cnc_tiberian_dawn::map::TILE_SIZE).abs() < 0.01);
-        assert!((td.camera.position.y.to_f32() - 4.5 * cnc_tiberian_dawn::map::TILE_SIZE).abs() < 0.01);
+        assert!(
+            (td.camera.position.x.to_f32() - 3.5 * cnc_tiberian_dawn::map::TILE_SIZE).abs() < 0.01
+        );
+        assert!(
+            (td.camera.position.y.to_f32() - 4.5 * cnc_tiberian_dawn::map::TILE_SIZE).abs() < 0.01
+        );
     }
 
     #[test]
@@ -9191,7 +9857,7 @@ mod tests {
     }
 
     #[test]
-    fn main_menu_campaign_page_lists_scenarios_for_both_games() {
+    fn main_menu_campaign_page_opens_in_game_scenario_selectors() {
         let mut menu = MainMenu::from_campaigns(
             menu_test_campaign("maps/td_campaign", 9),
             menu_test_campaign("maps/ra_campaign", 10),
@@ -9232,7 +9898,7 @@ mod tests {
     }
 
     #[test]
-    fn online_page_offers_red_alert_and_marks_td_unavailable() {
+    fn online_page_offers_red_alert_only() {
         let mut menu = MainMenu::from_campaigns(
             menu_test_campaign("maps/td_campaign", 9),
             menu_test_campaign("maps/ra_campaign", 10),
@@ -9249,9 +9915,11 @@ mod tests {
             )))
         );
 
+        // The only remaining row is Back: TD network play is out of scope for
+        // the menu until a TD lobby plus lockstep wiring exists.
         menu.on_key(&Key::Named(NamedKey::ArrowDown));
-        assert_eq!(menu.activate(), None, "TD online stays disabled");
-        assert!(menu.notice().unwrap().contains("not available"));
+        assert_eq!(menu.activate(), None);
+        assert_eq!(menu.screen(), Screen::Main);
     }
 
     #[test]
@@ -9349,17 +10017,15 @@ mod tests {
 
     #[test]
     fn return_to_menu_flag_is_consumed_once() {
-        let mut td = LauncherApp::new(
-            RendererKind::Software,
-            320,
-            240,
-            RulesDatabase::default(),
-        )
-        .unwrap();
+        let mut td =
+            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
         assert!(!td.take_return_to_menu());
         td.return_to_menu = true;
         assert!(td.take_return_to_menu());
-        assert!(!td.take_return_to_menu(), "flag is reset after the shell sees it");
+        assert!(
+            !td.take_return_to_menu(),
+            "flag is reset after the shell sees it"
+        );
 
         let mut ra = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
         assert!(!ra.take_return_to_menu());
@@ -9370,8 +10036,8 @@ mod tests {
 
     #[test]
     fn zoom_defaults_clamp_and_pin_the_world_under_the_cursor() {
-        let mut td = LauncherApp::new(RendererKind::Software, 1024, 768, RulesDatabase::default())
-            .unwrap();
+        let mut td =
+            LauncherApp::new(RendererKind::Software, 1024, 768, RulesDatabase::default()).unwrap();
         assert!((td.camera.zoom.to_f32() - DEFAULT_GAME_ZOOM).abs() < 1.0e-3);
 
         td.camera.position = Vec2::new(Fixed16_16::from_int(600), Fixed16_16::from_int(600));
@@ -9398,8 +10064,8 @@ mod tests {
 
     #[test]
     fn hud_world_maps_zoomed_clicks_to_the_same_screen_point() {
-        let mut td = LauncherApp::new(RendererKind::Software, 1024, 768, RulesDatabase::default())
-            .unwrap();
+        let mut td =
+            LauncherApp::new(RendererKind::Software, 1024, 768, RulesDatabase::default()).unwrap();
         td.camera.zoom = Fixed16_16::from_f32(2.5);
         let screen = winit::dpi::PhysicalPosition::new(700.0, 300.0);
         let hud = td.hud_world(td.screen_to_world(screen));
@@ -9408,5 +10074,105 @@ mod tests {
         assert!((hud.x.to_f32() - expected_x).abs() < 0.5);
         assert!((hud.y.to_f32() - expected_y).abs() < 0.5);
     }
-}
 
+    #[test]
+    fn water_shore_family_prefers_orthogonal_then_corners() {
+        // Land-contact order: (n, e, s, w, nw, ne, sw, se).
+        assert_eq!(water_shore_family([false; 8]), None);
+        assert_eq!(
+            water_shore_family([true, false, false, false, false, false, false, false]),
+            Some(("shore_north", 2))
+        );
+        assert_eq!(
+            water_shore_family([true, false, false, true, false, false, false, false]),
+            Some(("shore_north", 2)),
+            "fixed n > e > s > w priority keeps the tile choice deterministic"
+        );
+        assert_eq!(
+            water_shore_family([false, false, false, false, true, false, false, false]),
+            Some(("shore_nw", 6))
+        );
+        assert_eq!(
+            water_shore_family([false, false, false, false, false, false, true, false]),
+            Some(("shore_sw", 8))
+        );
+    }
+
+    #[test]
+    fn land_neighbours_treats_out_of_map_as_water() {
+        // Land only at (0, 0); everything else counts as water.
+        let is_land = |x: i32, y: i32| x == 0 && y == 0;
+        // Neighbours of (1, 1): nw touches (0, 0); all others are water/off.
+        let [n, e, s, w, nw, ne, sw, se] = land_neighbours(1, 1, is_land);
+        assert!(!n && !e && !s && !w && nw && !ne && !sw && !se);
+        // Neighbours of (0, 0): off-map sides are never land.
+        let [n, e, s, w, nw, ne, sw, se] = land_neighbours(0, 0, is_land);
+        assert!(!n && !e && !s && !w && !nw && !ne && !sw && !se);
+    }
+
+    #[test]
+    fn ra_terrain_tile_shores_water_and_sand_shores_beach() {
+        let mut map = cnc_red_alert::Map::new(3, 3);
+        // Map::blank clamps to an 8x8 minimum; use the real width for row-major
+        // writes so water/beach/grass occupy whole rows as intended.
+        let w = map.width as usize;
+        for x in 0..3usize {
+            map.terrain[x] = cnc_red_alert::Terrain::Water;
+            map.terrain[w + x] = cnc_red_alert::Terrain::Beach;
+            map.terrain[2 * w + x] = cnc_red_alert::Terrain::Grass;
+        }
+        // Water against the beach row below picks the south shore edge.
+        assert_eq!(
+            ra_terrain_tile(&map, 1, 0),
+            ("water_edges", "shore_south", 4)
+        );
+        // Beach renders the transitions sand_shore row.
+        assert_eq!(
+            ra_terrain_tile(&map, 1, 1),
+            ("transitions", "sand_shore", 10)
+        );
+        // Grass keeps the base terrain family.
+        assert_eq!(ra_terrain_tile(&map, 1, 2), ("terrain", "grass", 0));
+    }
+
+    #[test]
+    fn campaign_terrain_tile_shores_water_against_land() {
+        // 4x4 grid, water column on the right (code 1), grass elsewhere.
+        let mut terrain = vec![0u8; 16];
+        for y in 0..4usize {
+            terrain[y * 4 + 3] = 1;
+        }
+        // Water at (3, 0): west neighbour (2, 0) is grass land.
+        assert_eq!(
+            campaign_terrain_tile(&terrain, 4, 4, 3, 0),
+            ("water_edges", "shore_west", 5)
+        );
+        // All-water grid away from any land stays deep_water.
+        let all_water = vec![1u8; 25];
+        assert_eq!(
+            campaign_terrain_tile(&all_water, 5, 5, 2, 2),
+            ("water_edges", "deep_water", 0)
+        );
+        // Non-water codes keep the base campaign families.
+        assert_eq!(
+            campaign_terrain_tile(&terrain, 4, 4, 0, 0),
+            ("terrain", "grass", 0)
+        );
+        let mut sandy = vec![0u8; 16];
+        sandy[0] = 2;
+        assert_eq!(
+            campaign_terrain_tile(&sandy, 4, 4, 0, 0),
+            ("terrain", "sand", 2)
+        );
+    }
+
+    #[test]
+    fn tiberium_fx_family_buckets_by_amount() {
+        assert_eq!(tiberium_fx_family(0), ("tiberium_sprout", 0));
+        assert_eq!(tiberium_fx_family(85), ("tiberium_sprout", 0));
+        assert_eq!(tiberium_fx_family(86), ("tiberium_cluster", 1));
+        assert_eq!(tiberium_fx_family(170), ("tiberium_cluster", 1));
+        assert_eq!(tiberium_fx_family(171), ("tiberium_bloom", 14));
+        assert_eq!(tiberium_fx_family(u8::MAX), ("tiberium_bloom", 14));
+    }
+}

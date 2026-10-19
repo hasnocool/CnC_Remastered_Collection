@@ -1,10 +1,10 @@
 //! Math types: vectors, matrices, rectangles
 
 use crate::{Fixed16_16, FloatBias};
-use core::ops::{Add, Sub, Mul, Div, Neg, AddAssign, SubAssign, MulAssign, DivAssign};
-use serde::{Serialize, Deserialize};
 use bytemuck::{Pod, Zeroable};
-use num_traits::{Zero, One};
+use core::ops::{Add, Div, Mul, Neg, Sub};
+use num_traits::Zero;
+use serde::{Deserialize, Serialize};
 
 // ============================================================================
 // Integer Vector Types
@@ -12,7 +12,9 @@ use num_traits::{Zero, One};
 
 /// 2D integer vector
 #[repr(C)]
-#[derive(Copy, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Pod, Zeroable, Debug)]
+#[derive(
+    Copy, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Pod, Zeroable, Debug,
+)]
 pub struct Vec2i {
     pub x: i32,
     pub y: i32,
@@ -36,12 +38,16 @@ impl Vec2i {
 
     #[inline]
     pub fn length_squared(self) -> i32 {
-        self.x.saturating_mul(self.x).saturating_add(self.y.saturating_mul(self.y))
+        self.x
+            .saturating_mul(self.x)
+            .saturating_add(self.y.saturating_mul(self.y))
     }
 
     #[inline]
     pub fn manhattan_distance(self, other: Self) -> i32 {
-        (self.x - other.x).abs().saturating_add((self.y - other.y).abs())
+        (self.x - other.x)
+            .abs()
+            .saturating_add((self.y - other.y).abs())
     }
 
     #[inline]
@@ -94,13 +100,18 @@ impl Neg for Vec2i {
     type Output = Self;
     #[inline]
     fn neg(self) -> Self::Output {
-        Self { x: -self.x, y: -self.y }
+        Self {
+            x: -self.x,
+            y: -self.y,
+        }
     }
 }
 
 /// 3D integer vector
 #[repr(C)]
-#[derive(Copy, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Pod, Zeroable, Debug)]
+#[derive(
+    Copy, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Pod, Zeroable, Debug,
+)]
 pub struct Vec3i {
     pub x: i32,
     pub y: i32,
@@ -120,7 +131,9 @@ impl Vec3i {
 
 /// 2D fixed-point vector
 #[repr(C)]
-#[derive(Copy, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Pod, Zeroable, Debug)]
+#[derive(
+    Copy, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Pod, Zeroable, Debug,
+)]
 pub struct Vec2 {
     pub x: Fixed16_16,
     pub y: Fixed16_16,
@@ -132,7 +145,7 @@ fn isqrt_u128(n: u128) -> u128 {
         return n;
     }
     let mut x = n;
-    let mut y = (x + 1) / 2;
+    let mut y = x.div_ceil(2);
     while y < x {
         x = y;
         y = (x + n / x) / 2;
@@ -148,12 +161,18 @@ impl Vec2 {
 
     #[inline]
     pub const fn zero() -> Self {
-        Self { x: Fixed16_16::ZERO, y: Fixed16_16::ZERO }
+        Self {
+            x: Fixed16_16::ZERO,
+            y: Fixed16_16::ZERO,
+        }
     }
 
     #[inline]
     pub const fn one() -> Self {
-        Self { x: Fixed16_16::ONE, y: Fixed16_16::ONE }
+        Self {
+            x: Fixed16_16::ONE,
+            y: Fixed16_16::ONE,
+        }
     }
 
     #[inline]
@@ -207,35 +226,50 @@ impl Add for Vec2 {
     type Output = Self;
     #[inline]
     fn add(self, rhs: Self) -> Self::Output {
-        Self { x: self.x + rhs.x, y: self.y + rhs.y }
+        Self {
+            x: self.x + rhs.x,
+            y: self.y + rhs.y,
+        }
     }
 }
 impl Sub for Vec2 {
     type Output = Self;
     #[inline]
     fn sub(self, rhs: Self) -> Self::Output {
-        Self { x: self.x - rhs.x, y: self.y - rhs.y }
+        Self {
+            x: self.x - rhs.x,
+            y: self.y - rhs.y,
+        }
     }
 }
 impl Mul<Fixed16_16> for Vec2 {
     type Output = Self;
     #[inline]
     fn mul(self, rhs: Fixed16_16) -> Self::Output {
-        Self { x: self.x * rhs, y: self.y * rhs }
+        Self {
+            x: self.x * rhs,
+            y: self.y * rhs,
+        }
     }
 }
 impl Div<Fixed16_16> for Vec2 {
     type Output = Self;
     #[inline]
     fn div(self, rhs: Fixed16_16) -> Self::Output {
-        Self { x: self.x / rhs, y: self.y / rhs }
+        Self {
+            x: self.x / rhs,
+            y: self.y / rhs,
+        }
     }
 }
 impl Neg for Vec2 {
     type Output = Self;
     #[inline]
     fn neg(self) -> Self::Output {
-        Self { x: -self.x, y: -self.y }
+        Self {
+            x: -self.x,
+            y: -self.y,
+        }
     }
 }
 
@@ -256,7 +290,11 @@ impl Vec3 {
 
     #[inline]
     pub const fn zero() -> Self {
-        Self { x: Fixed16_16::ZERO, y: Fixed16_16::ZERO, z: Fixed16_16::ZERO }
+        Self {
+            x: Fixed16_16::ZERO,
+            y: Fixed16_16::ZERO,
+            z: Fixed16_16::ZERO,
+        }
     }
 
     #[inline]
@@ -332,7 +370,11 @@ impl Neg for Vec3 {
     type Output = Self;
     #[inline]
     fn neg(self) -> Self::Output {
-        Self { x: -self.x, y: -self.y, z: -self.z }
+        Self {
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
+        }
     }
 }
 
@@ -356,7 +398,10 @@ impl Vec2f {
 
     #[inline]
     pub const fn zero() -> Self {
-        Self { x: FloatBias::ZERO, y: FloatBias::ZERO }
+        Self {
+            x: FloatBias::ZERO,
+            y: FloatBias::ZERO,
+        }
     }
 
     #[inline]
@@ -392,28 +437,40 @@ impl Add for Vec2f {
     type Output = Self;
     #[inline]
     fn add(self, rhs: Self) -> Self::Output {
-        Self { x: self.x + rhs.x, y: self.y + rhs.y }
+        Self {
+            x: self.x + rhs.x,
+            y: self.y + rhs.y,
+        }
     }
 }
 impl Sub for Vec2f {
     type Output = Self;
     #[inline]
     fn sub(self, rhs: Self) -> Self::Output {
-        Self { x: self.x - rhs.x, y: self.y - rhs.y }
+        Self {
+            x: self.x - rhs.x,
+            y: self.y - rhs.y,
+        }
     }
 }
 impl Mul<FloatBias> for Vec2f {
     type Output = Self;
     #[inline]
     fn mul(self, rhs: FloatBias) -> Self::Output {
-        Self { x: self.x * rhs, y: self.y * rhs }
+        Self {
+            x: self.x * rhs,
+            y: self.y * rhs,
+        }
     }
 }
 impl Div<FloatBias> for Vec2f {
     type Output = Self;
     #[inline]
     fn div(self, rhs: FloatBias) -> Self::Output {
-        Self { x: self.x / rhs, y: self.y / rhs }
+        Self {
+            x: self.x / rhs,
+            y: self.y / rhs,
+        }
     }
 }
 
@@ -425,16 +482,20 @@ impl Div<FloatBias> for Vec2f {
 #[repr(C)]
 #[derive(Copy, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Pod, Zeroable)]
 pub struct Mat2x2 {
-    pub m11: Fixed16_16, pub m12: Fixed16_16,
-    pub m21: Fixed16_16, pub m22: Fixed16_16,
+    pub m11: Fixed16_16,
+    pub m12: Fixed16_16,
+    pub m21: Fixed16_16,
+    pub m22: Fixed16_16,
 }
 
 impl Mat2x2 {
     #[inline]
     pub const fn identity() -> Self {
         Self {
-            m11: Fixed16_16::ONE, m12: Fixed16_16::ZERO,
-            m21: Fixed16_16::ZERO, m22: Fixed16_16::ONE,
+            m11: Fixed16_16::ONE,
+            m12: Fixed16_16::ZERO,
+            m21: Fixed16_16::ZERO,
+            m22: Fixed16_16::ONE,
         }
     }
 
@@ -451,16 +512,20 @@ impl Mat2x2 {
         let c = angle.cos();
         let s = angle.sin();
         Self {
-            m11: c, m12: -s,
-            m21: s, m22: c,
+            m11: c,
+            m12: -s,
+            m21: s,
+            m22: c,
         }
     }
 
     /// Scale matrix
     pub fn scale(sx: Fixed16_16, sy: Fixed16_16) -> Self {
         Self {
-            m11: sx, m12: Fixed16_16::ZERO,
-            m21: Fixed16_16::ZERO, m22: sy,
+            m11: sx,
+            m12: Fixed16_16::ZERO,
+            m21: Fixed16_16::ZERO,
+            m22: sy,
         }
     }
 }
@@ -481,36 +546,60 @@ impl Mul for Mat2x2 {
 #[repr(C)]
 #[derive(Copy, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Pod, Zeroable)]
 pub struct Mat3x3 {
-    pub m11: Fixed16_16, pub m12: Fixed16_16, pub m13: Fixed16_16,
-    pub m21: Fixed16_16, pub m22: Fixed16_16, pub m23: Fixed16_16,
-    pub m31: Fixed16_16, pub m32: Fixed16_16, pub m33: Fixed16_16,
+    pub m11: Fixed16_16,
+    pub m12: Fixed16_16,
+    pub m13: Fixed16_16,
+    pub m21: Fixed16_16,
+    pub m22: Fixed16_16,
+    pub m23: Fixed16_16,
+    pub m31: Fixed16_16,
+    pub m32: Fixed16_16,
+    pub m33: Fixed16_16,
 }
 
 impl Mat3x3 {
     #[inline]
     pub const fn identity() -> Self {
         Self {
-            m11: Fixed16_16::ONE, m12: Fixed16_16::ZERO, m13: Fixed16_16::ZERO,
-            m21: Fixed16_16::ZERO, m22: Fixed16_16::ONE, m23: Fixed16_16::ZERO,
-            m31: Fixed16_16::ZERO, m32: Fixed16_16::ZERO, m33: Fixed16_16::ONE,
+            m11: Fixed16_16::ONE,
+            m12: Fixed16_16::ZERO,
+            m13: Fixed16_16::ZERO,
+            m21: Fixed16_16::ZERO,
+            m22: Fixed16_16::ONE,
+            m23: Fixed16_16::ZERO,
+            m31: Fixed16_16::ZERO,
+            m32: Fixed16_16::ZERO,
+            m33: Fixed16_16::ONE,
         }
     }
 
     /// Translation matrix
     pub fn translation(tx: Fixed16_16, ty: Fixed16_16) -> Self {
         Self {
-            m11: Fixed16_16::ONE, m12: Fixed16_16::ZERO, m13: tx,
-            m21: Fixed16_16::ZERO, m22: Fixed16_16::ONE, m23: ty,
-            m31: Fixed16_16::ZERO, m32: Fixed16_16::ZERO, m33: Fixed16_16::ONE,
+            m11: Fixed16_16::ONE,
+            m12: Fixed16_16::ZERO,
+            m13: tx,
+            m21: Fixed16_16::ZERO,
+            m22: Fixed16_16::ONE,
+            m23: ty,
+            m31: Fixed16_16::ZERO,
+            m32: Fixed16_16::ZERO,
+            m33: Fixed16_16::ONE,
         }
     }
 
     /// Scale matrix
     pub fn scale(sx: Fixed16_16, sy: Fixed16_16) -> Self {
         Self {
-            m11: sx, m12: Fixed16_16::ZERO, m13: Fixed16_16::ZERO,
-            m21: Fixed16_16::ZERO, m22: sy, m23: Fixed16_16::ZERO,
-            m31: Fixed16_16::ZERO, m32: Fixed16_16::ZERO, m33: Fixed16_16::ONE,
+            m11: sx,
+            m12: Fixed16_16::ZERO,
+            m13: Fixed16_16::ZERO,
+            m21: Fixed16_16::ZERO,
+            m22: sy,
+            m23: Fixed16_16::ZERO,
+            m31: Fixed16_16::ZERO,
+            m32: Fixed16_16::ZERO,
+            m33: Fixed16_16::ONE,
         }
     }
 
@@ -519,9 +608,15 @@ impl Mat3x3 {
         let c = angle.cos();
         let s = angle.sin();
         Self {
-            m11: c, m12: -s, m13: Fixed16_16::ZERO,
-            m21: s, m22: c, m23: Fixed16_16::ZERO,
-            m31: Fixed16_16::ZERO, m32: Fixed16_16::ZERO, m33: Fixed16_16::ONE,
+            m11: c,
+            m12: -s,
+            m13: Fixed16_16::ZERO,
+            m21: s,
+            m22: c,
+            m23: Fixed16_16::ZERO,
+            m31: Fixed16_16::ZERO,
+            m32: Fixed16_16::ZERO,
+            m33: Fixed16_16::ONE,
         }
     }
 
@@ -558,7 +653,9 @@ impl Mul for Mat3x3 {
 
 /// Rectangle with integer coordinates
 #[repr(C)]
-#[derive(Copy, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Pod, Zeroable, Debug)]
+#[derive(
+    Copy, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Pod, Zeroable, Debug,
+)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
@@ -569,12 +666,22 @@ pub struct Rect {
 impl Rect {
     #[inline]
     pub const fn new(x: i32, y: i32, width: i32, height: i32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     #[inline]
     pub const fn zero() -> Self {
-        Self { x: 0, y: 0, width: 0, height: 0 }
+        Self {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        }
     }
 
     #[inline]
@@ -604,14 +711,18 @@ impl Rect {
 
     #[inline]
     pub fn contains(self, point: Vec2i) -> bool {
-        point.x >= self.left() && point.x < self.right()
-            && point.y >= self.top() && point.y < self.bottom()
+        point.x >= self.left()
+            && point.x < self.right()
+            && point.y >= self.top()
+            && point.y < self.bottom()
     }
 
     #[inline]
     pub fn intersects(self, other: Self) -> bool {
-        self.left() < other.right() && self.right() > other.left()
-            && self.top() < other.bottom() && self.bottom() > other.top()
+        self.left() < other.right()
+            && self.right() > other.left()
+            && self.top() < other.bottom()
+            && self.bottom() > other.top()
     }
 
     #[inline]
@@ -653,7 +764,10 @@ impl Bounds {
 
     #[inline]
     pub fn from_point(point: Vec2) -> Self {
-        Self { min: point, max: point }
+        Self {
+            min: point,
+            max: point,
+        }
     }
 
     #[inline]
@@ -684,14 +798,18 @@ impl Bounds {
 
     #[inline]
     pub fn contains(self, point: Vec2) -> bool {
-        point.x >= self.min.x && point.x <= self.max.x
-            && point.y >= self.min.y && point.y <= self.max.y
+        point.x >= self.min.x
+            && point.x <= self.max.x
+            && point.y >= self.min.y
+            && point.y <= self.max.y
     }
 
     #[inline]
     pub fn intersects(self, other: Self) -> bool {
-        self.min.x <= other.max.x && self.max.x >= other.min.x
-            && self.min.y <= other.max.y && self.max.y >= other.min.y
+        self.min.x <= other.max.x
+            && self.max.x >= other.min.x
+            && self.min.y <= other.max.y
+            && self.max.y >= other.min.y
     }
 }
 

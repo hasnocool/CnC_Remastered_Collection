@@ -116,7 +116,11 @@ enum Commands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Mix { input, output, list } => cmd_mix(input, output, list),
+        Commands::Mix {
+            input,
+            output,
+            list,
+        } => cmd_mix(input, output, list),
         Commands::Shp {
             input,
             output,
@@ -169,8 +173,9 @@ fn transparent_index(opaque: bool) -> Option<u8> {
 }
 
 fn cmd_generate_atlas(out: PathBuf, style: String) -> Result<()> {
-    let style = AtlasStyle::parse(&style)
-        .ok_or_else(|| anyhow::anyhow!("unknown atlas style '{}' (expected classic or neon)", style))?;
+    let style = AtlasStyle::parse(&style).ok_or_else(|| {
+        anyhow::anyhow!("unknown atlas style '{}' (expected classic or neon)", style)
+    })?;
     let atlas = SpriteAtlas::generate(style);
     atlas.save(&out)?;
     println!(
@@ -274,12 +279,18 @@ fn cmd_pal(input: PathBuf, output: PathBuf, format: String) -> Result<()> {
         "json" => fs::write(output.join("palette.json"), palette_to_json(&pal)?)?,
         "png" => palette_to_png(&pal).save(output.join("palette.png"))?,
         "css" => fs::write(output.join("palette.css"), palette_to_css(&pal))?,
-        other => bail!("unknown palette format '{}' (expected json, png or css)", other),
+        other => bail!(
+            "unknown palette format '{}' (expected json, png or css)",
+            other
+        ),
     }
     println!("wrote {} palette to {}", format, output.display());
     Ok(())
 }
 
+// CLI subcommand with one parameter per clap flag; grouping into a config
+// struct would just move the same eight fields around one call site.
+#[allow(clippy::too_many_arguments)]
 fn cmd_batch(
     input: PathBuf,
     output: PathBuf,

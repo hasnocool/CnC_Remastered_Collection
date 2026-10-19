@@ -1,8 +1,8 @@
 //! Palette management (256-color with remapping)
 
-use crate::{RGB888, ARGB8888, PaletteIndex, PlayerRemap};
+use crate::{PaletteIndex, PlayerRemap, ARGB8888, RGB888};
 use core::ops::Index;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// 256-color palette (Westwood format)
@@ -32,10 +32,13 @@ impl Palette {
     /// Create grayscale palette
     pub fn grayscale() -> Self {
         let mut colors = [RGB888::BLACK; 256];
-        for i in 0..256 {
-            colors[i] = RGB888::new(i as u8, i as u8, i as u8);
+        for (i, color) in colors.iter_mut().enumerate() {
+            *color = RGB888::new(i as u8, i as u8, i as u8);
         }
-        Self { colors, name: Some("Grayscale".to_string()) }
+        Self {
+            colors,
+            name: Some("Grayscale".to_string()),
+        }
     }
 
     /// Get color by index
@@ -59,8 +62,8 @@ impl Palette {
     /// Convert entire palette to ARGB8888 (for GPU upload)
     pub fn to_argb8888(&self, alpha: u8) -> [ARGB8888; 256] {
         let mut result = [ARGB8888::TRANSPARENT; 256];
-        for i in 0..256 {
-            result[i] = self.colors[i].to_argb8888(alpha);
+        for (entry, color) in result.iter_mut().zip(self.colors.iter()) {
+            *entry = color.to_argb8888(alpha);
         }
         result
     }
@@ -68,9 +71,9 @@ impl Palette {
     /// Apply player remap and convert to ARGB8888
     pub fn to_argb8888_remapped(&self, remap: &PlayerRemap, alpha: u8) -> [ARGB8888; 256] {
         let mut result = [ARGB8888::TRANSPARENT; 256];
-        for i in 0..256 {
+        for (i, entry) in result.iter_mut().enumerate() {
             let remapped = remap.apply(PaletteIndex(i as u8));
-            result[i] = self.colors[remapped.0 as usize].to_argb8888(alpha);
+            *entry = self.colors[remapped.0 as usize].to_argb8888(alpha);
         }
         result
     }
@@ -102,10 +105,13 @@ impl Palette {
     pub fn blend(&self, other: &Palette, t: f32) -> Self {
         let mut colors = [RGB888::BLACK; 256];
         let inv_t = 1.0 - t;
-        for i in 0..256 {
-            let a = self.colors[i];
-            let b = other.colors[i];
-            colors[i] = RGB888::new(
+        for ((a, b), entry) in self
+            .colors
+            .iter()
+            .zip(other.colors.iter())
+            .zip(colors.iter_mut())
+        {
+            *entry = RGB888::new(
                 (a.r as f32 * inv_t + b.r as f32 * t) as u8,
                 (a.g as f32 * inv_t + b.g as f32 * t) as u8,
                 (a.b as f32 * inv_t + b.b as f32 * t) as u8,
@@ -122,12 +128,15 @@ impl Palette {
         }
 
         let mut colors = [RGB888::BLACK; 256];
-        for i in 0..256 {
+        for (i, color) in colors.iter_mut().enumerate() {
             let offset = i * 3;
-            colors[i] = RGB888::new(data[offset], data[offset + 1], data[offset + 2]);
+            *color = RGB888::new(data[offset], data[offset + 1], data[offset + 2]);
         }
 
-        Ok(Self { colors, name: Some(".pal".to_string()) })
+        Ok(Self {
+            colors,
+            name: Some(".pal".to_string()),
+        })
     }
 
     /// Save to Westwood .pal file format
@@ -200,7 +209,9 @@ impl PaletteRegistry {
     }
 
     pub fn get_default(&self) -> Option<&Palette> {
-        self.default_name.as_ref().and_then(|n| self.palettes.get(n))
+        self.default_name
+            .as_ref()
+            .and_then(|n| self.palettes.get(n))
     }
 
     pub fn set_default(&mut self, name: &str) -> bool {

@@ -170,9 +170,8 @@ impl IronCurtain {
         self.base.consume()?;
         let mut hardened = 0;
         for unit in units.iter_mut() {
-            let distance = Fixed16_16::from_f32(
-                self.base.position.distance(unit.position).to_f32(),
-            );
+            let distance =
+                Fixed16_16::from_f32(self.base.position.distance(unit.position).to_f32());
             if distance <= radius {
                 unit.invulnerable = self.duration;
                 hardened += 1;
@@ -269,10 +268,7 @@ mod tests {
             ArmoredUnit::new(point(1000.0, 0.0), Fixed16_16::from_int(100)),
         ];
         charge(&mut curtain.base);
-        assert_eq!(
-            curtain.harden(&mut units, Fixed16_16::from_int(100)),
-            Ok(1)
-        );
+        assert_eq!(curtain.harden(&mut units, Fixed16_16::from_int(100)), Ok(1));
         units[0].take_damage(Fixed16_16::from_int(500));
         assert_eq!(units[0].health, Fixed16_16::from_int(100));
         units[1].take_damage(Fixed16_16::from_int(30));

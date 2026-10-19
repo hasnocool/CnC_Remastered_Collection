@@ -1,7 +1,7 @@
 //! Westwood INI file parser with inheritance support
 
-use anyhow::{Result, Context, bail};
-use serde::{Serialize, Deserialize};
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -16,9 +16,14 @@ pub enum IniValue {
 
 impl IniValue {
     pub fn as_string(&self) -> Option<&str> {
-        match self { IniValue::String(s) => Some(s), _ => None }
+        match self {
+            IniValue::String(s) => Some(s),
+            _ => None,
+        }
     }
-    pub fn as_str(&self) -> Result<&str> { self.as_string().context("Value is not a string") }
+    pub fn as_str(&self) -> Result<&str> {
+        self.as_string().context("Value is not a string")
+    }
     pub fn as_i64(&self) -> Result<i64> {
         match self {
             IniValue::Integer(i) => Ok(*i),
@@ -44,7 +49,10 @@ impl IniValue {
             Some(rest) => (true, rest),
             None => (false, value),
         };
-        let parsed = if let Some(hex) = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+        let parsed = if let Some(hex) = digits
+            .strip_prefix("0x")
+            .or_else(|| digits.strip_prefix("0X"))
+        {
             i64::from_str_radix(hex, 16).ok()?
         } else {
             digits.parse::<i64>().ok()?
@@ -55,21 +63,51 @@ impl IniValue {
         match self {
             IniValue::Boolean(b) => Ok(*b),
             IniValue::Integer(i) => Ok(*i != 0),
-            IniValue::String(s) => Ok(matches!(s.to_lowercase().as_str(), "yes"|"true"|"1"|"on")),
+            IniValue::String(s) => Ok(matches!(
+                s.to_lowercase().as_str(),
+                "yes" | "true" | "1" | "on"
+            )),
             _ => bail!("Value is not a boolean"),
         }
     }
     pub fn as_array(&self) -> Result<&[IniValue]> {
-        match self { IniValue::Array(a) => Ok(a), _ => bail!("Value is not an array") }
+        match self {
+            IniValue::Array(a) => Ok(a),
+            _ => bail!("Value is not an array"),
+        }
     }
 }
 
-impl From<String> for IniValue { fn from(s: String) -> Self { IniValue::String(s) } }
-impl From<&str> for IniValue { fn from(s: &str) -> Self { IniValue::String(s.to_string()) } }
-impl From<i64> for IniValue { fn from(i: i64) -> Self { IniValue::Integer(i) } }
-impl From<f64> for IniValue { fn from(f: f64) -> Self { IniValue::Float(f) } }
-impl From<bool> for IniValue { fn from(b: bool) -> Self { IniValue::Boolean(b) } }
-impl From<Vec<IniValue>> for IniValue { fn from(v: Vec<IniValue>) -> Self { IniValue::Array(v) } }
+impl From<String> for IniValue {
+    fn from(s: String) -> Self {
+        IniValue::String(s)
+    }
+}
+impl From<&str> for IniValue {
+    fn from(s: &str) -> Self {
+        IniValue::String(s.to_string())
+    }
+}
+impl From<i64> for IniValue {
+    fn from(i: i64) -> Self {
+        IniValue::Integer(i)
+    }
+}
+impl From<f64> for IniValue {
+    fn from(f: f64) -> Self {
+        IniValue::Float(f)
+    }
+}
+impl From<bool> for IniValue {
+    fn from(b: bool) -> Self {
+        IniValue::Boolean(b)
+    }
+}
+impl From<Vec<IniValue>> for IniValue {
+    fn from(v: Vec<IniValue>) -> Self {
+        IniValue::Array(v)
+    }
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct IniSection {
@@ -79,9 +117,19 @@ pub struct IniSection {
 }
 
 impl IniSection {
-    pub fn new(name: String) -> Self { Self { name, values: BTreeMap::new(), parent: None } }
-    pub fn set(&mut self, key: String, value: IniValue) { self.values.insert(key, value); }
-    pub fn get(&self, key: &str) -> Option<&IniValue> { self.values.get(key) }
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            values: BTreeMap::new(),
+            parent: None,
+        }
+    }
+    pub fn set(&mut self, key: String, value: IniValue) {
+        self.values.insert(key, value);
+    }
+    pub fn get(&self, key: &str) -> Option<&IniValue> {
+        self.values.get(key)
+    }
     /// Case-insensitive lookup; Westwood INI keys are not case sensitive.
     pub fn get_ci(&self, key: &str) -> Option<&IniValue> {
         self.values.get(key).or_else(|| {
@@ -91,10 +139,18 @@ impl IniSection {
                 .map(|(_, value)| value)
         })
     }
-    pub fn get_string(&self, key: &str) -> Option<&str> { self.values.get(key).and_then(|v| v.as_string()) }
-    pub fn get_i64(&self, key: &str) -> Result<i64> { self.values.get(key).context("Key not found")?.as_i64() }
-    pub fn get_f64(&self, key: &str) -> Result<f64> { self.values.get(key).context("Key not found")?.as_f64() }
-    pub fn get_bool(&self, key: &str) -> Result<bool> { self.values.get(key).context("Key not found")?.as_bool() }
+    pub fn get_string(&self, key: &str) -> Option<&str> {
+        self.values.get(key).and_then(|v| v.as_string())
+    }
+    pub fn get_i64(&self, key: &str) -> Result<i64> {
+        self.values.get(key).context("Key not found")?.as_i64()
+    }
+    pub fn get_f64(&self, key: &str) -> Result<f64> {
+        self.values.get(key).context("Key not found")?.as_f64()
+    }
+    pub fn get_bool(&self, key: &str) -> Result<bool> {
+        self.values.get(key).context("Key not found")?.as_bool()
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -104,7 +160,9 @@ pub struct IniFile {
 }
 
 impl IniFile {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn parse(input: &str) -> Result<Self> {
         let mut ini = Self::new();
@@ -112,34 +170,42 @@ impl IniFile {
 
         for line in input.lines() {
             let line = line.trim();
-            if line.is_empty() || line.starts_with(';') || line.starts_with('#') { continue; }
+            if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
+                continue;
+            }
 
             if line.starts_with('[') && line.ends_with(']') {
-                let section_name = line[1..line.len()-1].trim().to_string();
+                let section_name = line[1..line.len() - 1].trim().to_string();
                 current_section = Some(section_name.clone());
                 if let Some(colon_pos) = section_name.find(':') {
                     let name = section_name[..colon_pos].trim().to_string();
-                    let parent = section_name[colon_pos+1..].trim().to_string();
+                    let parent = section_name[colon_pos + 1..].trim().to_string();
                     let mut section = IniSection::new(name.clone());
                     section.parent = Some(parent);
                     ini.sections.insert(name.clone(), section);
                     current_section = Some(name);
                 } else {
-                    ini.sections.entry(section_name.clone()).or_insert_with(|| IniSection::new(section_name));
+                    ini.sections
+                        .entry(section_name.clone())
+                        .or_insert_with(|| IniSection::new(section_name));
                 }
                 continue;
             }
 
             if let Some(eq_pos) = line.find('=') {
                 let key = line[..eq_pos].trim().to_string();
-                let value_str = line[eq_pos+1..].trim();
+                let value_str = line[eq_pos + 1..].trim();
                 let value_str = value_str.split(';').next().unwrap_or("").trim();
                 let value_str = value_str.split('#').next().unwrap_or("").trim();
                 let value = Self::parse_value(value_str)?;
 
                 if let Some(section_name) = &current_section {
-                    if let Some(section) = ini.sections.get_mut(section_name) { section.set(key, value); }
-                } else { ini.globals.insert(key, value); }
+                    if let Some(section) = ini.sections.get_mut(section_name) {
+                        section.set(key, value);
+                    }
+                } else {
+                    ini.globals.insert(key, value);
+                }
             }
         }
 
@@ -152,7 +218,9 @@ impl IniFile {
         if s.contains(',') {
             let parts: Vec<&str> = s.split(',').map(|p| p.trim()).collect();
             let mut values = Vec::with_capacity(parts.len());
-            for part in parts { values.push(Self::parse_single_value(part)?); }
+            for part in parts {
+                values.push(Self::parse_single_value(part)?);
+            }
             return Ok(IniValue::Array(values));
         }
         Self::parse_single_value(s)
@@ -161,15 +229,23 @@ impl IniFile {
     fn parse_single_value(s: &str) -> Result<IniValue> {
         let s = s.trim();
         if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
-            return Ok(IniValue::String(s[1..s.len()-1].to_string()));
+            return Ok(IniValue::String(s[1..s.len() - 1].to_string()));
         }
         // Numbers (including 0x-prefixed hex) win over boolean words so that
         // Rules.ini values such as "1" remain usable as integers.
-        if let Some(i) = IniValue::parse_integer(s) { return Ok(IniValue::Integer(i)); }
-        if let Ok(f) = s.parse::<f64>() { return Ok(IniValue::Float(f)); }
+        if let Some(i) = IniValue::parse_integer(s) {
+            return Ok(IniValue::Integer(i));
+        }
+        if let Ok(f) = s.parse::<f64>() {
+            return Ok(IniValue::Float(f));
+        }
         let lower = s.to_lowercase();
-        if matches!(lower.as_str(), "yes"|"true"|"on") { return Ok(IniValue::Boolean(true)); }
-        if matches!(lower.as_str(), "no"|"false"|"off") { return Ok(IniValue::Boolean(false)); }
+        if matches!(lower.as_str(), "yes" | "true" | "on") {
+            return Ok(IniValue::Boolean(true));
+        }
+        if matches!(lower.as_str(), "no" | "false" | "off") {
+            return Ok(IniValue::Boolean(false));
+        }
         Ok(IniValue::String(s.to_string()))
     }
 
@@ -202,24 +278,43 @@ impl IniFile {
         Ok(())
     }
 
-    pub fn section(&self, name: &str) -> Option<&IniSection> { self.sections.get(name) }
-    pub fn section_mut(&mut self, name: &str) -> Option<&mut IniSection> { self.sections.get_mut(name) }
-    pub fn section_or_create(&mut self, name: &str) -> &mut IniSection {
-        self.sections.entry(name.to_string()).or_insert_with(|| IniSection::new(name.to_string()))
+    pub fn section(&self, name: &str) -> Option<&IniSection> {
+        self.sections.get(name)
     }
-    pub fn global(&self, key: &str) -> Option<&IniValue> { self.globals.get(key) }
-    pub fn set_global(&mut self, key: String, value: IniValue) { self.globals.insert(key, value); }
+    pub fn section_mut(&mut self, name: &str) -> Option<&mut IniSection> {
+        self.sections.get_mut(name)
+    }
+    pub fn section_or_create(&mut self, name: &str) -> &mut IniSection {
+        self.sections
+            .entry(name.to_string())
+            .or_insert_with(|| IniSection::new(name.to_string()))
+    }
+    pub fn global(&self, key: &str) -> Option<&IniValue> {
+        self.globals.get(key)
+    }
+    pub fn set_global(&mut self, key: String, value: IniValue) {
+        self.globals.insert(key, value);
+    }
 
-    pub fn to_string(&self) -> String {
+    /// Serialize to INI text. (Was originally the inherent `to_string`; made a
+    /// distinct name so `Display`/`ToString` is the single canonical pathway.)
+    pub fn to_ini_string(&self) -> String {
         let mut out = String::new();
         if !self.globals.is_empty() {
-            for (key, value) in &self.globals { out.push_str(&format!("{}={}\n", key, Self::value_to_string(value))); }
+            for (key, value) in &self.globals {
+                out.push_str(&format!("{}={}\n", key, Self::value_to_string(value)));
+            }
             out.push('\n');
         }
         for (name, section) in &self.sections {
-            if let Some(parent) = &section.parent { out.push_str(&format!("[{}:{}]\n", name, parent)); }
-            else { out.push_str(&format!("[{}]\n", name)); }
-            for (key, value) in &section.values { out.push_str(&format!("{}={}\n", key, Self::value_to_string(value))); }
+            if let Some(parent) = &section.parent {
+                out.push_str(&format!("[{}:{}]\n", name, parent));
+            } else {
+                out.push_str(&format!("[{}]\n", name));
+            }
+            for (key, value) in &section.values {
+                out.push_str(&format!("{}={}\n", key, Self::value_to_string(value)));
+            }
             out.push('\n');
         }
         out
@@ -227,26 +322,48 @@ impl IniFile {
 
     fn value_to_string(value: &IniValue) -> String {
         match value {
-            IniValue::String(s) => if s.contains(' ') || s.contains(',') || s.contains(';') || s.contains('#') { format!("\"{}\"", s) } else { s.clone() },
+            IniValue::String(s) => {
+                if s.contains(' ') || s.contains(',') || s.contains(';') || s.contains('#') {
+                    format!("\"{}\"", s)
+                } else {
+                    s.clone()
+                }
+            }
             IniValue::Integer(i) => i.to_string(),
             IniValue::Float(f) => f.to_string(),
-            IniValue::Boolean(b) => if *b { "yes".to_string() } else { "no".to_string() },
-            IniValue::Array(arr) => arr.iter().map(Self::value_to_string).collect::<Vec<_>>().join(","),
+            IniValue::Boolean(b) => {
+                if *b {
+                    "yes".to_string()
+                } else {
+                    "no".to_string()
+                }
+            }
+            IniValue::Array(arr) => arr
+                .iter()
+                .map(Self::value_to_string)
+                .collect::<Vec<_>>()
+                .join(","),
         }
     }
 
     pub fn load(path: &std::path::Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path).with_context(|| format!("Failed to read INI file: {:?}", path))?;
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read INI file: {:?}", path))?;
         Self::parse(&content)
     }
     pub fn save(&self, path: &std::path::Path) -> Result<()> {
-        let content = self.to_string();
-        std::fs::write(path, content).with_context(|| format!("Failed to write INI file: {:?}", path))?;
+        let content = self.to_ini_string();
+        std::fs::write(path, content)
+            .with_context(|| format!("Failed to write INI file: {:?}", path))?;
         Ok(())
     }
 }
 
-impl fmt::Display for IniFile { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{}", self.to_string()) } }
+impl fmt::Display for IniFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_ini_string())
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -259,13 +376,14 @@ mod tests {
         assert_eq!(general.get_i64("AttackInterval").unwrap(), 3);
         assert_eq!(general.get_i64("Allowed").unwrap(), 1);
         assert!(general.get_bool("Allowed").unwrap());
-        assert_eq!(general.get_bool("Blocked").unwrap(), false);
+        assert!(!general.get_bool("Blocked").unwrap());
         assert_eq!(general.get_f64("AttackInterval").unwrap(), 3.0);
     }
 
     #[test]
     fn parses_hex_and_negative_literals() {
-        let ini = IniFile::parse("[General]\nPowerEmergencyFraction=0x00C0\nNegative=-0x10\n").unwrap();
+        let ini =
+            IniFile::parse("[General]\nPowerEmergencyFraction=0x00C0\nNegative=-0x10\n").unwrap();
         let section = ini.section("General").unwrap();
         assert_eq!(section.get_i64("PowerEmergencyFraction").unwrap(), 0x00C0);
         assert_eq!(section.get_i64("Negative").unwrap(), -16);
@@ -291,7 +409,8 @@ mod tests {
 
     #[test]
     fn case_insensitive_lookup_and_strings() {
-        let ini = IniFile::parse("[General]\nBuildSpeed=1.5\nName=\"Hello World\"\nList=A,B,C\n").unwrap();
+        let ini = IniFile::parse("[General]\nBuildSpeed=1.5\nName=\"Hello World\"\nList=A,B,C\n")
+            .unwrap();
         let section = ini.section("General").unwrap();
         assert_eq!(section.get_ci("buildspeed").unwrap().as_f64().unwrap(), 1.5);
         assert_eq!(section.get_string("Name"), Some("Hello World"));
@@ -305,7 +424,123 @@ mod tests {
         let ini = IniFile::parse("[Weapons]\n1=Gun\n2=M16\n[Gun]\nDamage=25\nROF=30\n").unwrap();
         let text = ini.to_string();
         let reparsed = IniFile::parse(&text).unwrap();
-        assert_eq!(reparsed.section("Gun").unwrap().get_i64("Damage").unwrap(), 25);
-        assert_eq!(reparsed.section("Weapons").unwrap().get("2").unwrap().as_string(), Some("M16"));
+        assert_eq!(
+            reparsed.section("Gun").unwrap().get_i64("Damage").unwrap(),
+            25
+        );
+        assert_eq!(
+            reparsed
+                .section("Weapons")
+                .unwrap()
+                .get("2")
+                .unwrap()
+                .as_string(),
+            Some("M16")
+        );
+    }
+
+    /// Property-based round-trip tests (proptest).
+    ///
+    /// Value tokens are restricted to `[A-C][a-zA-Z_]{0,9}`: values starting
+    /// with a letter cannot be re-parsed as integers, floats, or boolean words
+    /// (yes/no/true/false/on/off all start outside `[A-C]`), so the parse
+    /// result is unambiguous and the round trip is exact.
+    #[cfg(test)]
+    mod property_tests {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::BTreeMap;
+
+        /// Safe INI token that keeps its `String` type through parse/serialize.
+        fn token() -> impl Strategy<Value = String> {
+            proptest::string::string_regex("[A-C][a-zA-Z_]{0,9}").unwrap()
+        }
+
+        #[derive(Debug, Clone, PartialEq)]
+        enum ExpectedValue {
+            Int(i64),
+            Str(String),
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            #[test]
+            fn sections_keys_and_values_survive_parse_format_parse(
+                section in token(),
+                int_keys in proptest::collection::vec(token(), 0..=6),
+                int_values in proptest::collection::vec(any::<i32>(), 0..=6),
+                str_keys in proptest::collection::vec(token(), 0..=6),
+                str_values in proptest::collection::vec(token(), 0..=6),
+            ) {
+                // Canonical source: unique keys, one line per entry.
+                let mut expected: BTreeMap<String, ExpectedValue> = BTreeMap::new();
+                let mut lines = vec![format!("[{section}]")];
+                for (key, value) in int_keys.into_iter().zip(int_values.into_iter()) {
+                    if !expected.contains_key(&key) {
+                        expected.insert(key.clone(), ExpectedValue::Int(i64::from(value)));
+                        lines.push(format!("{key}={value}"));
+                    }
+                }
+                for (key, value) in str_keys.into_iter().zip(str_values.into_iter()) {
+                    if !expected.contains_key(&key) {
+                        expected.insert(key.clone(), ExpectedValue::Str(value.clone()));
+                        lines.push(format!("{key}={value}"));
+                    }
+                }
+                let text = lines.join("\n") + "\n";
+
+                let parsed = IniFile::parse(&text).unwrap();
+                let reparsed = IniFile::parse(&parsed.to_string()).unwrap();
+                let section_name = section.clone();
+                for (title, ini) in [("parse", &parsed), ("reparse", &reparsed)] {
+                    prop_assert!(ini.section(&section_name).is_some());
+                    prop_assert_eq!(&ini.section(&section_name).unwrap().name, &section_name);
+                    let got_keys: Vec<&String> =
+                        ini.section(&section_name).unwrap().values.keys().collect();
+                    assert_eq!(
+                        got_keys,
+                        expected.keys().collect::<Vec<_>>(),
+                        "{title}: key set changed"
+                    );
+                    for (key, expected_value) in &expected {
+                        let section_ref = ini.section(&section_name).unwrap();
+                        match expected_value {
+                            ExpectedValue::Int(v) => assert_eq!(
+                                section_ref.get_i64(key).unwrap(),
+                                *v,
+                                "{title}: integer value changed"
+                            ),
+                            ExpectedValue::Str(s) => assert_eq!(
+                                section_ref.get_string(key),
+                                Some(s.as_str()),
+                                "{title}: string value changed"
+                            ),
+                        }
+                    }
+                }
+            }
+
+            #[test]
+            fn comma_arrays_split_and_round_trip(
+                section in token(),
+                key in token(),
+                items in proptest::collection::vec(token(), 2..=5),
+            ) {
+                let text = format!("[{section}]\n{key}={}\n", items.join(","));
+
+                let parsed = IniFile::parse(&text).unwrap();
+                let section_ref = parsed.section(&section).unwrap();
+                let array = section_ref.get(&key).unwrap().as_array().unwrap();
+                let strings: Vec<&str> = array.iter().filter_map(|v| v.as_string()).collect();
+                prop_assert_eq!(strings, items.clone(), "comma-split must yield every item");
+
+                // Array round trip through to_string keeps all items.
+                let reparsed = IniFile::parse(&parsed.to_string()).unwrap();
+                let array = reparsed.section(&section).unwrap().get(&key).unwrap().as_array().unwrap();
+                let strings: Vec<&str> = array.iter().filter_map(|v| v.as_string()).collect();
+                prop_assert_eq!(strings, items, "round trip");
+            }
+        }
     }
 }

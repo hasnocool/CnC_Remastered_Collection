@@ -58,7 +58,9 @@ impl TeslaCoil {
     }
 
     pub fn is_ready(&self) -> bool {
-        self.powered && self.is_alive() && self.reload <= Fixed16_16::ZERO
+        self.powered
+            && self.is_alive()
+            && self.reload <= Fixed16_16::ZERO
             && self.charge >= Fixed16_16::ONE
     }
 

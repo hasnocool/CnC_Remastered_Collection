@@ -7,6 +7,12 @@ use cnc_asset::SpriteAtlas;
 use cnc_core::rules::RulesDatabase;
 use cnc_core::{ClassId, Fixed16_16, Vec2, Vec2i};
 use cnc_renderer::Renderer;
+use std::sync::OnceLock;
+
+/// Lazily loaded RTS tileset pack (shared across render calls), mirroring the
+/// red-alert crate. Loaded once per process from the default pack directory
+/// (`CNC_TILESET_DIR` / `CNC_TILESET_PALETTE` environment overrides apply).
+static TD_TILESET: OnceLock<Option<cnc_asset::tileset_pack::TilesetPack>> = OnceLock::new();
 
 use crate::ai::AI;
 use crate::building::Building;
@@ -316,7 +322,7 @@ impl Game {
     fn is_gdi(&self, owner: u8) -> bool {
         self.houses
             .get(owner as usize)
-            .map_or(false, |house| house.id == ClassId::HouseGDI)
+            .is_some_and(|house| house.id == ClassId::HouseGDI)
     }
 
     /// Rules.ini Prerequisite= enforcement (RULES.CPP / TYPE.CPP tech tree).
@@ -388,7 +394,7 @@ impl Game {
     pub fn meets_tech_level(&self, owner: u8, required: u8) -> bool {
         self.houses
             .get(owner as usize)
-            .map_or(false, |house| required <= house.tech_level)
+            .is_some_and(|house| required <= house.tech_level)
     }
 
     fn cell_center(cx: i32, cy: i32) -> Vec2 {
@@ -543,7 +549,7 @@ impl Game {
                 && building.is_alive()
                 && building
                     .structure_type()
-                    .map_or(false, |structure| structure.stats().produces == Some(kind))
+                    .is_some_and(|structure| structure.stats().produces == Some(kind))
         })
     }
 
@@ -554,16 +560,17 @@ impl Game {
             && self
                 .houses
                 .get(owner as usize)
-                .map_or(false, |house| house.can_afford(self.unit_cost(unit_type)))
+                .is_some_and(|house| house.can_afford(self.unit_cost(unit_type)))
     }
 
     pub fn can_queue_building(&self, owner: u8, structure: StructureType) -> bool {
         self.meets_tech_level(owner, self.building_tech_level(structure))
             && self.meets_prerequisites(owner, structure.ini_name())
             && self.owns_structure(owner, StructureType::ConstructionYard)
-            && self.houses.get(owner as usize).map_or(false, |house| {
-                house.can_afford(self.building_cost(structure))
-            })
+            && self
+                .houses
+                .get(owner as usize)
+                .is_some_and(|house| house.can_afford(self.building_cost(structure)))
     }
 
     /// Full production sidebar for a house.
@@ -689,7 +696,8 @@ impl Game {
     /// Repair a damaged building to full health, paying for the missing health.
     pub fn repair_building(&mut self, owner: u8, index: usize) -> Option<i32> {
         let building = self.buildings.get(index)?;
-        if building.owner != owner || !building.is_alive() || building.health >= building.max_health {
+        if building.owner != owner || !building.is_alive() || building.health >= building.max_health
+        {
             return None;
         }
         let structure = building.structure_type()?;
@@ -1088,7 +1096,7 @@ impl Game {
         let factory = self.buildings.iter().find(|building| {
             building.owner == owner
                 && building.is_alive()
-                && building.structure_type().map_or(false, |structure| {
+                && building.structure_type().is_some_and(|structure| {
                     matches!(
                         structure.stats().produces,
                         Some(ProductionKind::Infantry)
@@ -1177,7 +1185,7 @@ impl Game {
 
         // MAP.CPP grows/spreads tiberium over time rather than every tick.
         self.tiberium_tick = self.tiberium_tick.wrapping_add(1);
-        if self.tiberium_tick % 30 == 0 {
+        if self.tiberium_tick.is_multiple_of(30) {
             self.map.grid.tiberium_cycle();
         }
     }
@@ -1260,11 +1268,8 @@ impl Game {
                 structure,
                 cell,
             } => {
-                let mut building = Building::from_type(
-                    *structure,
-                    Self::cell_center(cell.x, cell.y),
-                    *owner,
-                );
+                let mut building =
+                    Building::from_type(*structure, Self::cell_center(cell.x, cell.y), *owner);
                 building.set_powered(true);
                 let entity_id = self.buildings.len() as u32;
                 if let Some(house) = self.houses.get_mut(*owner as usize) {
@@ -1352,7 +1357,7 @@ impl Game {
                 .map
                 .grid
                 .get(cell)
-                .map_or(false, |cell| cell.has_tiberium);
+                .is_some_and(|cell| cell.has_tiberium);
             if on_tiberium && timer_ready {
                 let stage = self
                     .map
@@ -1441,7 +1446,7 @@ impl Game {
                     continue;
                 }
                 let distance = (x - from.x).abs() + (y - from.y).abs();
-                if best.map_or(true, |(_, current)| distance < current) {
+                if best.is_none_or(|(_, current)| distance < current) {
                     best = Some((Vec2i::new(x, y), distance));
                 }
             }
@@ -1496,7 +1501,7 @@ impl Game {
                 let dy = candidate.position.y.to_f32() - position.y.to_f32();
                 let distance_squared = dx * dx + dy * dy;
                 if distance_squared <= scan_squared
-                    && best.map_or(true, |(_, current)| distance_squared < current)
+                    && best.is_none_or(|(_, current)| distance_squared < current)
                 {
                     best = Some((other, distance_squared));
                 }
@@ -1730,7 +1735,30 @@ impl Game {
     }
 
     pub fn render_with_sprites(&self, renderer: &mut dyn Renderer, atlas: Option<&SpriteAtlas>) {
-        self.map.render(renderer);
+        // Terrain layer. The tileset pack owns its own texture slot
+        // (`TILESET_TEXTURE_ID`) via the multi-atlas renderer API, so terrain
+        // renders as RTS tileset sprites alongside the procedural
+        // unit/building atlas (`CNC_TILESET_DIR` / `CNC_TILESET_PALETTE`
+        // overrides, default palette `td_inspired`); flat quads only when no
+        // pack loads.
+        let tileset = TD_TILESET.get_or_init(|| {
+            let pack = cnc_asset::tileset_pack::load_default("td_inspired");
+            // One-shot loader diagnostics: exactly one line per process,
+            // success or failure (map.rs logs atlas-upload failures separately).
+            match &pack {
+                Some(pack) => eprintln!(
+                    "tileset pack loaded (td_inspired): {}x{} atlas, {} categories",
+                    pack.width(),
+                    pack.height(),
+                    pack.categories().count()
+                ),
+                None => eprintln!(
+                    "tileset pack (td_inspired) unavailable; terrain falls back to flat quads"
+                ),
+            }
+            pack
+        });
+        self.map.render_with_tiles(renderer, tileset.as_ref());
         for building in &self.buildings {
             building.render_with(renderer, atlas);
         }
@@ -1750,29 +1778,69 @@ impl Game {
             let x = blast.position.x.to_f32();
             let y = blast.position.y.to_f32();
             let color = blast.color;
-            renderer.draw_rect(
-                x - radius,
-                y - radius,
-                radius * 2.0,
-                radius * 2.0,
-                [color[0], color[1], color[2], 0.30 * ratio],
-            );
-            let inner = radius * 0.6;
-            renderer.draw_rect(
-                x - inner,
-                y - inner,
-                inner * 2.0,
-                inner * 2.0,
-                [color[0], color[1], color[2], 0.45 * ratio],
-            );
-            let core = radius * 0.3;
-            renderer.draw_rect(
-                x - core,
-                y - core,
-                core * 2.0,
-                core * 2.0,
-                [1.0, 1.0, 1.0, 0.35 * ratio],
-            );
+            // `resources_fx` blast sprite keyed by remaining lifetime: fresh
+            // blasts use the explosion family, mid-life the small fire, and
+            // dying blasts the smoke puff. The colour rects below stay as the
+            // no-pack fallback.
+            let (fx_family, fx_fallback_row) = if ratio > 0.66 {
+                ("explosion", 9u8)
+            } else if ratio > 0.33 {
+                ("fire_small", 7u8)
+            } else {
+                ("smoke_puff", 8u8)
+            };
+            let fx_sprite = tileset
+                .as_ref()
+                .filter(|_| renderer.texture_ready(cnc_renderer::TILESET_TEXTURE_ID))
+                .and_then(|pack| {
+                    // Deterministic per-blast variant column (same convention
+                    // as the terrain layer, on blast world coordinates).
+                    let col = ((x as i32 * 7 + y as i32 * 13).rem_euclid(16)) as u8;
+                    let row = pack
+                        .family_row("resources_fx", fx_family)
+                        .unwrap_or(fx_fallback_row);
+                    pack.tile_px_rect("resources_fx", row, col)
+                });
+            if let Some((uv_x, uv_y, uv_w, uv_h)) = fx_sprite {
+                let mut sprite = cnc_renderer::Sprite::new(
+                    cnc_renderer::TILESET_TEXTURE_ID,
+                    Vec2::new(
+                        Fixed16_16::from_f32(x - radius),
+                        Fixed16_16::from_f32(y - radius),
+                    ),
+                    Vec2::new(
+                        Fixed16_16::from_f32(radius * 2.0),
+                        Fixed16_16::from_f32(radius * 2.0),
+                    ),
+                );
+                sprite.uv_rect =
+                    cnc_core::Rect::new(uv_x as i32, uv_y as i32, uv_w as i32, uv_h as i32);
+                renderer.draw_sprite(&sprite);
+            } else {
+                renderer.draw_rect(
+                    x - radius,
+                    y - radius,
+                    radius * 2.0,
+                    radius * 2.0,
+                    [color[0], color[1], color[2], 0.30 * ratio],
+                );
+                let inner = radius * 0.6;
+                renderer.draw_rect(
+                    x - inner,
+                    y - inner,
+                    inner * 2.0,
+                    inner * 2.0,
+                    [color[0], color[1], color[2], 0.45 * ratio],
+                );
+                let core = radius * 0.3;
+                renderer.draw_rect(
+                    x - core,
+                    y - core,
+                    core * 2.0,
+                    core * 2.0,
+                    [1.0, 1.0, 1.0, 0.35 * ratio],
+                );
+            }
         }
 
         for beam in &self.beams {
@@ -1864,7 +1932,7 @@ impl Game {
             let dy = unit.position.y.to_f32() - world.y.to_f32();
             let distance_squared = dx * dx + dy * dy;
             if distance_squared <= PICK_RADIUS * PICK_RADIUS
-                && best.map_or(true, |(_, current)| distance_squared < current)
+                && best.is_none_or(|(_, current)| distance_squared < current)
             {
                 best = Some((index, distance_squared));
             }
@@ -2087,7 +2155,7 @@ impl Game {
             let dy = unit.position.y.to_f32() - world.y.to_f32();
             let distance_squared = dx * dx + dy * dy;
             if distance_squared <= PICK_RADIUS * PICK_RADIUS
-                && best.map_or(true, |(_, current)| distance_squared < current)
+                && best.is_none_or(|(_, current)| distance_squared < current)
             {
                 best = Some((index, distance_squared));
             }
@@ -2101,7 +2169,9 @@ impl Game {
             .units
             .iter()
             .enumerate()
-            .filter(|(_, unit)| unit.is_selected && unit.owner == self.player_owner && unit.is_alive())
+            .filter(|(_, unit)| {
+                unit.is_selected && unit.owner == self.player_owner && unit.is_alive()
+            })
             .map(|(index, _)| index)
             .collect();
         self.order_attack_indices(self.player_owner, &selected, target_index)
@@ -2117,7 +2187,7 @@ impl Game {
         let valid_target = self
             .units
             .get(target_index)
-            .map_or(false, |target| target.owner != owner && target.is_alive());
+            .is_some_and(|target| target.owner != owner && target.is_alive());
         if !valid_target {
             return 0;
         }
@@ -2206,21 +2276,21 @@ impl Game {
                 .iter()
                 .map(|house| house.production_queue.len())
                 .sum(),
-            gdi_power: self.houses.get(0).map_or(0, |house| house.power),
-            gdi_drain: self.houses.get(0).map_or(0, |house| house.max_power),
+            gdi_power: self.houses.first().map_or(0, |house| house.power),
+            gdi_drain: self.houses.first().map_or(0, |house| house.max_power),
             nod_power: self.houses.get(1).map_or(0, |house| house.power),
             nod_drain: self.houses.get(1).map_or(0, |house| house.max_power),
-            gdi_tiberium: self.houses.get(0).map_or(0, |house| house.tiberium),
-            gdi_capacity: self.houses.get(0).map_or(0, |house| house.capacity),
+            gdi_tiberium: self.houses.first().map_or(0, |house| house.tiberium),
+            gdi_capacity: self.houses.first().map_or(0, |house| house.capacity),
             nod_tiberium: self.houses.get(1).map_or(0, |house| house.tiberium),
             nod_capacity: self.houses.get(1).map_or(0, |house| house.capacity),
             gdi_ion: self
                 .houses
-                .get(0)
+                .first()
                 .map_or(0, |house| (house.ion_charge.to_f32() * 100.0) as i32),
             gdi_nuke: self
                 .houses
-                .get(0)
+                .first()
                 .map_or(0, |house| (house.nuke_charge.to_f32() * 100.0) as i32),
             nod_ion: self
                 .houses
@@ -3859,7 +3929,10 @@ mod prerequisite_tests {
             .iter()
             .any(|option| option.buildable == Buildable::Structure(StructureType::IonCannon)));
         // The full table still lists every row, just with visible = false.
-        assert_eq!(game.sidebar_options(0).len(), UnitType::ALL.len() + StructureType::ALL.len());
+        assert_eq!(
+            game.sidebar_options(0).len(),
+            UnitType::ALL.len() + StructureType::ALL.len()
+        );
 
         let nod = game.visible_sidebar_options(1);
         assert!(!nod
@@ -3947,10 +4020,15 @@ mod prerequisite_tests {
             .unwrap();
         game.buildings[index].health = game.buildings[index].max_health / Fixed16_16::from_int(2);
         let credits = game.houses[0].credits;
-        let cost = game.repair_building(0, index).expect("repair should succeed");
+        let cost = game
+            .repair_building(0, index)
+            .expect("repair should succeed");
         assert!(cost > 0);
         assert_eq!(game.houses[0].credits, credits - cost);
-        assert_eq!(game.buildings[index].health, game.buildings[index].max_health);
+        assert_eq!(
+            game.buildings[index].health,
+            game.buildings[index].max_health
+        );
         assert_eq!(game.repair_building(0, index), None, "already full");
         game.buildings[index].health = game.buildings[index].max_health / Fixed16_16::from_int(4);
         assert_eq!(game.repair_building(1, index), None, "wrong owner");
@@ -4041,7 +4119,10 @@ mod prerequisite_tests {
         );
         assert_eq!(game.order_units_move(0, &[gdi_id], target), 1);
         assert!(game.units[gdi_id as usize].target.is_some());
-        assert!(game.units[nod_id as usize].target.is_none(), "other owner untouched");
+        assert!(
+            game.units[nod_id as usize].target.is_none(),
+            "other owner untouched"
+        );
 
         // A mismatched owner id is ignored.
         assert_eq!(game.order_units_move(1, &[gdi_id], target), 0);

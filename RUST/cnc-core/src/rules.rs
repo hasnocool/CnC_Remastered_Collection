@@ -292,8 +292,7 @@ impl DifficultyRule {
                 .unwrap_or(defaults.is_build_slowdown),
             is_wall_destroyer: get_bool(section, "IsWallDestroyer")
                 .unwrap_or(defaults.is_wall_destroyer),
-            is_content_scan: get_bool(section, "IsContentScan")
-                .unwrap_or(defaults.is_content_scan),
+            is_content_scan: get_bool(section, "IsContentScan").unwrap_or(defaults.is_content_scan),
         }
     }
 }
@@ -458,9 +457,28 @@ impl HouseRule {
 
 /// Sections that describe the file itself rather than a playable type.
 const META_SECTIONS: &[&str] = &[
-    "General", "Basic", "Weapons", "Warheads", "Houses", "Countries", "Colors", "Easy",
-    "Normal", "Hard", "Difficult", "Multiplayer", "AI", "Sounds", "Movies", "Smudge",
-    "Tiberium", "Infantry", "Units", "Aircraft", "Buildings", "Structures",
+    "General",
+    "Basic",
+    "Weapons",
+    "Warheads",
+    "Houses",
+    "Countries",
+    "Colors",
+    "Easy",
+    "Normal",
+    "Hard",
+    "Difficult",
+    "Multiplayer",
+    "AI",
+    "Sounds",
+    "Movies",
+    "Smudge",
+    "Tiberium",
+    "Infantry",
+    "Units",
+    "Aircraft",
+    "Buildings",
+    "Structures",
 ];
 
 /// Fully parsed Rules.ini database shared by the game crates.
@@ -481,6 +499,10 @@ pub struct RulesDatabase {
 }
 
 impl RulesDatabase {
+    // Retained as an inherent method: ~15 external call sites use
+    // `RulesDatabase::from_str(...)` path-style, which would break if this
+    // became a `std::str::FromStr` trait impl without importing the trait.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(input: &str) -> Result<Self> {
         let ini = IniFile::parse(input).context("failed to parse Rules.ini")?;
         Ok(Self::from_ini(&ini))
@@ -546,9 +568,7 @@ impl RulesDatabase {
         for category in ["Infantry", "Units", "Aircraft", "Buildings", "Structures"] {
             let names = list_names(ini, category);
             if !names.is_empty() {
-                database
-                    .categories
-                    .insert(category.to_string(), names);
+                database.categories.insert(category.to_string(), names);
             }
         }
 
@@ -564,27 +584,27 @@ impl RulesDatabase {
             // Sections may also be defined without appearing in the list
             // sections (hand-written or partial Rules.ini files). Classify by
             // the keys they carry so lookups stay consistent.
-            if section.get_ci("Damage").is_some()
+            if (section.get_ci("Damage").is_some()
                 || section.get_ci("ROF").is_some()
                 || section.get_ci("Range").is_some()
                 || section.get_ci("Warhead").is_some()
                 || section.get_ci("Projectile").is_some()
-                || section.get_ci("Burst").is_some()
+                || section.get_ci("Burst").is_some())
+                && section.get_ci("Cost").is_none()
+                && section.get_ci("Strength").is_none()
             {
-                if section.get_ci("Cost").is_none() && section.get_ci("Strength").is_none() {
-                    database
-                        .weapons
-                        .insert(name.clone(), WeaponRule::from_section(name, section));
-                    continue;
-                }
+                database
+                    .weapons
+                    .insert(name.clone(), WeaponRule::from_section(name, section));
+                continue;
             }
-            if section.get_ci("Verses").is_some() || section.get_ci("Spread").is_some() {
-                if !database.weapons.contains_key(name) {
-                    database
-                        .warheads
-                        .insert(name.clone(), WarheadRule::from_section(name, section));
-                    continue;
-                }
+            if (section.get_ci("Verses").is_some() || section.get_ci("Spread").is_some())
+                && !database.weapons.contains_key(name)
+            {
+                database
+                    .warheads
+                    .insert(name.clone(), WarheadRule::from_section(name, section));
+                continue;
             }
             if TypeRule::looks_like_type(section) {
                 database
@@ -794,8 +814,14 @@ mod tests {
         assert_eq!(mtnk.armor.as_deref(), Some("Steel"));
         assert_eq!(mtnk.secondary.as_deref(), Some("M60MG"));
 
-        assert_eq!(rules.categories.get("Infantry"), Some(&vec!["E1".to_string()]));
-        assert_eq!(rules.categories.get("Units"), Some(&vec!["MTNK".to_string()]));
+        assert_eq!(
+            rules.categories.get("Infantry"),
+            Some(&vec!["E1".to_string()])
+        );
+        assert_eq!(
+            rules.categories.get("Units"),
+            Some(&vec!["MTNK".to_string()])
+        );
         // Meta/list sections never become playable types.
         assert!(rules.type_rule("Infantry").is_none());
     }
@@ -808,7 +834,10 @@ mod tests {
         .unwrap();
         assert_eq!(rules.houses.len(), 2);
         let gdi = rules.house("GDI").unwrap();
-        assert_eq!(gdi.display_name.as_deref(), Some("Global Defense Initiative"));
+        assert_eq!(
+            gdi.display_name.as_deref(),
+            Some("Global Defense Initiative")
+        );
         assert_eq!(gdi.color.as_deref(), Some("Gold"));
         assert_eq!(rules.house("Nod").unwrap().color.as_deref(), Some("Red"));
     }
@@ -828,8 +857,14 @@ mod tests {
     #[test]
     fn level_parser_is_case_insensitive() {
         assert_eq!(DifficultyLevel::parse("easy"), Some(DifficultyLevel::Easy));
-        assert_eq!(DifficultyLevel::parse("NORMAL"), Some(DifficultyLevel::Normal));
-        assert_eq!(DifficultyLevel::parse("Difficult"), Some(DifficultyLevel::Hard));
+        assert_eq!(
+            DifficultyLevel::parse("NORMAL"),
+            Some(DifficultyLevel::Normal)
+        );
+        assert_eq!(
+            DifficultyLevel::parse("Difficult"),
+            Some(DifficultyLevel::Hard)
+        );
         assert_eq!(DifficultyLevel::parse("brutal"), None);
     }
 }

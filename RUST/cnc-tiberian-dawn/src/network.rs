@@ -9,24 +9,60 @@ use tokio::net::UdpSocket;
 /// Command types for lockstep networking
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    Move { units: Vec<u32>, target: Vec2 },
-    Attack { units: Vec<u32>, target: u32 },
-    Stop { units: Vec<u32> },
-    Guard { units: Vec<u32>, target: u32 },
-    Build { building: ClassId, location: Vec2 },
-    Sell { building: u32 },
-    Repair { unit: u32, target: u32 },
-    Power { building: u32, on: bool },
-    Produce { factory: u32, unit_type: ClassId },
-    Deploy { unit: u32 },
-    Undeploy { unit: u32 },
-    Sabotage { unit: u32, target: u32 },
+    Move {
+        units: Vec<u32>,
+        target: Vec2,
+    },
+    Attack {
+        units: Vec<u32>,
+        target: u32,
+    },
+    Stop {
+        units: Vec<u32>,
+    },
+    Guard {
+        units: Vec<u32>,
+        target: u32,
+    },
+    Build {
+        building: ClassId,
+        location: Vec2,
+    },
+    Sell {
+        building: u32,
+    },
+    Repair {
+        unit: u32,
+        target: u32,
+    },
+    Power {
+        building: u32,
+        on: bool,
+    },
+    Produce {
+        factory: u32,
+        unit_type: ClassId,
+    },
+    Deploy {
+        unit: u32,
+    },
+    Undeploy {
+        unit: u32,
+    },
+    Sabotage {
+        unit: u32,
+        target: u32,
+    },
     /// Repair one owned building to full health (RA structure repair).
-    RepairStructure { building: u32 },
+    RepairStructure {
+        building: u32,
+    },
     /// Cancel the front production item, refunding its cost.
     CancelProduction,
     /// Place the owner's front completed structure at a world location (TD).
-    PlaceBuilding { location: Vec2 },
+    PlaceBuilding {
+        location: Vec2,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -315,7 +351,7 @@ impl LockstepSession {
         self.checksums
             .iter()
             .find(|(recorded, _)| *recorded == frame)
-            .map_or(false, |(_, local)| *local != remote_checksum)
+            .is_some_and(|(_, local)| *local != remote_checksum)
     }
 
     /// Rebuild a session from a recorded replay (used by save/load and tests).
@@ -1417,7 +1453,10 @@ impl MigrateMessage {
         out.extend_from_slice(&MIGRATION_MAGIC);
         out.push(MIGRATION_VERSION);
         match *self {
-            Self::HostLost { generation, reporter } => {
+            Self::HostLost {
+                generation,
+                reporter,
+            } => {
                 out.push(1);
                 out.extend_from_slice(&generation.to_le_bytes());
                 out.push(reporter);
@@ -1665,6 +1704,10 @@ impl UdpTransport {
     }
 }
 
+/// Outgoing batch produced by `LiveSession::advance`: the drained commands,
+/// the encoded packet bytes, and the peer targets to send them to.
+pub type AdvanceBatch = (Vec<NetCommand>, Vec<u8>, Vec<SocketAddr>);
+
 /// Combined lockstep + relay + host-migration state for a live session.
 ///
 /// The launcher (or a headless harness) feeds received datagrams into
@@ -1696,13 +1739,21 @@ pub enum LiveEvent {
 }
 
 impl LiveSession {
-    pub fn new(local_player: u8, players: u8, local_address: Option<SocketAddr>) -> Result<Self, MigrationError> {
+    pub fn new(
+        local_player: u8,
+        players: u8,
+        local_address: Option<SocketAddr>,
+    ) -> Result<Self, MigrationError> {
         let migration = HostMigration::new(local_player, players, 0)?;
         Ok(Self {
             local_player,
             players,
             local_address,
-            host_address: if local_player == 0 { local_address } else { None },
+            host_address: if local_player == 0 {
+                local_address
+            } else {
+                None
+            },
             peers: BTreeMap::new(),
             migration,
             relay: MeshRelay::new(256),
@@ -1785,7 +1836,7 @@ impl LiveSession {
     }
 
     /// Drain this frame's commands, build the packet and advance the frame.
-    pub fn advance(&mut self) -> Result<(Vec<NetCommand>, Vec<u8>, Vec<SocketAddr>), PacketError> {
+    pub fn advance(&mut self) -> Result<AdvanceBatch, PacketError> {
         let commands = self.queue.pop_frame(self.frame);
         let packet = NetPacket::new(self.next_sequence, self.frame, commands.clone());
         self.next_sequence = self.next_sequence.wrapping_add(1);
@@ -1826,7 +1877,12 @@ impl NetworkConfig {
         if self.bind_address.trim().is_empty() {
             return Err("bind address must not be empty".to_string());
         }
-        if self.bind_address.trim().parse::<std::net::IpAddr>().is_err() {
+        if self
+            .bind_address
+            .trim()
+            .parse::<std::net::IpAddr>()
+            .is_err()
+        {
             return Err("bind address must be an IP address".to_string());
         }
         if !(2..=8).contains(&self.max_players) {
@@ -1889,7 +1945,13 @@ mod tests {
         assert_eq!(Command::Sabotage { unit: 1, target: 2 }.tag(), 12);
         assert_eq!(Command::RepairStructure { building: 4 }.tag(), 13);
         assert_eq!(Command::CancelProduction.tag(), 14);
-        assert_eq!(Command::PlaceBuilding { location: point(4, 6) }.tag(), 15);
+        assert_eq!(
+            Command::PlaceBuilding {
+                location: point(4, 6)
+            }
+            .tag(),
+            15
+        );
     }
 
     #[test]
@@ -2135,7 +2197,13 @@ mod netcode_tests {
             ),
             NetCommand::new(7, 0, Command::RepairStructure { building: 15 }),
             NetCommand::new(7, 1, Command::CancelProduction),
-            NetCommand::new(8, 0, Command::PlaceBuilding { location: point(20, 24) }),
+            NetCommand::new(
+                8,
+                0,
+                Command::PlaceBuilding {
+                    location: point(20, 24),
+                },
+            ),
         ]
     }
 
@@ -2664,16 +2732,22 @@ mod migration_tests {
                 reporter: 1
             }
         );
-        assert_eq!(loss_two, MigrateMessage::HostLost {
-            generation: 1,
-            reporter: 2
-        });
+        assert_eq!(
+            loss_two,
+            MigrateMessage::HostLost {
+                generation: 1,
+                reporter: 2
+            }
+        );
 
         // Only the lowest living player wins the election.
-        assert_eq!(peer_one.claim(), Some(MigrateMessage::HostClaim {
-            generation: 1,
-            host: 1
-        }));
+        assert_eq!(
+            peer_one.claim(),
+            Some(MigrateMessage::HostClaim {
+                generation: 1,
+                host: 1
+            })
+        );
         assert_eq!(peer_two.claim(), None);
         assert!(peer_one.is_host());
         assert_eq!(peer_one.state, MigrationState::Migrated);
@@ -2770,7 +2844,10 @@ mod migration_tests {
 
         let mut cache = MeshRelay::new(8);
         assert_eq!(
-            relay.relay_from(source_addr, b"payload", &mut cache).await.unwrap(),
+            relay
+                .relay_from(source_addr, b"payload", &mut cache)
+                .await
+                .unwrap(),
             1
         );
 
@@ -2789,7 +2866,10 @@ mod migration_tests {
 
         // Second copy is dropped by the cache.
         assert_eq!(
-            relay.relay_from(source_addr, b"payload", &mut cache).await.unwrap(),
+            relay
+                .relay_from(source_addr, b"payload", &mut cache)
+                .await
+                .unwrap(),
             0
         );
     }

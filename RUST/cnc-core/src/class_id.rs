@@ -1,13 +1,16 @@
 //! Class ID system (Westwood RTTI replacement)
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use serde::{Serialize, Deserialize, Serializer, Deserializer};
 
 /// Class ID - replaces C++ RTTI
 /// Each game object type gets a unique ID
 #[repr(u32)]
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, Default)]
+// `AA_Gun` intentionally mirrors the Westwood 3-letter INI shorthand; renaming
+// would break the C++ compatible naming scheme.
+#[allow(non_camel_case_types)]
 pub enum ClassId {
     // Base classes
     Abstract = 0,
@@ -80,22 +83,22 @@ pub enum ClassId {
     VehicleE14 = 513, // Tesla Tank
 
     // Aircraft types
-    AircraftE1 = 600,  // Helicopter
-    AircraftE2 = 601,  // Transport Heli
-    AircraftE3 = 602,  // Fighter
-    AircraftE4 = 603,  // Bomber
-    AircraftE5 = 604,  // A-10
-    AircraftE6 = 605,  // Yak
-    AircraftE7 = 606,  // MiG
-    AircraftE8 = 607,  // Chinook
+    AircraftE1 = 600, // Helicopter
+    AircraftE2 = 601, // Transport Heli
+    AircraftE3 = 602, // Fighter
+    AircraftE4 = 603, // Bomber
+    AircraftE5 = 604, // A-10
+    AircraftE6 = 605, // Yak
+    AircraftE7 = 606, // MiG
+    AircraftE8 = 607, // Chinook
 
     // Ship types
-    ShipE1 = 700,  // Gunboat
-    ShipE2 = 701,  // Destroyer
-    ShipE3 = 702,  // Cruiser
-    ShipE4 = 703,  // Submarine
-    ShipE5 = 704,  // Transport
-    ShipE6 = 705,  // Carrier
+    ShipE1 = 700, // Gunboat
+    ShipE2 = 701, // Destroyer
+    ShipE3 = 702, // Cruiser
+    ShipE4 = 703, // Submarine
+    ShipE5 = 704, // Transport
+    ShipE6 = 705, // Carrier
 
     // Projectiles/Weapons
     Projectile = 800,
@@ -134,6 +137,7 @@ pub enum ClassId {
     NetCommand = 1201,
 
     // Unknown/Invalid
+    #[default]
     Unknown = u32::MAX,
 }
 
@@ -176,15 +180,15 @@ impl ClassId {
             318 => ClassId::GapGenerator,
             319 => ClassId::IronCurtain,
             320 => ClassId::Chronosphere,
-            400..=410 => unsafe { std::mem::transmute(id) },
-            500..=514 => unsafe { std::mem::transmute(id) },
-            600..=607 => unsafe { std::mem::transmute(id) },
-            700..=705 => unsafe { std::mem::transmute(id) },
-            800..=808 => unsafe { std::mem::transmute(id) },
-            900..=906 => unsafe { std::mem::transmute(id) },
-            1000..=1002 => unsafe { std::mem::transmute(id) },
-            1100..=1104 => unsafe { std::mem::transmute(id) },
-            1200..=1201 => unsafe { std::mem::transmute(id) },
+            400..=410 => unsafe { std::mem::transmute::<u32, ClassId>(id) },
+            500..=514 => unsafe { std::mem::transmute::<u32, ClassId>(id) },
+            600..=607 => unsafe { std::mem::transmute::<u32, ClassId>(id) },
+            700..=705 => unsafe { std::mem::transmute::<u32, ClassId>(id) },
+            800..=808 => unsafe { std::mem::transmute::<u32, ClassId>(id) },
+            900..=906 => unsafe { std::mem::transmute::<u32, ClassId>(id) },
+            1000..=1002 => unsafe { std::mem::transmute::<u32, ClassId>(id) },
+            1100..=1104 => unsafe { std::mem::transmute::<u32, ClassId>(id) },
+            1200..=1201 => unsafe { std::mem::transmute::<u32, ClassId>(id) },
             _ => ClassId::Unknown,
         }
     }
@@ -197,48 +201,108 @@ impl ClassId {
 
     /// Check if this is a unit type
     pub fn is_unit(self) -> bool {
-        matches!(self,
-            ClassId::Unit |
-            ClassId::Infantry | ClassId::Vehicle | ClassId::Aircraft | ClassId::Ship |
-            ClassId::InfantryE1 | ClassId::InfantryE2 | ClassId::InfantryE3 | ClassId::InfantryE4 | ClassId::InfantryE5 |
-            ClassId::InfantryE6 | ClassId::InfantryE7 | ClassId::InfantryE8 | ClassId::InfantryE9 | ClassId::InfantryE10 | ClassId::InfantryE11 |
-            ClassId::VehicleE1 | ClassId::VehicleE2 | ClassId::VehicleE3 | ClassId::VehicleE4 | ClassId::VehicleE5 |
-            ClassId::VehicleE6 | ClassId::VehicleE7 | ClassId::VehicleE8 | ClassId::VehicleE9 | ClassId::VehicleE10 |
-            ClassId::VehicleE11 | ClassId::VehicleE12 | ClassId::VehicleE13 | ClassId::VehicleE14 |
-            ClassId::AircraftE1 | ClassId::AircraftE2 | ClassId::AircraftE3 | ClassId::AircraftE4 |
-            ClassId::AircraftE5 | ClassId::AircraftE6 | ClassId::AircraftE7 | ClassId::AircraftE8 |
-            ClassId::ShipE1 | ClassId::ShipE2 | ClassId::ShipE3 | ClassId::ShipE4 | ClassId::ShipE5 | ClassId::ShipE6
+        matches!(
+            self,
+            ClassId::Unit
+                | ClassId::Infantry
+                | ClassId::Vehicle
+                | ClassId::Aircraft
+                | ClassId::Ship
+                | ClassId::InfantryE1
+                | ClassId::InfantryE2
+                | ClassId::InfantryE3
+                | ClassId::InfantryE4
+                | ClassId::InfantryE5
+                | ClassId::InfantryE6
+                | ClassId::InfantryE7
+                | ClassId::InfantryE8
+                | ClassId::InfantryE9
+                | ClassId::InfantryE10
+                | ClassId::InfantryE11
+                | ClassId::VehicleE1
+                | ClassId::VehicleE2
+                | ClassId::VehicleE3
+                | ClassId::VehicleE4
+                | ClassId::VehicleE5
+                | ClassId::VehicleE6
+                | ClassId::VehicleE7
+                | ClassId::VehicleE8
+                | ClassId::VehicleE9
+                | ClassId::VehicleE10
+                | ClassId::VehicleE11
+                | ClassId::VehicleE12
+                | ClassId::VehicleE13
+                | ClassId::VehicleE14
+                | ClassId::AircraftE1
+                | ClassId::AircraftE2
+                | ClassId::AircraftE3
+                | ClassId::AircraftE4
+                | ClassId::AircraftE5
+                | ClassId::AircraftE6
+                | ClassId::AircraftE7
+                | ClassId::AircraftE8
+                | ClassId::ShipE1
+                | ClassId::ShipE2
+                | ClassId::ShipE3
+                | ClassId::ShipE4
+                | ClassId::ShipE5
+                | ClassId::ShipE6
         )
     }
 
     /// Check if this is a building type
     pub fn is_building(self) -> bool {
-        matches!(self,
-            ClassId::Building |
-            ClassId::Factory | ClassId::PowerPlant | ClassId::Refinery |
-            ClassId::Barracks | ClassId::WarFactory | ClassId::Helipad |
-            ClassId::Airfield | ClassId::NavalYard | ClassId::SubPen |
-            ClassId::ConstructionYard | ClassId::Radar | ClassId::Silo |
-            ClassId::BioLab | ClassId::TechCenter | ClassId::MissileSilo |
-            ClassId::AA_Gun | ClassId::TeslaCoil | ClassId::GapGenerator |
-            ClassId::IronCurtain | ClassId::Chronosphere
+        matches!(
+            self,
+            ClassId::Building
+                | ClassId::Factory
+                | ClassId::PowerPlant
+                | ClassId::Refinery
+                | ClassId::Barracks
+                | ClassId::WarFactory
+                | ClassId::Helipad
+                | ClassId::Airfield
+                | ClassId::NavalYard
+                | ClassId::SubPen
+                | ClassId::ConstructionYard
+                | ClassId::Radar
+                | ClassId::Silo
+                | ClassId::BioLab
+                | ClassId::TechCenter
+                | ClassId::MissileSilo
+                | ClassId::AA_Gun
+                | ClassId::TeslaCoil
+                | ClassId::GapGenerator
+                | ClassId::IronCurtain
+                | ClassId::Chronosphere
         )
     }
 
     /// Check if this is a house/faction
     pub fn is_house(self) -> bool {
-        matches!(self,
-            ClassId::House | ClassId::HouseGDI | ClassId::HouseNod |
-            ClassId::HouseAllies | ClassId::HouseSoviet
+        matches!(
+            self,
+            ClassId::House
+                | ClassId::HouseGDI
+                | ClassId::HouseNod
+                | ClassId::HouseAllies
+                | ClassId::HouseSoviet
         )
     }
 
     /// Check if this is a projectile
     pub fn is_projectile(self) -> bool {
-        matches!(self,
-            ClassId::Projectile | ClassId::Bullet | ClassId::Rocket |
-            ClassId::Shell | ClassId::Grenade | ClassId::Flame |
-            ClassId::TeslaBolt | ClassId::Nuke | ClassId::IonBeam
+        matches!(
+            self,
+            ClassId::Projectile
+                | ClassId::Bullet
+                | ClassId::Rocket
+                | ClassId::Shell
+                | ClassId::Grenade
+                | ClassId::Flame
+                | ClassId::TeslaBolt
+                | ClassId::Nuke
+                | ClassId::IonBeam
         )
     }
 
@@ -263,10 +327,6 @@ impl ClassId {
     }
 }
 
-impl Default for ClassId {
-    fn default() -> Self { ClassId::Unknown }
-}
-
 impl fmt::Display for ClassId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?} ({})", self, self.as_u32())
@@ -286,7 +346,7 @@ pub struct ClassRegistry {
     data: HashMap<ClassId, ClassData>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ClassData {
     pub name: String,
     pub prerequisite: Vec<ClassId>,
@@ -297,22 +357,10 @@ pub struct ClassData {
     pub custom: HashMap<String, String>,
 }
 
-impl Default for ClassData {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            prerequisite: Vec::new(),
-            buildable: false,
-            cost: 0,
-            build_time: 0,
-            owner: Vec::new(),
-            custom: HashMap::new(),
-        }
-    }
-}
-
 impl ClassRegistry {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Register a class
     pub fn register(&mut self, id: ClassId, name: String, parent: Option<ClassId>) {
@@ -342,7 +390,9 @@ impl ClassRegistry {
     pub fn inherits_from(&self, child: ClassId, ancestor: ClassId) -> bool {
         let mut current = Some(child);
         while let Some(c) = current {
-            if c == ancestor { return true; }
+            if c == ancestor {
+                return true;
+            }
             current = self.get_parent(c);
         }
         false
@@ -376,11 +426,13 @@ impl ClassRegistry {
             self.register(id, name.clone(), parent);
 
             // Load class data
-            let mut data = ClassData::default();
-            data.name = name.clone();
-            data.buildable = section.get_bool("Buildable").unwrap_or(false);
-            data.cost = section.get_i64("Cost").unwrap_or(0) as i32;
-            data.build_time = section.get_i64("BuildTime").unwrap_or(0) as i32;
+            let mut data = ClassData {
+                name: name.clone(),
+                buildable: section.get_bool("Buildable").unwrap_or(false),
+                cost: section.get_i64("Cost").unwrap_or(0) as i32,
+                build_time: section.get_i64("BuildTime").unwrap_or(0) as i32,
+                ..Default::default()
+            };
 
             if let Some(owner_str) = section.get_string("Owner") {
                 for owner in owner_str.split(',') {
@@ -429,7 +481,8 @@ use std::fmt;
 mod tests {
     use super::*;
 
-    #[test] fn test_class_id() {
+    #[test]
+    fn test_class_id() {
         assert_eq!(ClassId::Infantry.as_u32(), 201);
         assert_eq!(ClassId::from_u32(201), ClassId::Infantry);
         assert!(ClassId::Infantry.is_unit());
@@ -437,17 +490,29 @@ mod tests {
         assert_eq!(ClassId::Infantry.category(), "Unit");
     }
 
-    #[test] fn test_class_id_unknown() {
+    #[test]
+    fn test_class_id_unknown() {
         assert_eq!(ClassId::from_u32(9999), ClassId::Unknown);
     }
 
-    #[test] fn test_registry() {
+    #[test]
+    fn test_registry() {
         let mut registry = ClassRegistry::new();
-        registry.register(ClassId::InfantryE1, "E1".to_string(), Some(ClassId::Infantry));
-        
+        registry.register(
+            ClassId::InfantryE1,
+            "E1".to_string(),
+            Some(ClassId::Infantry),
+        );
+
         assert_eq!(registry.get_id("E1"), Some(ClassId::InfantryE1));
-        assert_eq!(registry.get_name(ClassId::InfantryE1), Some(&"E1".to_string()));
-        assert_eq!(registry.get_parent(ClassId::InfantryE1), Some(ClassId::Infantry));
+        assert_eq!(
+            registry.get_name(ClassId::InfantryE1),
+            Some(&"E1".to_string())
+        );
+        assert_eq!(
+            registry.get_parent(ClassId::InfantryE1),
+            Some(ClassId::Infantry)
+        );
         assert!(registry.inherits_from(ClassId::InfantryE1, ClassId::Infantry));
         assert!(!registry.inherits_from(ClassId::InfantryE1, ClassId::Vehicle));
     }

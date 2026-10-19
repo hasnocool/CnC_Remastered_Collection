@@ -4,21 +4,22 @@
 //! renderer-agnostic editor view. All model changes go through
 //! [`history::History`]; tools only build commands.
 
-pub mod map;
 pub mod app;
 pub mod generator;
 pub mod history;
+pub mod map;
 pub mod plugin;
 pub mod presenter;
+pub mod tiles;
 pub mod tools;
 pub mod ui;
 
-pub use map::{MapModel, MapObject, Trigger, TILE_SIZE};
-pub use generator::{generate, fbm, value_noise, MapGenSettings, OverlayType, TerrainType};
+pub use generator::{fbm, generate, value_noise, MapGenSettings, OverlayType, TerrainType};
 pub use history::{
     AddTrigger, EditCommand, EraseObject, History, MoveObject, PaintCells, PlaceObject,
     RemoveObject, RemoveTrigger, SetObjectOwner, SetTrigger,
 };
+pub use map::{MapModel, MapObject, Trigger, TILE_SIZE};
 pub use plugin::{GamePlugin, RedAlertPlugin, Theater, TiberianDawnPlugin};
 pub use tools::{
     line_cells, rect_cells, EraseTool, ObjectTool, SelectTool, TerrainTool, Tool, TriggerTool,
