@@ -3,7 +3,9 @@
 //! Tools never mutate the [`MapModel`]. They inspect the model and return an
 //! [`EditCommand`] for the caller to run through [`crate::history::History`].
 
-use crate::history::{AddTrigger, EditCommand, EraseObject, PaintCells, PlaceObject};
+use crate::history::{
+    AddTrigger, AddWaypoint, EditCommand, EraseObject, PaintCells, PlaceObject, RemoveWaypoint,
+};
 use crate::map::{MapModel, MapObject, Trigger};
 use cnc_core::{ClassId, Vec2i};
 
@@ -194,6 +196,48 @@ impl Tool for TriggerTool {
     }
 }
 
+/// Places scenario waypoints, or erases the one under the cursor.
+///
+/// The numeric id is the key written under [Waypoints]; leave it `None` to
+/// take the lowest free id (A, B, C, ...). Duplicate ids are rejected so the
+/// stored section can never carry two entries for the same waypoint.
+pub struct WaypointTool {
+    pub id: Option<u32>,
+    pub erase: bool,
+}
+
+impl WaypointTool {
+    /// Placement tool; `id` pins a waypoint letter, `None` auto-assigns.
+    pub fn new(id: Option<u32>) -> Self {
+        Self { id, erase: false }
+    }
+
+    pub fn eraser() -> Self {
+        Self {
+            id: None,
+            erase: true,
+        }
+    }
+}
+
+impl Tool for WaypointTool {
+    fn name(&self) -> &str {
+        "Waypoint"
+    }
+
+    fn click(&mut self, model: &MapModel, cell: Vec2i) -> Option<Box<dyn EditCommand>> {
+        if !model.in_bounds(cell) {
+            return None;
+        }
+        if self.erase {
+            let waypoint = model.waypoint_at(cell)?;
+            return Some(Box::new(RemoveWaypoint::new(model, waypoint.id)?));
+        }
+        let id = self.id.unwrap_or_else(|| model.next_waypoint_id());
+        Some(Box::new(AddWaypoint::new(model, id, cell)?))
+    }
+}
+
 /// Integer Bresenham line, inclusive of both endpoints.
 pub fn line_cells(from: Vec2i, to: Vec2i) -> Vec<Vec2i> {
     let mut cells = Vec::new();
@@ -240,7 +284,7 @@ pub fn rect_cells(from: Vec2i, to: Vec2i) -> Vec<Vec2i> {
 mod tests {
     use super::*;
     use crate::history::History;
-    use crate::map::MapModel;
+    use crate::map::{MapModel, Waypoint};
 
     #[test]
     fn terrain_click_builds_a_command_without_mutating() {
@@ -293,5 +337,81 @@ mod tests {
         let mut tool = TriggerTool::default();
         assert!(tool.click(&model, Vec2i::new(-1, 0)).is_none());
         assert!(tool.click(&model, Vec2i::new(1, 1)).is_some());
+    }
+
+    #[test]
+    fn waypoint_click_places_undoes_and_redoes_exactly() {
+        let model = MapModel::new(8, 8);
+        let mut tool = WaypointTool::new(None);
+        let command = tool.click(&model, Vec2i::new(2, 3)).expect("command");
+        assert!(
+            model.waypoints.is_empty(),
+            "the tool must not mutate the model directly"
+        );
+
+        let mut model = model;
+        let mut history = History::new(4);
+        history.execute(&mut model, command);
+        assert_eq!(
+            model.waypoints,
+            vec![Waypoint {
+                id: 0,
+                cell: Vec2i::new(2, 3)
+            }]
+        );
+        history.undo(&mut model);
+        assert!(model.waypoints.is_empty());
+        history.redo(&mut model);
+        assert_eq!(
+            model.waypoints,
+            vec![Waypoint {
+                id: 0,
+                cell: Vec2i::new(2, 3)
+            }],
+            "redo must restore the exact id and cell"
+        );
+    }
+
+    #[test]
+    fn waypoint_ids_are_assigned_in_letter_order_and_erased_cleanly() {
+        let mut model = MapModel::new(8, 8);
+        let mut tool = WaypointTool::new(None);
+        let mut history = History::new(8);
+        for cell in [Vec2i::new(1, 1), Vec2i::new(2, 2), Vec2i::new(3, 3)] {
+            let command = tool.click(&model, cell).expect("command");
+            history.execute(&mut model, command);
+        }
+        let ids: Vec<u32> = model.waypoints.iter().map(|waypoint| waypoint.id).collect();
+        assert_eq!(ids, vec![0, 1, 2]);
+        assert_eq!(model.waypoint(0).unwrap().label(), "A");
+        assert_eq!(model.waypoint(2).unwrap().label(), "C");
+
+        let mut eraser = WaypointTool::eraser();
+        let command = eraser.click(&model, Vec2i::new(2, 2)).expect("command");
+        history.execute(&mut model, command);
+        assert!(model.waypoint(1).is_none());
+        history.undo(&mut model);
+        assert_eq!(model.waypoint(1).unwrap().cell, Vec2i::new(2, 2));
+    }
+
+    #[test]
+    fn waypoint_click_rejects_out_of_bounds_and_duplicate_ids() {
+        let mut model = MapModel::new(4, 4);
+        let mut tool = WaypointTool::new(Some(3));
+        assert!(
+            tool.click(&model, Vec2i::new(100, 100)).is_none(),
+            "out-of-bounds placement is rejected"
+        );
+        let command = tool.click(&model, Vec2i::new(1, 1)).expect("first place");
+        let mut history = History::new(4);
+        history.execute(&mut model, command);
+        assert!(
+            tool.click(&model, Vec2i::new(2, 2)).is_none(),
+            "an already-used waypoint id is rejected"
+        );
+        let mut auto = WaypointTool::new(None);
+        let command = auto.click(&model, Vec2i::new(2, 2)).expect("auto id");
+        history.execute(&mut model, command);
+        assert_eq!(model.waypoints.len(), 2);
     }
 }

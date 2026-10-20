@@ -37,6 +37,30 @@ pub struct Trigger {
     pub group: String,
 }
 
+/// One authored waypoint: the numeric [Waypoints] key and the cell it
+/// marks.
+///
+/// Original scenarios store the section as "<id>=<row-major cell index>"
+/// (DISPLAY.CPP, RA GamePlugin.cs Write), so the id is explicit rather than
+/// positional.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Waypoint {
+    pub id: u32,
+    pub cell: Vec2i,
+}
+
+impl Waypoint {
+    /// Display name used by tools and the history panel: A-Z for the first 26
+    /// ids, then the decimal id.
+    pub fn label(&self) -> String {
+        if self.id < 26 {
+            char::from(b'A' + self.id as u8).to_string()
+        } else {
+            self.id.to_string()
+        }
+    }
+}
+
 /// Editable scenario.
 #[derive(Clone, Debug)]
 pub struct MapModel {
@@ -67,6 +91,8 @@ pub struct MapModel {
     /// Authored AI commanders, stored alongside the scenario.
     pub agents: Vec<AgentDefinition>,
     pub player_starts: Vec<Vec2i>,
+    /// Authored waypoints, ordered by id.
+    pub waypoints: Vec<Waypoint>,
     next_object_id: u32,
     next_agent_id: u32,
 }
@@ -81,6 +107,37 @@ fn decode_pack_section(
         .map(|(key, value)| (key.clone(), value.as_string().unwrap_or("").to_string()))
         .collect();
     cnc_asset::ra_pack::decode_pack(&entries)
+}
+
+/// Read a [Waypoints] section: numeric key = waypoint id, value = row-major
+/// cell index. Out-of-range cells and non-numeric keys are skipped instead of
+/// poisoning the model, mirroring the loaders that read DISPLAY.CPP.
+fn parse_waypoints(ini: &IniFile, width: u32, height: u32) -> Vec<Waypoint> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+    let Some(section) = ini.section("Waypoints") else {
+        return Vec::new();
+    };
+    let mut waypoints = Vec::new();
+    for (key, value) in &section.values {
+        let Ok(id) = key.trim().parse::<u32>() else {
+            continue;
+        };
+        let Some(index) = value_text(value).and_then(|text| text.trim().parse::<u32>().ok()) else {
+            continue;
+        };
+        let (x, y) = (index % width, index / width);
+        if x >= width || y >= height {
+            continue;
+        }
+        waypoints.push(Waypoint {
+            id,
+            cell: Vec2i::new(x as i32, y as i32),
+        });
+    }
+    waypoints.sort_by_key(|waypoint| waypoint.id);
+    waypoints
 }
 
 impl MapModel {
@@ -102,6 +159,7 @@ impl MapModel {
             triggers: Vec::new(),
             agents: Vec::new(),
             player_starts: Vec::new(),
+            waypoints: Vec::new(),
             next_object_id: 1,
             next_agent_id: 1,
         }
@@ -202,6 +260,50 @@ impl MapModel {
         self.agents.iter_mut().find(|agent| agent.id == id)
     }
 
+    /// Waypoint with the given id (the key written under [Waypoints]).
+    pub fn waypoint(&self, id: u32) -> Option<&Waypoint> {
+        self.waypoints.iter().find(|waypoint| waypoint.id == id)
+    }
+
+    /// Waypoint marking the given cell, if any.
+    pub fn waypoint_at(&self, cell: Vec2i) -> Option<&Waypoint> {
+        self.waypoints.iter().find(|waypoint| waypoint.cell == cell)
+    }
+
+    /// Lowest id not used by an existing waypoint, so auto-assignment stays
+    /// stable across save/load rather than tracking a counter.
+    pub fn next_waypoint_id(&self) -> u32 {
+        let mut id = 0;
+        while self.waypoint(id).is_some() {
+            id += 1;
+        }
+        id
+    }
+
+    /// Insert or replace a waypoint, keeping the list ordered by id so a load
+    /// compares equal to what was saved.
+    pub fn insert_waypoint(&mut self, waypoint: Waypoint) {
+        if let Some(slot) = self
+            .waypoints
+            .iter_mut()
+            .find(|existing| existing.id == waypoint.id)
+        {
+            *slot = waypoint;
+        } else {
+            self.waypoints.push(waypoint);
+            self.waypoints.sort_by_key(|waypoint| waypoint.id);
+        }
+    }
+
+    /// Remove the waypoint with the given id, returning it for an exact undo.
+    pub fn remove_waypoint(&mut self, id: u32) -> Option<Waypoint> {
+        let index = self
+            .waypoints
+            .iter()
+            .position(|waypoint| waypoint.id == id)?;
+        Some(self.waypoints.remove(index))
+    }
+
     /// Structural problems that block saving.
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
@@ -216,6 +318,20 @@ impl MapModel {
                 issues.push(format!(
                     "player start ({}, {}) is out of bounds",
                     start.x, start.y
+                ));
+            }
+        }
+        let mut waypoint_ids = std::collections::BTreeSet::new();
+        for waypoint in &self.waypoints {
+            if !waypoint_ids.insert(waypoint.id) {
+                issues.push(format!("duplicate waypoint id {}", waypoint.id));
+            }
+            if !self.in_bounds(waypoint.cell) {
+                issues.push(format!(
+                    "waypoint {} at ({}, {}) is out of bounds",
+                    waypoint.label(),
+                    waypoint.cell.x,
+                    waypoint.cell.y
                 ));
             }
         }
@@ -297,6 +413,17 @@ impl MapModel {
         out.push_str("[PlayerStarts]\n");
         for (index, start) in self.player_starts.iter().enumerate() {
             out.push_str(&format!("{}=({},{})\n", index, start.x, start.y));
+        }
+        // Omitted entirely when the scenario has no waypoints, matching the
+        // original writer (RA GamePlugin.cs only emits cells that are set).
+        if !self.waypoints.is_empty() {
+            out.push_str("[Waypoints]\n");
+            let mut waypoints = self.waypoints.clone();
+            waypoints.sort_by_key(|waypoint| waypoint.id);
+            for waypoint in waypoints {
+                let index = waypoint.cell.y as u32 * self.width + waypoint.cell.x as u32;
+                out.push_str(&format!("{}={}\n", waypoint.id, index));
+            }
         }
         out.push_str("[Terrain]\n");
         for y in 0..self.height {
@@ -446,6 +573,7 @@ impl MapModel {
                 *slot = cell.id;
             }
         }
+        model.waypoints = parse_waypoints(&ini, side, side);
         for cell in &overlay_cells {
             if let Some(slot) = model.overlay.get_mut(cell.index as usize) {
                 *slot = cell.id;
@@ -649,6 +777,7 @@ impl MapModel {
                 }
             }
         }
+        model.waypoints = parse_waypoints(&ini, width, height);
         for (section_name, target) in [
             ("Terrain", Target::Terrain),
             ("Overlay", Target::Overlay),

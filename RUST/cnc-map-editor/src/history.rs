@@ -8,7 +8,7 @@
 use cnc_ai::AgentDefinition;
 use cnc_core::ClassId;
 
-use crate::map::{MapModel, MapObject, Trigger};
+use crate::map::{MapModel, MapObject, Trigger, Waypoint};
 
 /// One reversible model mutation.
 pub trait EditCommand: Send {
@@ -289,6 +289,66 @@ impl EditCommand for RemoveObject {
 
     fn undo(&mut self, model: &mut MapModel) {
         model.insert_object(self.object.clone());
+    }
+}
+
+/// Add a waypoint under an explicit [Waypoints] id.
+pub struct AddWaypoint {
+    pub waypoint: Waypoint,
+}
+
+impl AddWaypoint {
+    /// Build the command, rejecting out-of-bounds cells and ids already used
+    /// by another waypoint: the [Waypoints] key must stay unique.
+    pub fn new(model: &MapModel, id: u32, cell: cnc_core::Vec2i) -> Option<Self> {
+        if !model.in_bounds(cell) || model.waypoint(id).is_some() {
+            return None;
+        }
+        Some(Self {
+            waypoint: Waypoint { id, cell },
+        })
+    }
+}
+
+impl EditCommand for AddWaypoint {
+    fn label(&self) -> String {
+        format!("Add waypoint {}", self.waypoint.label())
+    }
+
+    fn apply(&mut self, model: &mut MapModel) {
+        model.insert_waypoint(self.waypoint);
+    }
+
+    fn undo(&mut self, model: &mut MapModel) {
+        model.remove_waypoint(self.waypoint.id);
+    }
+}
+
+/// Erase a waypoint, remembering it so undo restores the exact id and cell.
+pub struct RemoveWaypoint {
+    pub waypoint: Waypoint,
+}
+
+impl RemoveWaypoint {
+    pub fn new(model: &MapModel, id: u32) -> Option<Self> {
+        model
+            .waypoint(id)
+            .copied()
+            .map(|waypoint| Self { waypoint })
+    }
+}
+
+impl EditCommand for RemoveWaypoint {
+    fn label(&self) -> String {
+        format!("Remove waypoint {}", self.waypoint.label())
+    }
+
+    fn apply(&mut self, model: &mut MapModel) {
+        model.remove_waypoint(self.waypoint.id);
+    }
+
+    fn undo(&mut self, model: &mut MapModel) {
+        model.insert_waypoint(self.waypoint);
     }
 }
 

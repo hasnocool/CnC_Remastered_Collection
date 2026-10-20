@@ -19,13 +19,14 @@ pub mod ui;
 
 pub use generator::{fbm, generate, value_noise, MapGenSettings, OverlayType, TerrainType};
 pub use history::{
-    AddTrigger, EditCommand, EraseObject, History, MoveObject, PaintCells, PlaceObject,
-    RemoveObject, RemoveTrigger, SetObjectOwner, SetTrigger,
+    AddTrigger, AddWaypoint, EditCommand, EraseObject, History, MoveObject, PaintCells,
+    PlaceObject, RemoveObject, RemoveTrigger, RemoveWaypoint, SetObjectOwner, SetTrigger,
 };
-pub use map::{MapModel, MapObject, Trigger, TILE_SIZE};
+pub use map::{MapModel, MapObject, Trigger, Waypoint, TILE_SIZE};
 pub use plugin::{GamePlugin, RedAlertPlugin, Theater, TiberianDawnPlugin};
 pub use tools::{
     line_cells, rect_cells, EraseTool, ObjectTool, SelectTool, TerrainTool, Tool, TriggerTool,
+    WaypointTool,
 };
 pub use ui::EditorUI;
 
