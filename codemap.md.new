@@ -1,0 +1,45 @@
+# Repository Atlas: Command & Conquer Remastered Collection
+
+## Project Responsibility
+
+This repository contains the complete source code for the **Command & Conquer Remastered Collection**, comprising three primary components:
+
+1. **TiberianDawn.dll** - The Tiberian Dawn (C&C1) game engine implemented in C++
+2. **RedAlert.dll** - The Red Alert game engine implemented in C++
+3. **CnCTDRAMapEditor** - A C# Windows Forms map editor application for both games
+
+The codebase is structured for Windows-only compilation targeting the Steam Workshop integration (AppID 1213210). Licensed under GPL v3 with additional terms. The repository is archived for preservation purposes only and does not accept external contributions.
+
+## System Entry Points
+
+| File | Purpose |
+|------|---------|
+| `CnCRemastered.sln` | Primary Visual Studio solution building both game engines (TiberianDawn.dll, RedAlert.dll) |
+| `CnCTDRAMapEditor.sln` | Visual Studio solution for the C# Map Editor application |
+| `README.md` | Build instructions, dependencies, and license information |
+| `LICENSE.md` | GPL v3 license with additional terms |
+| `SCRIPTS/tgautil.py` | Python utility script for TGA texture processing |
+
+**Build Output:** Compiled binaries are emitted to a root-level `bin/` directory after batch build in Visual Studio 2017 (recommended; later versions may report packing mismatch errors with Windows SDK headers).
+
+**Required Dependencies:** Windows 8.1 SDK, MFC for Visual Studio C++.
+
+---
+
+## Directory Map (Aggregated)
+
+| Directory | Responsibility Summary | Detailed Map |
+|-----------|------------------------|--------------|
+| `CnCTDRAMapEditor/` | **C# Map Editor Application** - Windows Forms desktop application for editing Tiberian Dawn and Red Alert maps. Contains UI controls, dialogs, rendering pipeline, model layer, Steamworks.NET integration, and game-specific logic for both titles. | [View Map](CnCTDRAMapEditor/codemap.md) |
+| `REDALERT/` | **Red Alert Game Engine (C++)** - Core game logic for Command & Conquer: Red Alert. Includes unit/building AI, combat simulation, pathfinding, audio, animation, networking, resource management, and Win32 platform abstraction. | [View Map](REDALERT/codemap.md) |
+| `TIBERIANDAWN/` | **Tiberian Dawn Game Engine (C++)** - Core game logic for Command & Conquer: Tiberian Dawn (C&C1). Shares architectural patterns with Red Alert but implements distinct unit rosters, campaigns, and balance. Includes house/faction logic, mission scripting, and legacy Westwood file format handlers. | [View Map](TIBERIANDAWN/codemap.md) |
+| `SCRIPTS/` | **Build & Asset Utilities** - Python-based tooling for asset pipeline operations (currently `tgautil.py` for TGA texture manipulation). | [View Map](SCRIPTS/codemap.md) |
+| `RUST/` | **Rust Reimplementation Workspace** - Modern cross-platform client reimplementing both engines. See [RUST/codemap.md](RUST/codemap.md) for details. |
+
+---
+
+## RUST Workspace Crates
+
+| Crate | Purpose | Status |
+|-------|---------|--------|
+| `cnc-ai` | Deterministic agent scripting language, runtime and LLM intent bridge for CnC scenarios | true  |
