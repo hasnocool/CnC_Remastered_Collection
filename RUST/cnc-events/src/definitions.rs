@@ -5,7 +5,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 /// Unique identifier for an event
@@ -56,10 +55,7 @@ mod smallvec_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use smallvec::SmallVec;
 
-    pub fn serialize<S, T, const N: usize>(
-        value: &SmallVec<[T; N]>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
+    pub fn serialize<S, T>(value: &SmallVec<[T; 4]>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
         T: Serialize,
@@ -67,9 +63,7 @@ mod smallvec_serde {
         serializer.collect_seq(value.iter())
     }
 
-    pub fn deserialize<'de, D, T, const N: usize>(
-        deserializer: D,
-    ) -> Result<SmallVec<[T; N]>, D::Error>
+    pub fn deserialize<'de, D, T>(deserializer: D) -> Result<SmallVec<[T; 4]>, D::Error>
     where
         D: Deserializer<'de>,
         T: Deserialize<'de>,
@@ -100,7 +94,7 @@ mod smallvec_serde {
             }
         }
 
-        deserializer.deserialize_seq(SmallVecVisitor {
+        deserializer.deserialize_seq(SmallVecVisitor::<T> {
             marker: std::marker::PhantomData,
         })
     }

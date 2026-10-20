@@ -1,10 +1,8 @@
 //! Event bus for publish/subscribe pattern
 
-use crate::{BoxedEvent, Event, EventFilter, EventId};
+use crate::{BoxedEvent, Event, EventFilter};
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
 use dashmap::DashMap;
-use parking_lot::RwLock;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use uuid::Uuid;
@@ -81,7 +79,7 @@ impl EventSubscription {
     /// Unsubscribe from the bus
     pub fn unsubscribe(self) {
         if let Some(bus) = self.bus.upgrade() {
-            bus.unsubscribe(self.id);
+            bus.remove_subscriber(self.id);
         }
     }
 }
@@ -89,7 +87,7 @@ impl EventSubscription {
 impl Drop for EventSubscription {
     fn drop(&mut self) {
         if let Some(bus) = self.bus.upgrade() {
-            bus.unsubscribe(self.id);
+            bus.remove_subscriber(self.id);
         }
     }
 }
@@ -101,6 +99,18 @@ struct EventBusInner {
     global_sender: Sender<BoxedEvent>,
     global_receiver: Receiver<BoxedEvent>,
     stats: EventBusStats,
+}
+
+impl EventBusInner {
+    /// Detach a subscriber, keeping the active-subscription gauge in step.
+    fn remove_subscriber(&self, id: SubscriptionId) {
+        if self.subscribers.remove(&id).is_some() {
+            self.filters.remove(&id);
+            self.stats
+                .active_subscriptions
+                .fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -193,7 +203,12 @@ impl EventBus {
         self.inner.stats.published.fetch_add(1, Ordering::Relaxed);
 
         // Try to send to global channel (for debugging/monitoring)
-        if self.inner.global_sender.try_send(event.clone()).is_err() {
+        if self
+            .inner
+            .global_sender
+            .try_send(clone_boxed(event.as_ref()))
+            .is_err()
+        {
             // Global channel full, continue anyway
         }
 
@@ -206,7 +221,7 @@ impl EventBus {
             let sender = entry.value();
 
             // Check filter
-            let should_deliver = if let Some(filter) = self.inner.filters.get(&sub_id) {
+            let should_deliver = if let Some(_filter) = self.inner.filters.get(&sub_id) {
                 // We need to downcast the event to check the filter
                 // This is a limitation - in practice, we'd use a different approach
                 true // Simplified for now
@@ -215,7 +230,7 @@ impl EventBus {
             };
 
             if should_deliver {
-                match sender.try_send(event.clone()) {
+                match sender.try_send(clone_boxed(event.as_ref())) {
                     Ok(()) => delivered += 1,
                     Err(crossbeam_channel::TrySendError::Full(_)) => {
                         self.inner.stats.dropped.fetch_add(1, Ordering::Relaxed);
@@ -251,12 +266,7 @@ impl EventBus {
 
     /// Unsubscribe a subscription
     pub fn unsubscribe(&self, id: SubscriptionId) {
-        self.inner.subscribers.remove(&id);
-        self.inner.filters.remove(&id);
-        self.inner
-            .stats
-            .active_subscriptions
-            .fetch_sub(1, Ordering::Relaxed);
+        self.inner.remove_subscriber(id);
     }
 
     /// Get the number of active subscriptions
@@ -313,6 +323,8 @@ pub enum EventBusError {
     ChannelDisconnected,
     #[error("Subscription not found")]
     SubscriptionNotFound,
+    #[error("Global event bus was already initialized")]
+    AlreadyInitialized,
 }
 
 /// Scoped event bus for temporary subscriptions
@@ -344,16 +356,30 @@ impl ScopedEventBus {
     pub fn publish_boxed(&self, event: BoxedEvent) -> Result<(), EventBusError> {
         // Deliver to local subscribers
         for entry in self.local_subscribers.iter() {
-            let _ = entry.value().try_send(event.clone());
+            let _ = entry.value().try_send(clone_boxed(event.as_ref()));
         }
 
         // Also deliver to parent subscribers
         for entry in self.parent.subscribers.iter() {
-            let _ = entry.value().try_send(event.clone());
+            let _ = entry.value().try_send(clone_boxed(event.as_ref()));
         }
 
         Ok(())
     }
+}
+
+/// Re-create a boxed event from its shared view.
+///
+/// `Box<dyn Event>` is not `Clone` (the trait is object-safe, so it cannot require
+/// `Clone`), but every event in this crate is a plain data payload. Fan-out copies are
+/// therefore built by re-projecting the common `Event` surface into a `BaseEvent`,
+/// preserving name, payload, source, category, priority and metadata verbatim.
+fn clone_boxed(event: &dyn Event) -> BoxedEvent {
+    Box::new(crate::definitions::BaseEvent {
+        metadata: event.metadata().clone(),
+        name: event.name().to_string(),
+        data: event.data().clone(),
+    })
 }
 
 #[cfg(test)]
@@ -364,7 +390,7 @@ mod tests {
     #[test]
     fn test_event_bus_basic() {
         let bus = EventBus::new(100);
-        let mut sub = bus.subscribe();
+        let sub = bus.subscribe();
 
         let event = GameEvent::new("test_event", EventData::message("test"));
         bus.publish(event).unwrap();
@@ -376,8 +402,8 @@ mod tests {
     #[test]
     fn test_multiple_subscribers() {
         let bus = EventBus::new(100);
-        let mut sub1 = bus.subscribe();
-        let mut sub2 = bus.subscribe();
+        let sub1 = bus.subscribe();
+        let sub2 = bus.subscribe();
 
         let event = GameEvent::new("test", EventData::message("test"));
         bus.publish(event).unwrap();
@@ -407,12 +433,33 @@ mod tests {
         assert_eq!(bus.subscription_count(), 1);
         bus.unsubscribe(id);
         assert_eq!(bus.subscription_count(), 0);
+
+        // Explicit unsubscribe consumes the handle; its Drop must not double-count.
+        let sub = bus.subscribe();
+        sub.unsubscribe();
+        assert_eq!(bus.subscription_count(), 0);
+    }
+
+    #[test]
+    fn test_dropped_subscriber_is_deregistered() {
+        let bus = EventBus::new(100);
+        {
+            let _sub = bus.subscribe();
+            assert_eq!(bus.subscription_count(), 1);
+        }
+        assert_eq!(bus.subscription_count(), 0);
+
+        // Publishing with no subscribers is a no-op, never an error or a panic.
+        bus.publish(GameEvent::new("orphan", EventData::message("nobody home")))
+            .unwrap();
+        assert_eq!(bus.stats().published, 1);
+        assert_eq!(bus.stats().delivered, 0);
     }
 
     #[test]
     fn test_stats() {
         let bus = EventBus::new(100);
-        let mut sub = bus.subscribe();
+        let _sub = bus.subscribe();
 
         bus.publish(GameEvent::new("test1", EventData::message("test")))
             .unwrap();

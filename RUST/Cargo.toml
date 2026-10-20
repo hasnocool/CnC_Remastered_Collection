@@ -17,6 +17,7 @@ members = [
     "cnc-music",
     "cnc-bench",
     "cnc-logs",
+    "cnc-events",
 ]
 
 [workspace.package]

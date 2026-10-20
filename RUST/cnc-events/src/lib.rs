@@ -11,6 +11,7 @@ pub mod bus;
 pub mod categories;
 pub mod definitions;
 pub mod handler;
+pub mod record;
 pub mod replay;
 pub mod source;
 pub mod streaming;
@@ -24,6 +25,7 @@ pub use definitions::{
     UiEvent,
 };
 pub use handler::{EventHandler, EventHandlerFn, HandlerRegistry};
+pub use record::EventRecord;
 pub use replay::{EventReplay, ReplayConfig, ReplaySpeed};
 pub use source::{EventSource, EventSourceBuilder};
 pub use streaming::{EventStream, StreamConfig, StreamFilter};
@@ -62,15 +64,14 @@ pub fn create_event_bus(capacity: usize) -> EventBus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[test]
     fn test_event_bus_basic() {
         let bus = EventBus::new(100);
-        let mut sub = bus.subscribe();
+        let sub = bus.subscribe();
 
-        let event = GameEvent::new("test_event", "Test event data".into());
-        bus.publish(event.clone()).unwrap();
+        let event = GameEvent::new("test_event", EventData::message("Test event data"));
+        bus.publish(event).unwrap();
 
         let received = sub.try_recv().unwrap();
         assert_eq!(received.name(), "test_event");

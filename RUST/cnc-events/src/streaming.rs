@@ -1,6 +1,6 @@
 //! Event streaming for real-time monitoring
 
-use crate::{BoxedEvent, Event, EventBus, EventFilter, SubscriptionId};
+use crate::{EventBus, EventFilter, EventRecord, SubscriptionId};
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -145,35 +145,10 @@ impl EventStream {
 
                 // Serialize event
                 let event_json = if config.include_metadata {
-                    serde_json::to_string(&event).unwrap_or_default()
+                    EventRecord::from_event(event.as_ref()).to_json()
                 } else {
-                    // Only serialize data
-                    match event.data() {
-                        crate::EventData::Empty => "{}".to_string(),
-                        crate::EventData::Message(msg) => {
-                            format!("{{"message":"{}"}}", escape_json(msg))
-                        }
-                        crate::EventData::Structured(map) => {
-                            serde_json::to_string(map).unwrap_or_default()
-                        }
-                        crate::EventData::Binary(_) => "{\"binary\":true}".to_string(),
-                        crate::EventData::Error { message, code } => {
-                            format!("{{"error":"{}","code":{}}}", escape_json(message), code.unwrap_or(0))
-                        }
-                        crate::EventData::Progress {
-                            current,
-                            total,
-                            message,
-                        } => {
-                            format!("{{"current":{},"total":{},"message":{}}}", current, total, message.map(|m| format!("\"{}\"", escape_json(&m))).unwrap_or("null".to_string()))
-                        }
-                        crate::EventData::Metric { name, value, unit } => {
-                            format!("{{"metric":"{}","value":{},"unit":{}}}", escape_json(name), value, unit.map(|u| format!("\"{}\"", escape_json(&u))).unwrap_or("null".to_string()))
-                        }
-                        crate::EventData::Custom(val) => {
-                            serde_json::to_string(val).unwrap_or_default()
-                        }
-                    }
+                    // Payload only: the `EventData` enum serializes itself.
+                    serde_json::to_string(event.data()).unwrap_or_default()
                 };
 
                 let stream_event = StreamEvent {
@@ -249,22 +224,6 @@ impl EventStream {
     pub fn is_connected(&self) -> bool {
         self.bus.is_some()
     }
-}
-
-/// Escape string for JSON
-fn escape_json(s: &str) -> String {
-    let mut result = String::with_capacity(s.len() + 10);
-    for ch in s.chars() {
-        match ch {
-            '\\' => result.push_str("\\\\"),
-            '"' => result.push_str("\\\""),
-            '\n' => result.push_str("\\n"),
-            '\r' => result.push_str("\\r"),
-            '\t' => result.push_str("\\t"),
-            c => result.push(c),
-        }
-    }
-    result
 }
 
 /// Stream statistics

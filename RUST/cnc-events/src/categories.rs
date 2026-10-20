@@ -224,6 +224,44 @@ impl EventFilter {
         self
     }
 
+    /// Match an event behind an unsized `dyn Event` reference.
+    ///
+    /// `matches` is generic over `E: Event` and therefore cannot be called with
+    /// `&dyn Event`; this helper keeps one implementation for both call shapes.
+    pub fn matches_boxed(&self, event: &dyn crate::Event) -> bool {
+        if !self.categories.is_empty() && !self.categories.contains(&event.category()) {
+            return false;
+        }
+
+        if let Some(min) = self.min_priority {
+            if event.priority() < min {
+                return false;
+            }
+        }
+        if let Some(max) = self.max_priority {
+            if event.priority() > max {
+                return false;
+            }
+        }
+
+        if !self.sources.is_empty() && !self.sources.contains(&event.source().to_string()) {
+            return false;
+        }
+
+        if !self.tags.is_empty() {
+            let event_tags = &event.metadata().tags;
+            if !self
+                .tags
+                .iter()
+                .any(|t| event_tags.iter().any(|et| et == t))
+            {
+                return false;
+            }
+        }
+
+        true
+    }
+
     pub fn matches<E: crate::Event>(&self, event: &E) -> bool {
         // Check category
         if !self.categories.is_empty() && !self.categories.contains(&event.category()) {
@@ -303,10 +341,17 @@ mod tests {
         let event = crate::GameEvent::new("test", crate::EventData::message("test"));
         assert!(filter.matches(&event));
 
-        let low_priority_event = crate::GameEvent::new("test", crate::EventData::message("test"))
-            .base
-            .metadata
-            .priority = EventPriority::Low;
-        // Can't easily test priority filtering without mutable access
+        // Low-priority events are rejected by the min-priority bound.
+        let low_priority_event = crate::GameEvent::new("test", crate::EventData::message("test"));
+        let mut base_metadata = low_priority_event.base.metadata.clone();
+        base_metadata.priority = EventPriority::Low;
+        let low_priority_event = crate::GameEvent {
+            base: crate::definitions::BaseEvent {
+                metadata: base_metadata,
+                name: low_priority_event.base.name.clone(),
+                data: low_priority_event.base.data.clone(),
+            },
+        };
+        assert!(!filter.matches(&low_priority_event));
     }
 }

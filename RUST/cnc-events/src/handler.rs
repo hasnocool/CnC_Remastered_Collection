@@ -10,11 +10,22 @@ use std::sync::Arc;
 pub type EventHandlerFn = Arc<dyn Fn(&BoxedEvent) + Send + Sync>;
 
 /// Event handler registration
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EventHandler {
     pub id: SubscriptionId,
     pub filter: Option<EventFilter>,
     pub handler: EventHandlerFn,
+}
+
+impl std::fmt::Debug for EventHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Closures are not printable; the identity of the registration is what matters.
+        f.debug_struct("EventHandler")
+            .field("id", &self.id)
+            .field("filter", &self.filter)
+            .field("handler", &"<fn>")
+            .finish()
+    }
 }
 
 /// Registry for event handlers
@@ -109,7 +120,7 @@ impl HandlerRegistry {
                 let should_handle = handler
                     .filter
                     .as_ref()
-                    .map_or(true, |f| f.matches(event.as_ref()));
+                    .is_none_or(|f| f.matches_boxed(event.as_ref()));
                 if should_handle {
                     (handler.handler)(event);
                 }
@@ -121,7 +132,7 @@ impl HandlerRegistry {
             let should_handle = handler
                 .filter
                 .as_ref()
-                .map_or(true, |f| f.matches(event.as_ref()));
+                .is_none_or(|f| f.matches_boxed(event.as_ref()));
             if should_handle {
                 (handler.handler)(event);
             }
@@ -171,24 +182,28 @@ macro_rules! on_event {
 mod tests {
     use super::*;
     use crate::{EventCategory, EventData, EventFilter, GameEvent};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     #[test]
     fn test_handler_registration() {
         let registry = HandlerRegistry::new();
-        let mut received = Vec::new();
+        let received = Arc::new(Mutex::new(Vec::new()));
 
         let id = registry.register::<GameEvent>(None, {
-            let received = &mut received;
+            let received = Arc::clone(&received);
             move |event: &GameEvent| {
-                received.push(event.name().to_string());
+                received.lock().unwrap().push(event.name().to_string());
             }
         });
 
         assert_eq!(registry.handler_count::<GameEvent>(), 1);
 
-        let event = GameEvent::new("test", EventData::message("test"));
-        registry.dispatch(&Box::new(event));
+        registry.dispatch(
+            &(Box::new(GameEvent::new("test", EventData::message("test"))) as BoxedEvent),
+        );
 
+        let received = received.lock().unwrap();
         assert_eq!(received.len(), 1);
         assert_eq!(received[0], "test");
 
@@ -199,41 +214,45 @@ mod tests {
     #[test]
     fn test_global_handler() {
         let registry = HandlerRegistry::new();
-        let mut count = 0;
+        let count = Arc::new(AtomicUsize::new(0));
 
         registry.register_global(None, {
-            let count = &mut count;
-            move |_| *count += 1
+            let count = Arc::clone(&count);
+            move |_| {
+                count.fetch_add(1, Ordering::Relaxed);
+            }
         });
 
-        let event = GameEvent::new("test", EventData::message("test"));
-        registry.dispatch(&Box::new(event));
+        registry.dispatch(
+            &(Box::new(GameEvent::new("test", EventData::message("test"))) as BoxedEvent),
+        );
 
-        assert_eq!(count, 1);
+        assert_eq!(count.load(Ordering::Relaxed), 1);
     }
 
     #[test]
     fn test_filtered_handler() {
         let registry = HandlerRegistry::new();
-        let mut received = Vec::new();
+        let received = Arc::new(Mutex::new(Vec::new()));
 
         let filter = EventFilter::new().with_category(EventCategory::Gameplay);
         registry.register::<GameEvent>(Some(filter), {
-            let received = &mut received;
+            let received = Arc::clone(&received);
             move |event: &GameEvent| {
-                received.push(event.name().to_string());
+                received.lock().unwrap().push(event.name().to_string());
             }
         });
 
-        let event = GameEvent::new("test", EventData::message("test"));
-        registry.dispatch(&Box::new(event));
+        registry.dispatch(
+            &(Box::new(GameEvent::new("test", EventData::message("test"))) as BoxedEvent),
+        );
 
-        assert_eq!(received.len(), 1);
+        assert_eq!(received.lock().unwrap().len(), 1);
 
         // System event should not be handled
         let sys_event = crate::SystemEvent::startup();
-        registry.dispatch(&Box::new(sys_event));
+        registry.dispatch(&(Box::new(sys_event) as BoxedEvent));
 
-        assert_eq!(received.len(), 1); // Still 1
+        assert_eq!(received.lock().unwrap().len(), 1); // Still 1
     }
 }

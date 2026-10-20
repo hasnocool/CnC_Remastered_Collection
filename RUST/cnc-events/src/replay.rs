@@ -1,8 +1,6 @@
 //! Event replay functionality
 
-use crate::{
-    BoxedEvent, Event, EventBus, EventBusError, EventCategory, EventFilter, EventPriority,
-};
+use crate::{BoxedEvent, EventBus, EventFilter, EventRecord};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -89,10 +87,14 @@ impl EventReplay {
     pub fn new(events: Vec<BoxedEvent>, config: ReplayConfig) -> Self {
         let replay_events: VecDeque<_> = events
             .into_iter()
-            .map(|e| ReplayEvent {
-                event_json: serde_json::to_string(&e).unwrap_or_default(),
-                timestamp: e.timestamp(),
-                original_timestamp: e.timestamp(),
+            .map(|e| {
+                let record = EventRecord::from_event(e.as_ref());
+                let timestamp = e.timestamp();
+                ReplayEvent {
+                    event_json: record.to_json(),
+                    timestamp,
+                    original_timestamp: timestamp,
+                }
             })
             .collect();
 
@@ -176,7 +178,7 @@ impl EventReplay {
         let mut last_time = None;
 
         while self.is_playing {
-            if let Some(event) = self.step() {
+            if let Some(_event) = self.step() {
                 let now = std::time::Instant::now();
 
                 if let Some(last) = last_time {
@@ -204,7 +206,7 @@ impl EventReplay {
 
                 // Emit to bus if configured
                 if self.config.emit_to_bus {
-                    if let Some(bus) = &self.bus {
+                    if let Some(_bus) = &self.bus {
                         // In a real implementation, we'd deserialize and publish
                         // For now, just count
                         self.stats
@@ -344,7 +346,7 @@ impl ReplayRecorder {
     }
 
     pub fn record(&mut self, event: BoxedEvent) {
-        if self.filter.matches(event.as_ref()) {
+        if self.filter.matches_boxed(event.as_ref()) {
             if self.events.len() >= self.max_events {
                 self.events.remove(0);
             }
@@ -368,7 +370,7 @@ impl ReplayRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EventBus, EventData, GameEvent};
+    use crate::{EventData, GameEvent};
 
     #[test]
     fn test_replay_creation() {
@@ -393,10 +395,10 @@ mod tests {
         let mut replay = EventReplay::new(events, ReplayConfig::default());
         replay.play();
 
-        let event1 = replay.step().unwrap();
+        assert!(replay.step().is_some());
         assert_eq!(replay.position(), 1);
 
-        let event2 = replay.step().unwrap();
+        assert!(replay.step().is_some());
         assert_eq!(replay.position(), 2);
 
         assert!(replay.step().is_none());

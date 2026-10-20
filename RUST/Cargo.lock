@@ -766,6 +766,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -978,6 +979,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "cnc-events"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "cnc-core",
+ "cnc-logs",
+ "criterion",
+ "crossbeam-channel",
+ "dashmap",
+ "once_cell",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "thiserror 1.0.69",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "cnc-launcher"
 version = "0.1.1"
 dependencies = [
@@ -986,6 +1008,7 @@ dependencies = [
  "cnc-asset",
  "cnc-audio",
  "cnc-core",
+ "cnc-net-directory",
  "cnc-red-alert",
  "cnc-renderer",
  "cnc-tiberian-dawn",
@@ -1571,6 +1594,19 @@ dependencies = [
  "bitflags 2.13.2",
  "libloading",
  "winapi",
+]
+
+[[package]]
+name = "dashmap"
+version = "5.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
+dependencies = [
+ "cfg-if",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
 ]
 
 [[package]]
@@ -5030,6 +5066,9 @@ name = "smallvec"
 version = "1.16.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b3dc8af474f516a851ff4bd12db780f948b9250ad37211e4eec0bccea54e01b"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "smithay-client-toolkit"

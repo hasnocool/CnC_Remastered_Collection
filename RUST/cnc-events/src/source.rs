@@ -1,8 +1,8 @@
 //! Event source for generating events
 
 use crate::{
-    Event, EventBus, EventBusError, EventCategory, EventData, EventPriority, GameEvent,
-    NetworkEvent, SystemEvent, UiEvent,
+    Event, EventBus, EventBusError, EventCategory, EventData, GameEvent, NetworkEvent, SystemEvent,
+    UiEvent,
 };
 use std::sync::Arc;
 
@@ -223,11 +223,12 @@ mod tests {
 
         assert_eq!(source.source_name(), "test_source");
 
+        // Subscribe first: the bus is a live channel and does not retain history.
+        let sub = bus.subscribe();
         source
             .emit_message(crate::EventCategory::Gameplay, "test_event", "Hello")
             .unwrap();
 
-        let mut sub = bus.subscribe();
         let event = sub.try_recv().unwrap();
         assert_eq!(event.name(), "test_event");
     }
@@ -240,11 +241,11 @@ mod tests {
             .build()
             .unwrap();
 
+        let sub = bus.subscribe();
         source
             .emit_message(crate::EventCategory::System, "startup", "Starting up")
             .unwrap();
 
-        let mut sub = bus.subscribe();
         let event = sub.try_recv().unwrap();
         assert_eq!(event.name(), "startup");
     }
