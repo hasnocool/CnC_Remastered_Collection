@@ -1,5 +1,7 @@
 # Build Status
 
+> **Ledger caveat (added 2026-10-20, documentation reconciliation):** the raw `cargo test` transcripts below aggregate to a figure that is **not** reproducible with a single workspace run. `cargo test --workspace --no-fail-fast` at commit `5d1fd8b` measures **1318 passed / 4 failed** (pre-existing baseline debt: 3 in `cnc-map-editor::app::tests` — `layout_controls_stay_inside_the_window`, `trigger_filter_matches_group_and_name`, `trigger_inspector_controls_and_frame_render` — and 1 in `cnc-tiberian-dawn::scenario_loader::tests::records_become_executable_triggers`), with `cargo fmt --check` exit 0 and `cargo clippy --workspace --all-targets` at 0 errors. The workspace has **17 members** since `cnc-events`/`cnc-logs` landed; `cnc-console` still has no workspace entry. Cite the measured workspace run, not the per-crate transcript sum. *re-verified 2026-10-20 — `.omo/evidence/task-6-parity-100.log` §A, §B, §C, §M.*
+
 _Last verified: 2026-10-19 22:17:04 UTC (cargo cargo 1.98.1 (797e8a9bc 2026-08-05) / rustc rustc 1.98.1 (48a229cea 2026-09-01))._
 
 ## Verification

@@ -8,6 +8,9 @@ This crate follows strict semantic versioning (version.workspace = true, edition
 
 ## Steam Divergence
 **This editor intentionally diverges from the original C# Mobius editor in the following ways:**
+
+> *Steam-divergence note re-verified 2026-10-20: no Steamworks/Steam Workshop code exists in `cnc-map-editor` (no `steam` crate in `Cargo.toml`, no `steamworks` references in `src/`); maps are INI-only. Evidence `.omo/evidence/task-6-parity-100.log` §K.*
+
 - **No Steam Workshop integration** — The original C# editor integrated with Steam Workshop (AppID 1213210) for map publishing. This Rust reimplementation uses plain INI files for map storage and does not include Steamworks.NET integration.
 - **Map format** — Maps are saved as plain INI files, not the original binary format. This enables version control, cross-platform compatibility, and easier debugging.
 - **No Steam authentication** — No Steam API keys or authentication required for map editing or testing.

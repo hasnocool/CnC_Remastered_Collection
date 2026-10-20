@@ -2,7 +2,7 @@
 
 ## Responsibility
 
-Tiberian Dawn game logic crate: full game loop, map/house/unit/building entities, ported weapon/warhead tables from CONST.CPP/BBDATA.CPP/IDATA/UDATA, mission+trigger system, cell A* pathfinding, deterministic AI production planning driven by Rules.ini, network lockstep command queue with handshake/migration/relay/replay, and versioned binary savegames (BUILD_STATUS: 154 unit + 4 integration tests; game logic + rules + lockstep + netcode + missions + savegames + sidebar/AI).
+Tiberian Dawn game logic crate: full game loop, map/house/unit/building entities, ported weapon/warhead tables from CONST.CPP/BBDATA.CPP/IDATA/UDATA, mission+trigger system, cell A* pathfinding, deterministic AI production planning driven by Rules.ini, network lockstep command queue with handshake/migration/relay/replay, and versioned binary savegames (BUILD_STATUS: **299 unit + 4 integration tests**, measured with `cargo test -p cnc-tiberian-dawn --no-fail-fast` — 299 passed / 1 failed lib, 1 `campaign_missions` + 3 `live_session` integration, 0 doc-tests; game logic + rules + lockstep + netcode + missions + savegames + sidebar/AI). *Test-count claim corrected 2026-10-20 (was “154 unit + 4 integration”); re-verified 2026-10-20 — `.omo/evidence/task-6-parity-100.log` §C.* The one failing unit test (`scenario_loader::tests::records_become_executable_triggers`) is pre-existing baseline debt, not a documentation figure.
 
 ## Design
 
