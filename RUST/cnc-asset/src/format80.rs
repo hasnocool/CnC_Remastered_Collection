@@ -448,3 +448,297 @@ mod compress_tests {
         assert!(compress(&[1u8; 10], 20).is_err());
     }
 }
+
+#[cfg(test)]
+mod lcw_parity_tests {
+    use super::*;
+
+    /// Deterministic 32-bit LCG (numerical recipes constants) so the fuzz
+    /// corpus is reproducible without a random-crate dependency.
+    fn lcg(state: &mut u32) -> u32 {
+        *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *state
+    }
+
+    fn pseudo_random_bytes(len: usize, seed: u32) -> Vec<u8> {
+        let mut state = seed;
+        (0..len).map(|_| (lcg(&mut state) >> 24) as u8).collect()
+    }
+
+    /// MapPack-style fixture: two 0x FE fills, a literal run, a short copy and
+    /// both absolute copy opcodes, terminated by 0x80. Expected plaintext is
+    /// hand-derived from the opcode table, not from the compressor.
+    #[test]
+    fn lcw_decode_known_vector() {
+        let stream = [
+            0xFE, 0x08, 0x00, 0x11, // fill 8 x 0x11
+            0x84, b'A', b'B', b'C', b'D', // literal "ABCD"
+            0x00, 0x09, // short copy count 3, back 9 -> out[3..6]
+            0xC1, 0x00, 0x00, // medium copy count 4, abs offset 0
+            0xFF, 0x04, 0x00, 0x00, 0x00, // long copy count 4, abs offset 0
+            0x80,
+        ];
+        let mut expected = vec![0x11u8; 8];
+        expected.extend_from_slice(b"ABCD");
+        expected.extend_from_slice(&[0x11u8; 3]);
+        expected.extend_from_slice(&[0x11u8; 4]);
+        expected.extend_from_slice(&[0x11u8; 4]);
+        assert_eq!(expected.len(), 23);
+        assert_eq!(
+            decompress(&stream, expected.len()).expect("known vector decodes"),
+            expected
+        );
+
+        // Same shape with a 16-bit absolute offset above 255: 256 x 0x22,
+        // 44 x 0x33, then a medium copy from absolute offset 0x0100.
+        let stream = [
+            0xFE, 0x00, 0x01, 0x22, // fill 256 x 0x22
+            0xFE, 0x2C, 0x00, 0x33, // fill 44 x 0x33
+            0xC1, 0x00, 0x01, // medium copy count 4, abs offset 0x0100
+            0x80,
+        ];
+        let mut expected = vec![0x22u8; 256];
+        expected.extend_from_slice(&[0x33u8; 44]);
+        expected.extend_from_slice(&[0x33u8; 4]);
+        assert_eq!(expected.len(), 304);
+        assert_eq!(
+            decompress(&stream, expected.len()).expect("high-offset vector decodes"),
+            expected
+        );
+    }
+
+    /// Reference rule 0b0???????: count = (flag >> 4) + 3, back offset =
+    /// low byte + ((flag & 0x0F) << 8), copied with overlap from the write
+    /// head (WWCompression.cs:455-477).
+    #[test]
+    fn lcw_reference_short_copy_family() {
+        // Overlapping reference repeats "ab" forward.
+        let out = decompress(&[0x82, b'a', b'b', 0x00, 0x02, 0x80], 5).expect("short copy");
+        assert_eq!(out, b"ababa");
+
+        // Non-overlapping reference reproduces the tail exactly.
+        let out = decompress(
+            &[0x86, b'a', b'b', b'c', b'd', b'e', b'f', 0x00, 0x03, 0x80],
+            9,
+        )
+        .expect("short copy");
+        assert_eq!(out, b"abcdefdef");
+
+        // High nibble scales the count: 0x70 -> (0x70 >> 4) + 3 = 10 bytes.
+        let out = decompress(&[0x82, b'x', b'y', 0x70, 0x02, 0x80], 12).expect("short copy");
+        assert_eq!(out, b"xyxyxyxyxyxy");
+    }
+
+    /// Reference rule 0b10?????? (literal), 0b11111110 (fill), and the
+    /// 0b11?????? / 0xFF copy families with little-endian operands.
+    #[test]
+    fn lcw_reference_literal_fill_and_copy_families() {
+        // Literal count is the low six bits: 0x80 | 0x3F = 63 bytes.
+        let payload: Vec<u8> = (0..63u8).collect();
+        let mut stream = vec![0xBF];
+        stream.extend_from_slice(&payload);
+        stream.push(0x80);
+        assert_eq!(decompress(&stream, 63).expect("literals"), payload);
+
+        // 0xFE carries a LE u16 count followed by exactly one fill byte.
+        let out = decompress(&[0xFE, 0x2C, 0x01, 0x5A, 0x80], 300).expect("fill");
+        assert_eq!(out, vec![0x5A; 300]);
+
+        // Medium family max: 0xFD -> count 64. Long family: 0xFF.
+        let mut stream = vec![0x82, b'p', b'q'];
+        stream.extend_from_slice(&[0xFD, 0x00, 0x00]);
+        stream.push(0xFF);
+        stream.extend_from_slice(&[0x41, 0x00, 0x00, 0x00]);
+        stream.push(0x80);
+        let out = decompress(&stream, 2 + 64 + 65).expect("medium/long copies");
+        // Both copies start at absolute offset 0 and overlap forward, so the
+        // whole 131-byte output is the repeating "pq" pattern.
+        let expected: Vec<u8> = (0..131)
+            .map(|index| if index % 2 == 0 { b'p' } else { b'q' })
+            .collect();
+        assert_eq!(out, expected);
+    }
+
+    /// A leading 0x00 selects relative LCW (VQA32), where the medium/long
+    /// offsets are a distance back from the write head
+    /// (WWCompression.cs:280-284 and its 0xFF/0x3F branches).
+    #[test]
+    fn lcw_reference_relative_stream_mode() {
+        let stream = [
+            0x00, // relative-LCW marker
+            0xFE, 0x04, 0x00, b'A', // "AAAA"
+            0xFE, 0x02, 0x00, b'B', // "AABB"
+            0xFF, 0x02, 0x00, 0x04, 0x00, // long copy 2, 4 bytes back -> "AA"
+            0xC0, 0x03, 0x00, // medium copy 3, 3 bytes back -> "BBA"
+            0x80,
+        ];
+        let out = decompress(&stream, 11).expect("relative stream");
+        assert_eq!(out, b"AAAABBAABAA");
+
+        // A relative offset past the write head is an error, not a read of
+        // uninitialised output.
+        let corrupt = [0x00, 0xFF, 0x01, 0x00, 0x09, 0x00, 0x80];
+        assert!(matches!(
+            decompress(&corrupt, 1),
+            Err(Format80Error::BadRelativeReference { .. })
+        ));
+    }
+
+    /// The compressor must round-trip every buffer shape, including the
+    /// 65/66-byte match lengths that used to collide with 0xFE/0xFF.
+    #[test]
+    fn lcw_compressor_avoids_reserved_medium_opcodes() {
+        for len in 60usize..=70 {
+            let mut data = pseudo_random_bytes(300, len as u32 + 1);
+            let prefix: Vec<u8> = data[..len].to_vec();
+            data.extend_from_slice(&prefix);
+            let packed = compress(&data, data.len()).expect("compress");
+            let back = decompress(&packed, data.len()).expect("decompress");
+            assert_eq!(back, data, "match length {len} must round-trip");
+        }
+    }
+
+    /// Seeded pseudo-random buffers of many shapes survive
+    /// compress -> decompress byte-for-byte.
+    #[test]
+    fn lcw_round_trips_random_buffers() {
+        let sizes = [1usize, 2, 3, 17, 64, 255, 256, 1024, 5000];
+        for (index, &len) in sizes.iter().enumerate() {
+            let data = pseudo_random_bytes(len, 0x9E37_79B9 ^ index as u32);
+            let packed = compress(&data, len).expect("compress");
+            let back = decompress(&packed, len).expect("decompress");
+            assert_eq!(back, data, "random buffer of {len} bytes must round-trip");
+
+            let mut runs = vec![0x5Au8; len];
+            if len > 8 {
+                runs[3] = 0x00;
+                runs[len - 2] = 0xFF;
+            }
+            let packed = compress(&runs, len).expect("compress runs");
+            let back = decompress(&packed, len).expect("decompress runs");
+            assert_eq!(
+                back, runs,
+                "run-filled buffer of {len} bytes must round-trip"
+            );
+        }
+
+        // Empty payloads still emit and accept the terminator.
+        let packed = compress(&[], 0).expect("compress empty");
+        assert_eq!(packed, vec![0x80]);
+        let empty: Vec<u8> = decompress(&packed, 0).expect("decompress empty");
+        assert!(empty.is_empty());
+    }
+
+    /// Required failure behaviour: 10,000 corrupt buffers must return Err —
+    /// no panic, no out-of-bounds access, no infinite loop. Both families are
+    /// error-by-construction: (a) a prefix of a valid stream always loses the
+    /// single trailing 0x80 terminator, (b) random bytes never contain 0x80.
+    /// `decompress` advances at least one byte per opcode, so termination is
+    /// structural and needs no time bound.
+    #[test]
+    fn lcw_corrupt_streams_are_errors_not_panics() {
+        let mut state = 0xC0FF_EE01u32;
+        let mut checked = 0usize;
+
+        // Family A: truncations of well-formed streams.
+        for _ in 0..5_000 {
+            let len = 1 + (lcg(&mut state) % 512) as usize;
+            let seed = lcg(&mut state);
+            let data = pseudo_random_bytes(len, seed);
+            let packed = compress(&data, len).expect("compress");
+            let cut = (lcg(&mut state) as usize) % packed.len();
+            let result = decompress(&packed[..cut], len);
+            assert!(
+                result.is_err(),
+                "truncated stream of {len} bytes cut at {cut} decoded successfully"
+            );
+            checked += 1;
+        }
+
+        // Family B: arbitrary bytes that can never form a terminator.
+        for _ in 0..5_000 {
+            let len = 1 + (lcg(&mut state) % 64) as usize;
+            let mut raw: Vec<u8> = (0..len).map(|_| (lcg(&mut state) >> 24) as u8).collect();
+            for byte in &mut raw {
+                if *byte == 0x80 {
+                    *byte = 0x81;
+                }
+            }
+            let expected = 1 + (lcg(&mut state) % 64) as usize;
+            let result = decompress(&raw, expected);
+            assert!(
+                result.is_err(),
+                "term-less buffer {raw:02X?} decoded successfully to {expected} bytes"
+            );
+            checked += 1;
+        }
+
+        assert_eq!(checked, 10_000);
+    }
+
+    /// Every truncation of a valid stream is rejected, including the prefix
+    /// that happens to end exactly at `expected_len` (strict terminator rule).
+    #[test]
+    fn lcw_truncated_streams_are_rejected() {
+        let stream = [
+            0xFE, 0x08, 0x00, 0x11, 0x84, b'A', b'B', b'C', b'D', 0x00, 0x09, 0xC1, 0x00, 0x00,
+            0xFF, 0x04, 0x00, 0x00, 0x00, 0x80,
+        ];
+        for cut in 0..stream.len() {
+            assert!(
+                decompress(&stream[..cut], 23).is_err(),
+                "prefix of {cut} bytes must be rejected"
+            );
+        }
+        assert!(decompress(&stream, 23).is_ok());
+    }
+
+    /// Ending early, overrunning the expected length, and self-referencing a
+    /// zero offset are all hard errors (the C# reference truncates or reads
+    /// zeroed buffer bytes instead).
+    #[test]
+    fn lcw_length_and_reference_violations_are_rejected() {
+        // 0x80 before the expected length.
+        assert!(matches!(
+            decompress(&[0x82, b'a', b'b', 0x80], 4),
+            Err(Format80Error::LengthMismatch {
+                actual: 2,
+                expected: 4
+            })
+        ));
+        // Output fills exactly but the terminator is missing.
+        assert!(matches!(
+            decompress(&[0x82, b'a', b'b'], 2),
+            Err(Format80Error::UnexpectedEnd(3))
+        ));
+        // Copy that would overrun the expected length.
+        assert!(matches!(
+            decompress(&[0x82, b'a', b'b', 0xFF, 0x05, 0x00, 0x00, 0x00], 4),
+            Err(Format80Error::LengthMismatch { .. })
+        ));
+        // Zero back-offset short copy (opcode 0x00 and low byte 0x00).
+        assert!(matches!(
+            decompress(&[0x82, b'a', b'b', 0x00, 0x00, 0x80], 5),
+            Err(Format80Error::BadBackReference(5))
+        ));
+        // Absolute offset past the written output.
+        assert!(matches!(
+            decompress(&[0x82, b'a', b'b', 0xC0, 0x09, 0x00, 0x80], 5),
+            Err(Format80Error::BadAbsoluteReference { .. })
+        ));
+    }
+
+    /// A MapPack-shaped 2-byte-per-cell grid (mostly equal template ids with
+    /// occasional edits) round-trips and shrinks.
+    #[test]
+    fn lcw_round_trips_map_pack_shaped_buffers() {
+        let mut data = Vec::new();
+        for index in 0u16..2048 {
+            data.push(if index % 23 == 0 { 12 } else { 7 });
+            data.push((index % 16) as u8);
+        }
+        let packed = compress(&data, data.len()).expect("compress");
+        assert!(packed.len() < data.len(), "structured map data shrinks");
+        assert_eq!(decompress(&packed, data.len()).expect("decompress"), data);
+    }
+}
