@@ -14,6 +14,7 @@ pub mod rules;
 pub mod serialization;
 pub mod shroud;
 pub mod smart_ptr;
+pub mod trigger_records;
 
 // Re-exports
 pub use class_id::ClassId;
