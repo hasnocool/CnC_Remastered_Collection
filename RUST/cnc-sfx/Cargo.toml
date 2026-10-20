@@ -1,0 +1,11 @@
+[package]
+name = "cnc-sfx"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+description = "Deterministic procedural sound-effect synthesis for the C&C Rust port (WAV output)"
+
+[dependencies]
+cnc-procgen = { path = "../cnc-procgen" }
+hound = { workspace = true }

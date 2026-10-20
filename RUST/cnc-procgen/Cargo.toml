@@ -1,0 +1,11 @@
+[package]
+name = "cnc-procgen"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+description = "Deterministic procedural asset generation: terrain, textures, placeholder unit sprites"
+
+[dependencies]
+cnc-core = { path = "../cnc-core" }
+image = { workspace = true }

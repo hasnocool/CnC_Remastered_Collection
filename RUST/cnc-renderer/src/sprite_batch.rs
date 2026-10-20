@@ -112,17 +112,22 @@ fn vs_main(
     // position is the top-left corner; rotation happens around the center.
     let world = instance.position + instance.size * 0.5 + rotated;
 
-    let uv_pixels = mix(instance.uv_rect.xy, instance.uv_rect.zw, corner);
     // Texture index = texture array layer. Flat instances (TEXTURE_NONE) are
     // clamped to a valid layer here and skipped in the fragment shader.
     let layer = min(instance.texture_id, 1u);
     let atlas = max(frame.atlas_sizes[layer].xy, vec2<f32>(1.0, 1.0));
-
+    // Inset the UV rect by half a texel on every side. Terrain tiles are drawn
+    // at cell size + 0.5 to hide seams between neighbouring quads; without the
+    // inset the outermost fragment sampled the first texel column of the NEXT
+    // atlas tile, leaving a 1px sliver of foreign art on tile edges.
+    let uv0 = (instance.uv_rect.xy + vec2<f32>(0.5, 0.5)) / atlas;
+    let uv1 = max(instance.uv_rect.zw - vec2<f32>(0.5, 0.5), instance.uv_rect.xy) / atlas;
+    let uv_pixels = mix(uv0, uv1, corner);
     var out: VertexOutput;
     out.clip_position = frame.view_proj * vec4<f32>(world, 0.0, 1.0);
     out.color = instance.color;
     out.palette_index = instance.palette_index;
-    out.uv = uv_pixels / atlas;
+    out.uv = uv_pixels;
     out.texture_id = instance.texture_id;
     return out;
 }

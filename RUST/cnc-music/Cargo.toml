@@ -1,0 +1,13 @@
+[package]
+name = "cnc-music"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+description = "Deterministic MIDI-to-OGG music recreation for the C&C Rust port"
+
+[dependencies]
+cnc-sfx = { path = "../cnc-sfx" }
+cnc-procgen = { path = "../cnc-procgen" }
+vorbis_rs = { workspace = true }
+anyhow = { workspace = true }

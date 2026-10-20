@@ -1,0 +1,763 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CNC Directory — live lobbies</title>
+<style>
+  :root {
+    --bg: #0b0f14;
+    --panel: #121922;
+    --panel-2: #0e141c;
+    --line: #24303d;
+    --text: #dbe6f1;
+    --muted: #8b9bad;
+    --amber: #f0a23c;
+    --green: #57d98b;
+    --red: #ef6b6b;
+    --blue: #6fb3ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background:
+      radial-gradient(1200px 600px at 10% -10%, #17222e 0%, transparent 60%),
+      var(--bg);
+    color: var(--text);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 20px 24px 14px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(11, 15, 20, 0.85);
+    backdrop-filter: blur(6px);
+    position: sticky;
+    top: 0;
+    z-index: 5;
+  }
+  h1 {
+    margin: 0;
+    font: 700 22px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  h1 span { color: var(--amber); }
+  #status { color: var(--muted); font: 13px/1.4 ui-monospace, Menlo, Consolas, monospace; }
+  #status.online { color: var(--green); }
+  #status.offline { color: var(--red); }
+  main { flex: 1; width: min(1180px, 100%); margin: 0 auto; padding: 20px 24px 40px; }
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: 14px;
+    padding: 14px 16px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--panel);
+    margin-bottom: 18px;
+  }
+  .controls label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }
+  .controls .check { display: flex; align-items: center; gap: 8px; text-transform: none; letter-spacing: 0; font-size: 14px; color: var(--text); }
+  select, input[type="search"] {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    color: var(--text);
+    border-radius: 7px;
+    padding: 8px 10px;
+    font: inherit;
+    min-width: 150px;
+  }
+  input[type="search"] { min-width: 230px; }
+  select:focus-visible, input:focus-visible, button:focus-visible {
+    outline: 2px solid var(--amber);
+    outline-offset: 2px;
+  }
+  button {
+    background: var(--amber);
+    color: #1b1206;
+    border: 0;
+    border-radius: 7px;
+    padding: 9px 16px;
+    font: 600 14px/1 ui-sans-serif, system-ui, sans-serif;
+    cursor: pointer;
+  }
+  button:hover { filter: brightness(1.08); }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 14px;
+  }
+  .card {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: linear-gradient(180deg, var(--panel) 0%, var(--panel-2) 100%);
+    padding: 16px;
+    display: grid;
+    gap: 10px;
+  }
+  .card-head { display: flex; justify-content: space-between; align-items: start; gap: 10px; }
+  .card h2 { margin: 0; font-size: 16px; line-height: 1.3; overflow-wrap: anywhere; }
+  .badges { display: flex; gap: 6px; flex-wrap: wrap; }
+  .badge {
+    font: 600 11px/1 ui-monospace, Menlo, Consolas, monospace;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 5px 7px;
+    border-radius: 5px;
+    border: 1px solid var(--line);
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .badge.td { color: var(--amber); border-color: #4a3418; background: #1d1509; }
+  .badge.ra { color: var(--red); border-color: #4a1d1d; background: #1d0f0f; }
+  .badge.lobby { color: var(--green); border-color: #1d3a29; background: #0d1a12; }
+  .badge.ready { color: var(--blue); border-color: #1d2f4a; background: #0d1620; }
+  .badge.in_progress { color: var(--muted); }
+  .badge.locked { color: #d9b45c; }
+  .meta { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin: 0; font-size: 13px; }
+  .meta dt { color: var(--muted); }
+  .meta dd { margin: 0; overflow-wrap: anywhere; }
+  .card-foot { display: flex; gap: 8px; align-items: center; margin-top: 2px; }
+  .addr {
+    flex: 1;
+    font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace;
+    color: var(--muted);
+    background: #0a0e13;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 7px 8px;
+    overflow-wrap: anywhere;
+  }
+  .card button { padding: 7px 12px; font-size: 13px; }
+  .empty {
+    border: 1px dashed var(--line);
+    border-radius: 10px;
+    padding: 32px;
+    text-align: center;
+    color: var(--muted);
+  }
+  .lfg {
+    margin-top: 34px;
+    border-top: 1px solid var(--line);
+    padding-top: 22px;
+  }
+  .lfg-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+  .lfg h2 {
+    margin: 0;
+    font: 700 18px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .lfg h2 span { color: var(--green); }
+  .lfg-head p { margin: 0; color: var(--muted); font-size: 13px; max-width: 60ch; }
+  .lfg-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 14px;
+  }
+  .panel {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--panel);
+    padding: 16px;
+    display: grid;
+    gap: 12px;
+    align-content: start;
+  }
+  .panel h3 {
+    margin: 0;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+  .row > * { flex: 1 1 140px; }
+  .row button { flex: 0 0 auto; }
+  .panel label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }
+  input[type="text"], input:not([type]) {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    color: var(--text);
+    border-radius: 7px;
+    padding: 8px 10px;
+    font: inherit;
+    min-width: 0;
+  }
+  .secondary { background: transparent; border: 1px solid var(--line); color: var(--text); }
+  .league {
+    display: inline-block;
+    font: 600 10px/1 ui-monospace, Menlo, Consolas, monospace;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 4px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--line);
+    color: var(--muted);
+  }
+  .league.ai { color: var(--green); border-color: #1d3a29; background: #0d1a12; }
+  #lfg-ai-fields { display: grid; gap: 12px; padding: 10px; border: 1px dashed var(--line); border-radius: 8px; }
+  #lfg-ai-fields[hidden] { display: none; }
+  .league.gold { color: #f0c75e; border-color: #4a3a18; }
+  .league.silver { color: #c9d4df; }
+  .league.bronze { color: #c98b5e; }
+  .league.platinum { color: #7fe0d0; }
+  .league.diamond { color: var(--blue); }
+  .league.master { color: #c58bff; }
+  .league.grandmaster { color: #ff8a5c; }
+  .lb-row, .q-row {
+    display: grid;
+    grid-template-columns: 26px 1fr auto auto;
+    gap: 8px;
+    align-items: center;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 13px;
+  }
+  .lb-row:last-child, .q-row:last-child { border-bottom: 0; }
+  .lb-row .who, .q-row .who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .muted { color: var(--muted); }
+  .match {
+    border: 1px solid #1d3a29;
+    background: #0d1a12;
+    border-radius: 8px;
+    padding: 12px;
+    display: grid;
+    gap: 8px;
+  }
+  .match .vs { font-weight: 700; }
+  .match .actions { display: flex; gap: 8px; }
+  .match .actions button { flex: 1; }
+  @media (max-width: 560px) {
+    .row > * { flex-basis: 100%; }
+  }
+  footer {
+    border-top: 1px solid var(--line);
+    padding: 12px 24px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px;
+    justify-content: space-between;
+    color: var(--muted);
+    font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace;
+  }
+  footer b { color: var(--text); font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>CNC <span>Directory</span></h1>
+  <div id="status" aria-live="polite">connecting…</div>
+</header>
+<main>
+  <section class="controls" aria-label="Lobby filters">
+    <label>Title
+      <select id="kind">
+        <option value="">All titles</option>
+        <option value="td">Tiberian Dawn</option>
+        <option value="ra">Red Alert</option>
+      </select>
+    </label>
+    <label>State
+      <select id="state">
+        <option value="">Any state</option>
+        <option value="lobby">Open lobby</option>
+        <option value="ready">Ready to start</option>
+        <option value="in_progress">In progress</option>
+      </select>
+    </label>
+    <label>Search
+      <input id="q" type="search" placeholder="map, host, tag" autocomplete="off">
+    </label>
+    <label class="check"><input id="open" type="checkbox"> open slots only</label>
+    <button id="refresh" type="button">Refresh</button>
+  </section>
+  <section id="games" class="grid" aria-live="polite" aria-label="Available games"></section>
+  <p id="empty" class="empty" hidden>
+    No lobbies match these filters yet. Hosts appear here as soon as they publish,
+    and the mesh gossip may take a few seconds to reach this node.
+  </p>
+  <section class="lfg" aria-label="Ranked looking-for-game ladder">
+    <div class="lfg-head">
+      <h2>Ranked <span>LFG</span></h2>
+      <p>MMR-matched 1v1 queues. Each pairing is announced in the lobby list and rides the same gossip mesh as a normal game.</p>
+    </div>
+    <div class="lfg-grid">
+      <div class="panel">
+        <h3>Competitor</h3>
+        <div class="row">
+          <label>Ladder
+            <select id="lfg-controller">
+              <option value="human">Human</option>
+              <option value="ai">AI agents</option>
+            </select>
+          </label>
+        </div>
+        <div class="row">
+          <input id="lfg-name" type="text" maxlength="32" placeholder="Display name" autocomplete="off">
+          <button id="lfg-register" type="button">Create</button>
+        </div>
+        <div id="lfg-ai-fields" hidden>
+          <div class="row">
+            <label>Owner
+              <input id="lfg-owner" type="text" maxlength="64" placeholder="HouseNod" autocomplete="off">
+            </label>
+            <label>Doctrine
+              <input id="lfg-doctrine" type="text" maxlength="64" placeholder="Aggressive" autocomplete="off">
+            </label>
+          </div>
+          <div class="row">
+            <label>Script hash
+              <input id="lfg-script-hash" type="text" maxlength="64" placeholder="sha-1 hex" autocomplete="off">
+            </label>
+            <label>Creator
+              <input id="lfg-creator" type="text" maxlength="64" placeholder="map author" autocomplete="off">
+            </label>
+          </div>
+          <label>Scenario
+            <input id="lfg-scenario" type="text" maxlength="64" placeholder="SCG01EA" autocomplete="off">
+          </label>
+        </div>
+        <div id="lfg-profile" class="muted">No competitor yet. Create one to start calibrating.</div>
+        <h3>Quick match</h3>
+        <div class="row">
+          <label>Title
+            <select id="lfg-kind">
+              <option value="ra">Red Alert</option>
+              <option value="td">Tiberian Dawn</option>
+            </select>
+          </label>
+          <label>Map
+            <input id="lfg-map" type="text" maxlength="64" placeholder="auto" autocomplete="off">
+          </label>
+        </div>
+        <label>Host address
+          <input id="lfg-address" type="text" placeholder="203.0.113.7:47771" autocomplete="off">
+        </label>
+        <div class="row">
+          <button id="lfg-queue" type="button">Find match</button>
+          <button id="lfg-leave" type="button" class="secondary">Leave queue</button>
+        </div>
+        <div id="lfg-message" class="muted" aria-live="polite"></div>
+        <div id="lfg-match"></div>
+      </div>
+      <div class="panel">
+        <h3 id="lfg-board-title">Human leaderboard</h3>
+        <div id="lfg-board" class="muted">No ranked players yet.</div>
+        <h3 id="lfg-queue-title">Human queue</h3>
+        <div id="lfg-queue-list" class="muted">Queue is empty.</div>
+      </div>
+    </div>
+  </section>
+</main>
+<footer>
+  <span id="stats">lobbies <b>0</b> · nodes <b>0</b></span>
+  <span id="mesh">mesh digest unavailable</span>
+</footer>
+<script>
+(function () {
+  "use strict";
+  var refreshMs = 3000;
+
+  function $(id) { return document.getElementById(id); }
+
+  function esc(value) {
+    return String(value === null || value === undefined ? "" : value).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  function badgeClass(kind) {
+    return kind === "ra" ? "badge ra" : "badge td";
+  }
+
+  function stateClass(state) {
+    return "badge " + (state === "in_progress" ? "in_progress" : state);
+  }
+
+  function stateLabel(state) {
+    if (state === "ready") return "ready";
+    if (state === "in_progress") return "in game";
+    return "open";
+  }
+
+  function render(games) {
+    var host = $("games");
+    if (!games.length) {
+      host.innerHTML = "";
+      $("empty").hidden = false;
+      return;
+    }
+    $("empty").hidden = true;
+    var html = "";
+    for (var i = 0; i < games.length; i += 1) {
+      var g = games[i];
+      var kindLabel = g.kind === "ra" ? "Red Alert" : "Tib. Dawn";
+      var full = g.players >= g.max_players || g.state !== "lobby";
+      html += '<article class="card">';
+      html += '<div class="card-head"><h2>' + esc(g.name) + '</h2><div class="badges">';
+      html += '<span class="' + badgeClass(g.kind) + '">' + esc(kindLabel) + '</span>';
+      html += '<span class="' + stateClass(g.state) + '">' + esc(stateLabel(g.state)) + '</span>';
+      if (g.passworded) html += '<span class="badge locked">locked</span>';
+      html += '</div></div><dl class="meta">';
+      html += '<dt>Map</dt><dd>' + esc(g.map) + '</dd>';
+      html += '<dt>Host</dt><dd>' + esc(g.host_name || "unknown") + '</dd>';
+      html += '<dt>Players</dt><dd>' + esc(g.players) + ' / ' + esc(g.max_players) + '</dd>';
+      if (g.version) html += '<dt>Build</dt><dd>' + esc(g.version) + '</dd>';
+      html += '</dl><div class="card-foot"><code class="addr">' + esc(g.address) + '</code>';
+      html += '<button type="button" data-copy="' + esc(g.address) + '">' + (full ? "Copy" : "Join") + '</button>';
+      html += '</div></article>';
+    }
+    host.innerHTML = html;
+  }
+
+  function params() {
+    var p = new URLSearchParams();
+    var kind = $("kind").value;
+    var state = $("state").value;
+    var q = $("q").value.trim();
+    if (kind) p.set("kind", kind);
+    if (state) p.set("state", state);
+    if (q) p.set("q", q);
+    if ($("open").checked) p.set("with_slots", "true");
+    p.set("limit", "200");
+    return p.toString();
+  }
+
+  async function load() {
+    try {
+      var res = await fetch("/api/v1/games?" + params(), { headers: { accept: "application/json" } });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      var data = await res.json();
+      render(data.games || []);
+      $("status").textContent = "online · " + data.count + " lobbies · node " + String(data.node).slice(0, 8);
+      $("status").className = "online";
+      $("mesh").textContent = "mesh digest " + data.digest;
+    } catch (err) {
+      $("status").textContent = "directory unreachable · retrying";
+      $("status").className = "offline";
+    }
+    try {
+      var stats = await fetch("/api/v1/stats").then(function (r) { return r.json(); });
+      $("stats").innerHTML = "lobbies <b>" + stats.games + "</b> · nodes <b>" +
+        stats.peers_alive + "/" + stats.peers_total + "</b>";
+    } catch (err) {
+      $("stats").textContent = "stats unavailable";
+    }
+  }
+
+  $("games").addEventListener("click", function (event) {
+    var button = event.target.closest("[data-copy]");
+    if (!button) return;
+    var text = button.getAttribute("data-copy");
+    var done = function () {
+      var previous = button.textContent;
+      button.textContent = "Copied";
+      window.setTimeout(function () { button.textContent = previous; }, 1400);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, function () { window.prompt("Copy address", text); });
+    } else {
+      window.prompt("Copy address", text);
+    }
+  });
+
+  $("refresh").addEventListener("click", load);
+  $("kind").addEventListener("change", load);
+  $("state").addEventListener("change", load);
+  $("open").addEventListener("change", load);
+  var typing = null;
+  $("q").addEventListener("input", function () {
+    window.clearTimeout(typing);
+    typing = window.setTimeout(load, 250);
+  });
+
+  var lfgPlayer = null;
+
+  function lfgMessage(text) {
+    $("lfg-message").textContent = text || "";
+  }
+
+  function lfgControllerValue() {
+    return $("lfg-controller").value;
+  }
+
+  function lfgStorageKey(controller) {
+    return "cnc-directory.lfg-player-" + controller;
+  }
+
+  function lfgId() {
+    var controller = lfgControllerValue();
+    try {
+      return window.localStorage.getItem(lfgStorageKey(controller)) ||
+        (controller === "human" ? window.localStorage.getItem("cnc-directory.lfg-player") : null);
+    } catch (err) { return null; }
+  }
+
+  function setLfgId(id) {
+    var controller = lfgControllerValue();
+    try {
+      var key = lfgStorageKey(controller);
+      if (id) window.localStorage.setItem(key, id);
+      else window.localStorage.removeItem(key);
+    } catch (err) { /* storage can be disabled; the profile still works for this page */ }
+  }
+
+  async function lfgJson(url, options) {
+    var res = await fetch(url, Object.assign({ headers: { accept: "application/json" } }, options || {}));
+    var body = await res.json().catch(function () { return {}; });
+    if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+    return body;
+  }
+
+  function renderProfile(player) {
+    var host = $("lfg-profile");
+    if (!player) {
+      host.innerHTML = "No competitor yet. Create one to start calibrating.";
+      return;
+    }
+    var html = '<div class="row" style="justify-content:space-between; align-items:center">' +
+      "<strong>" + esc(player.name) + "</strong>" +
+      (player.controller === "ai" ? ' <span class="league ai">AI</span>' : "") +
+      '<span class="muted">' + esc(String(player.id).slice(0, 8)) + "</span></div>";
+    if (player.controller === "ai" && player.agent) {
+      var agent = player.agent;
+      var bits = [];
+      if (agent.owner) bits.push(esc(agent.owner));
+      if (agent.doctrine) bits.push(esc(agent.doctrine));
+      if (agent.scenario) bits.push(esc(agent.scenario));
+      if (agent.script_hash) bits.push(esc(agent.script_hash.slice(0, 10)));
+      if (bits.length) html += '<div class="muted">AI ' + bits.join(" · ") + "</div>";
+    }
+    for (var i = 0; i < player.ratings.length; i += 1) {
+      var rating = player.ratings[i];
+      html += '<div class="lb-row"><span></span><span class="who">' +
+        (rating.kind === "ra" ? "Red Alert" : "Tib. Dawn") +
+        ' <span class="league ' + esc(rating.league) + '">' + esc(rating.league) + "</span></span><span>" +
+        esc(rating.rating) + '</span><span class="muted">' + esc(rating.wins) + "-" + esc(rating.losses) +
+        (rating.provisional ? " (p)" : "") + "</span></div>";
+    }
+    host.innerHTML = html;
+  }
+
+  function renderBoard(rows) {
+    var host = $("lfg-board");
+    if (!rows.length) {
+      host.textContent = lfgControllerValue() === "ai"
+        ? "No ranked AI agents yet."
+        : "No ranked players yet.";
+      return;
+    }
+    var html = "";
+    for (var i = 0; i < rows.length; i += 1) {
+      var row = rows[i];
+      var name = esc(row.name);
+      if (row.controller === "ai") {
+        name += ' <span class="league ai">AI</span>';
+        if (row.agent && row.agent.doctrine) {
+          name += ' <span class="muted">' + esc(row.agent.doctrine) + "</span>";
+        }
+      }
+      html += '<div class="lb-row"><span class="muted">' + esc(row.rank) + '</span><span class="who">' +
+        name + ' <span class="league ' + esc(row.league) + '">' + esc(row.league) +
+        "</span></span><span>" + esc(row.rating) + '</span><span class="muted">' +
+        esc(row.wins) + "-" + esc(row.losses) + "</span></div>";
+    }
+    host.innerHTML = html;
+  }
+
+  function renderQueue(queue) {
+    var host = $("lfg-queue-list");
+    if (!queue.length) {
+      host.textContent = "Queue is empty.";
+      return;
+    }
+    var html = '<div class="muted">' + queue.length + " waiting</div>";
+    for (var i = 0; i < queue.length; i += 1) {
+      var entry = queue[i];
+      var waited = Math.max(0, Math.floor((Date.now() - entry.joined_ms) / 1000));
+      html += '<div class="q-row"><span class="badge ' + esc(entry.kind) + '">' + esc(entry.kind) +
+        '</span><span class="who">' + esc(entry.name) + '</span><span class="muted">' +
+        esc(entry.note || entry.map || "") + '</span><span class="muted">' + waited + "s</span></div>";
+    }
+    host.innerHTML = html;
+  }
+
+  function renderMatch(matches, id) {
+    var host = $("lfg-match");
+    var pending = null;
+    var latest = matches.length ? matches[0] : null;
+    for (var i = 0; i < matches.length; i += 1) {
+      if (matches[i].state === "pending") { pending = matches[i]; break; }
+    }
+    if (pending) {
+      var opponent = null;
+      for (var j = 0; j < pending.players.length; j += 1) {
+        if (String(pending.players[j].player_id) !== id) opponent = pending.players[j];
+      }
+      if (!opponent) { host.innerHTML = ""; return; }
+      host.innerHTML = '<div class="match"><div class="vs">vs ' + esc(opponent.name) +
+        '</div><div class="muted">' + esc(pending.map) + " · " + esc(pending.kind) + " · " +
+        esc(opponent.address) + '</div><div class="muted">Ratings ' +
+        esc(pending.players[0].rating) + " vs " + esc(pending.players[1].rating) +
+        '</div><div class="actions"><button type="button" data-lfg-report="' + esc(pending.id) +
+        '" data-winner="' + esc(id) + '">I won</button><button type="button" class="secondary" data-lfg-report="' +
+        esc(pending.id) + '" data-winner="' + esc(opponent.player_id) + '">I lost</button></div></div>';
+      return;
+    }
+    if (latest && latest.state === "settled") {
+      var me = null;
+      var rival = null;
+      for (var k = 0; k < latest.players.length; k += 1) {
+        if (String(latest.players[k].player_id) === id) me = latest.players[k];
+        else rival = latest.players[k];
+      }
+      var won = me && latest.winner && String(latest.winner) === id;
+      host.innerHTML = '<div class="muted">Last match ' + (won ? "won" : "lost") + " vs " +
+        esc(rival ? rival.name : "unknown") + " · " + esc(latest.map) + "</div>";
+      return;
+    }
+    host.innerHTML = "";
+  }
+
+  async function loadLfg() {
+    var kind = $("lfg-kind").value;
+    var controller = lfgControllerValue();
+    var label = controller === "ai" ? "AI agent" : "Human";
+    $("lfg-ai-fields").hidden = controller !== "ai";
+    $("lfg-board-title").textContent = label + " leaderboard";
+    $("lfg-queue-title").textContent = label + " queue";
+    try {
+      var board = await lfgJson("/api/v1/lfg/leaderboard?kind=" + encodeURIComponent(kind) +
+        "&controller=" + encodeURIComponent(controller) + "&limit=10");
+      renderBoard(board.rows || []);
+      var queue = await lfgJson("/api/v1/lfg/queue?kind=" + encodeURIComponent(kind) +
+        "&controller=" + encodeURIComponent(controller));
+      renderQueue(queue.queue || []);
+    } catch (err) {
+      $("lfg-board").textContent = "ranked ladder unavailable";
+      $("lfg-queue-list").textContent = "ranked ladder unavailable";
+    }
+    var id = lfgId();
+    if (!id) {
+      renderProfile(null);
+      $("lfg-match").innerHTML = "";
+      return;
+    }
+    try {
+      lfgPlayer = await lfgJson("/api/v1/lfg/players/" + encodeURIComponent(id));
+      renderProfile(lfgPlayer);
+      var matches = await lfgJson("/api/v1/lfg/matches?player_id=" + encodeURIComponent(id) +
+        "&controller=" + encodeURIComponent(controller) + "&limit=5");
+      renderMatch(matches.matches || [], id);
+    } catch (err) {
+      setLfgId("");
+      lfgPlayer = null;
+      renderProfile(null);
+      $("lfg-match").innerHTML = "";
+    }
+  }
+
+  $("lfg-register").addEventListener("click", async function () {
+    var name = $("lfg-name").value.trim();
+    if (!name) { lfgMessage("Enter a display name first."); return; }
+    var controller = lfgControllerValue();
+    var payload = { name: name, controller: controller };
+    if (controller === "ai") {
+      payload.agent = {
+        owner: $("lfg-owner").value.trim(),
+        doctrine: $("lfg-doctrine").value.trim(),
+        script_hash: $("lfg-script-hash").value.trim(),
+        creator: $("lfg-creator").value.trim() || null,
+        scenario: $("lfg-scenario").value.trim() || null
+      };
+    }
+    try {
+      var player = await lfgJson("/api/v1/lfg/players", {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify(payload)
+      });
+      setLfgId(player.id);
+      lfgPlayer = player;
+      renderProfile(player);
+      lfgMessage((controller === "ai" ? "AI competitor" : "Player") + " created. Queue for a match.");
+      loadLfg();
+    } catch (err) { lfgMessage(err.message); }
+  });
+
+  $("lfg-queue").addEventListener("click", async function () {
+    var id = lfgId();
+    if (!id) { lfgMessage("Create a player first."); return; }
+    var address = $("lfg-address").value.trim();
+    if (!address) { lfgMessage("Enter the host:port other players should dial."); return; }
+    try {
+      await lfgJson("/api/v1/lfg/queue", {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify({
+          player_id: id,
+          kind: $("lfg-kind").value,
+          address: address,
+          map: $("lfg-map").value.trim() || null
+        })
+      });
+      lfgMessage("In queue — waiting for an opponent.");
+      loadLfg();
+    } catch (err) { lfgMessage(err.message); }
+  });
+
+  $("lfg-leave").addEventListener("click", async function () {
+    var id = lfgId();
+    if (!id) { lfgMessage("Create a player first."); return; }
+    try {
+      await lfgJson("/api/v1/lfg/queue/" + encodeURIComponent(id), { method: "DELETE" });
+      lfgMessage("Left the queue.");
+      loadLfg();
+    } catch (err) { lfgMessage(err.message); }
+  });
+
+  $("lfg-match").addEventListener("click", async function (event) {
+    var button = event.target.closest("[data-lfg-report]");
+    if (!button) return;
+    try {
+      await lfgJson("/api/v1/lfg/matches/" + encodeURIComponent(button.getAttribute("data-lfg-report")) + "/report", {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify({ reporter: lfgId(), winner: button.getAttribute("data-winner") })
+      });
+      lfgMessage("Result reported.");
+      loadLfg();
+    } catch (err) { lfgMessage(err.message); }
+  });
+
+  $("lfg-kind").addEventListener("change", loadLfg);
+  $("lfg-controller").addEventListener("change", function () {
+    lfgMessage("");
+    loadLfg();
+  });
+
+  load();
+  loadLfg();
+  window.setInterval(load, refreshMs);
+  window.setInterval(loadLfg, refreshMs);
+})();
+</script>
+</body>
+</html>

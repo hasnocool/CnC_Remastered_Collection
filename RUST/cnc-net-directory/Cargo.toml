@@ -1,0 +1,45 @@
+[package]
+name = "cnc-net-directory"
+version = { workspace = true }
+edition = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+description = "Decentralised game-directory node: announces lobby games and gossips them across a self-healing peer mesh"
+
+[[bin]]
+name = "cnc-directory"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+axum = "0.8"
+bincode = { workspace = true }
+clap = { workspace = true }
+parking_lot = { workspace = true }
+rand = "0.8"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "charset", "http2", "multipart", "cookies", "form", "query"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha1 = "0.10"
+thiserror = { workspace = true }
+tokio = { workspace = true }
+toml = "0.8"
+tower-http = { version = "0.6", features = ["cors", "trace", "timeout", "compression-gzip"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"

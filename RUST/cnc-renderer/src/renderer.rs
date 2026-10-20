@@ -544,11 +544,11 @@ impl Renderer for WgpuRenderer {
     }
 }
 
-/// One uploaded RGBA8 atlas, addressed by its texture id.
+/// One uploaded RGBA8 atlas, addressed by its texture id. Sampling clamps to
+/// each sprite's own UV rect, so only the width is needed for bounds checks.
 struct SoftwareAtlas {
     rgba: Vec<u8>,
     width: u32,
-    height: u32,
 }
 
 pub struct SoftwareRenderer {
@@ -598,7 +598,6 @@ impl Renderer for SoftwareRenderer {
         let (uv_x, uv_y) = (sprite.uv_rect.x as f32, sprite.uv_rect.y as f32);
         let (uv_w, uv_h) = (sprite.uv_rect.width as f32, sprite.uv_rect.height as f32);
         let atlas_w = atlas.width.max(1) as usize;
-        let atlas_h = atlas.height.max(1);
         for dy in 0..size_y.ceil() as i32 {
             for dx in 0..size_x.ceil() as i32 {
                 let px = origin_x as i32 + dx;
@@ -606,11 +605,16 @@ impl Renderer for SoftwareRenderer {
                 if px < 0 || py < 0 || px >= self.width as i32 || py >= self.height as i32 {
                     continue;
                 }
-                // Nearest-neighbour texel lookup in atlas pixel space.
+                // Nearest-neighbour texel lookup in atlas pixel space, clamped
+                // to the sprite's own UV rect. Oversized quads (terrain tiles
+                // draw at cell size + 0.5 to hide seams) must never sample the
+                // neighbouring atlas tile's texel column on their last pixel.
                 let fu = (dx as f32 + 0.5) / size_x;
                 let fv = (dy as f32 + 0.5) / size_y;
-                let tx = (uv_x + uv_w * fu).clamp(0.0, atlas_w as f32 - 1.0) as usize;
-                let ty = (uv_y + uv_h * fv).clamp(0.0, atlas_h as f32 - 1.0) as usize;
+                let tx_max = (uv_x + uv_w - 1.0).max(uv_x);
+                let ty_max = (uv_y + uv_h - 1.0).max(uv_y);
+                let tx = (uv_x + uv_w * fu).clamp(uv_x, tx_max) as usize;
+                let ty = (uv_y + uv_h * fv).clamp(uv_y, ty_max) as usize;
                 let src = (ty * atlas_w + tx) * 4;
                 if src + 3 >= atlas.rgba.len() {
                     continue;
@@ -692,7 +696,6 @@ impl Renderer for SoftwareRenderer {
             SoftwareAtlas {
                 rgba: rgba.to_vec(),
                 width,
-                height,
             },
         );
         self.atlas_generation += 1;

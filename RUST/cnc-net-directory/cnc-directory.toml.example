@@ -1,0 +1,38 @@
+# Example node configuration for cnc-net-directory.
+# Copy to node.toml and run: cnc-directory run --config node.toml
+
+name = "eu-1"
+gossip_bind = "0.0.0.0:47770"
+# Public address other nodes should dial. Omit to advertise the bind address.
+advertise = "198.51.100.10:47770"
+http_bind = "127.0.0.1:8088"
+
+lan = true
+multicast_group = "239.255.42.99:47770"
+
+# Entry points. Nodes discover each other from here on.
+bootstrap = [
+  "198.51.100.11:47770",
+  "198.51.100.12:47770",
+]
+# DNS seeds resolved at startup; every returned address is used.
+seeds = ["seed.your-domain.example"]
+
+# Ask the torrent fallback for peers only while fewer than this many are alive.
+min_alive_peers = 2
+# Optional JSON file that persists the node-local ranked ladder.
+lfg_state = "ladder.json"
+# magnet URI, .torrent path, or plain JSON URL.
+# torrent = "https://mirror.example.org/nodes.json"
+
+# Tuning (seconds).
+gossip_secs = 3
+sync_secs = 15
+maintenance_secs = 5
+peer_timeout_secs = 30
+torrent_secs = 120
+
+[qbittorrent]
+url = "http://127.0.0.1:8080"
+username = "admin"
+password = "admin"

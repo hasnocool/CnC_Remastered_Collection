@@ -1,0 +1,29 @@
+[package]
+name = "cnc-bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cnc-core = { path = "../cnc-core" }
+cnc-tiberian-dawn = { path = "../cnc-tiberian-dawn" }
+cnc-red-alert = { path = "../cnc-red-alert" }
+
+[dev-dependencies]
+# Workspace-pinned 0.5.1 (already in Cargo.lock — no new fetch).
+criterion = { workspace = true }
+
+[lib]
+name = "cnc_bench"
+path = "src/lib.rs"
+
+# Criterion provides its own harness via `criterion_main!`, so both bench
+# targets must opt out of the libtest harness (`harness = false`). With
+# `harness = true` the libtest main runs zero benchmarks and
+# `cargo bench -- --test` would pass without measuring anything.
+[[bench]]
+name = "cold_start"
+harness = false
+
+[[bench]]
+name = "sim_throughput"
+harness = false
