@@ -8893,7 +8893,17 @@ fn list_td_missions(dir: &Path) -> Result<()> {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    tracing_subscriber::fmt::init();
+    // Structured logging: `cnc-logs` installs the tracing subscriber with
+    // per-target filters and mirrors every enabled event into a bounded
+    // in-memory LogBuffer (oldest entries rotate out when it is full).
+    let _logging_guard = cnc_logs::init_logging_with_buffer(
+        cnc_launcher::logging::launcher_log_config(),
+        cnc_logs::LogBuffer::new(cnc_launcher::logging::LOG_BUFFER_CAPACITY),
+    )?;
+    tracing::info!(
+        capacity = cnc_launcher::logging::LOG_BUFFER_CAPACITY,
+        "cnc-launcher structured logging initialized"
+    );
 
     let options = LauncherOptions::load(args.options.as_deref());
     // Renderer precedence (plan line 206): explicit --renderer flag, then

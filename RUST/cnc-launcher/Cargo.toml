@@ -27,6 +27,7 @@ cnc-audio = { path = "../cnc-audio" }
 cnc-asset = { path = "../cnc-asset" }
 cnc-net-directory = { path = "../cnc-net-directory" }
 cnc-events = { path = "../cnc-events" }
+cnc-logs = { path = "../cnc-logs" }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
