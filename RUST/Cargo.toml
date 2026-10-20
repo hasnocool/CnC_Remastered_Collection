@@ -11,10 +11,15 @@ members = [
     "cnc-launcher",
     "cnc-net-directory",
     "cnc-ai",
+    "cnc-procgen",
+    "cnc-sfx",
+    "cnc-classic",
+    "cnc-music",
+    "cnc-bench",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["CnC Rust Clone Team"]
 license = "GPL-3.0-or-later"
@@ -74,3 +79,4 @@ nom = "7.1"
 chrono = "0.4"
 uuid = { version = "1.7", features = ["v4", "serde"] }
 serde-big-array = "0.4"
+criterion = "0.5.1"
