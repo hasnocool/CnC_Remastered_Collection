@@ -3247,7 +3247,12 @@ impl LauncherApp {
             return;
         };
         let local = net.session.local_player;
-        let name = format!("Player{local}");
+        // Tag the lane in the ready identity: the RA and TD lobbies both number
+        // players 0/1, so a bare "Player1" from each lane would collapse onto
+        // one roster row. The beacon text carries the same game tag, so a host
+        // tracking both lanes keeps one row per player. Display names stay
+        // single tokens (the ready line is space-delimited).
+        let name = format!("TD-Player{local}");
         let _ = self.ready_tracker.mark_ready(&name, ready);
         let peers: Vec<SocketAddr> = net.session.peers.values().copied().collect();
         broadcast_ready(&net.socket, &name, ready, &peers);
