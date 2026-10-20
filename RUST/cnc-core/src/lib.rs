@@ -14,7 +14,9 @@ pub mod rules;
 pub mod serialization;
 pub mod shroud;
 pub mod smart_ptr;
+pub mod trigger_apply;
 pub mod trigger_records;
+pub mod visibility;
 
 // Re-exports
 pub use class_id::ClassId;
@@ -38,3 +40,8 @@ pub use rules::{
 pub use serialization::{BinaryReader, BinaryWriter, Serializable};
 pub use shroud::{Shroud, MAX_HOUSES};
 pub use smart_ptr::CCPtr;
+pub use trigger_apply::{
+    apply_action_record, apply_actions, events_hold, fire_trigger, special_weapon, ApplyReport,
+    TriggerHost,
+};
+pub use visibility::{CellState, FogPolicy, SightSource, Visibility, VISIBILITY_SNAPSHOT_VERSION};
