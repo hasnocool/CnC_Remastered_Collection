@@ -5,13 +5,18 @@ pub mod animation;
 pub mod archive;
 pub mod atlas;
 pub mod audio;
+pub mod base64;
+pub mod classic_pack;
 pub mod convert;
 pub mod font;
+pub mod format80;
 pub mod palette;
+pub mod ra_pack;
 pub mod registry;
 pub mod shape;
 pub mod string_table;
 pub mod tileset_pack;
+pub mod video;
 
 pub use anim::{
     AnimationEvent, AnimationInstance, AnimationSpec, FrameEvent, LoopMode, PaletteId,
@@ -21,6 +26,7 @@ pub use animation::{frame_to_rgba_remapped, AnimFrame, Animation, AnimationPlaye
 pub use archive::{MixArchive, MixEntry};
 pub use atlas::{AtlasStyle, SpriteAtlas, SpriteFrame};
 pub use audio::{AudFile, VocFile};
+pub use base64::{decode as base64_decode, encode as base64_encode};
 pub use convert::{BatchOptions, BatchReport, SpriteSheet};
 pub use font::{FontFile, FontGlyph, NO_DATA_OFFSET};
 pub use palette::PalFile;
