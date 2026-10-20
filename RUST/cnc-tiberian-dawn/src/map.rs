@@ -7,7 +7,7 @@ use cnc_renderer::Sprite;
 use cnc_renderer::TILESET_TEXTURE_ID;
 use serde::{Deserialize, Serialize};
 
-use crate::td_rules::{tiberium_amount_for_stage, tiberium_stage, TIBERIUM_STAGES};
+use crate::td_rules::{tiberium_amount_for_stage, tiberium_stage, Theater, TIBERIUM_STAGES};
 
 /// texture_id passed to tileset sprite draws so backends sample the tileset
 /// atlas slot, separate from the procedural unit atlas slot 0.
@@ -206,6 +206,7 @@ pub struct Map {
     pub grid: CellGrid,
     pub player_starts: Vec<Vec2i>,
     pub trigger_zones: Vec<TriggerZone>,
+    pub theater: Theater,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,6 +227,7 @@ impl Map {
             grid: CellGrid::new(width, height),
             player_starts: Vec::new(),
             trigger_zones: Vec::new(),
+            theater: Theater::Temperate,
         }
     }
 

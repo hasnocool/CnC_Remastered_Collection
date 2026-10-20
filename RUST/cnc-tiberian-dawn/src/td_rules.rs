@@ -42,6 +42,20 @@ impl ArmorType {
     }
 }
 
+/// Theater types (terrain sets)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Theater {
+    Temperate,
+    Snow,
+    Desert,
+}
+
+impl Default for Theater {
+    fn default() -> Self {
+        Self::Temperate
+    }
+}
+
 /// Warhead classes from DEFINES.H.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WarheadType {
@@ -566,6 +580,12 @@ pub const HARVESTER_STEP_CREDITS: i32 = 25;
 pub const HARVESTER_STEP_COUNT: u8 = 28;
 pub const HARVESTER_FULL_LOAD: i32 = HARVESTER_STEP_CREDITS * HARVESTER_STEP_COUNT as i32;
 
+/// INFANTRY.CPP:725 Per_Cell_Process `MISSION_SABOTAGE`:
+/// `building->CountDown.Set(20)`.
+pub const SABOTAGE_COUNTDOWN_SECONDS: f32 = 20.0;
+/// BUILDING.CPP:1245 demolition timeout: `int damage = 5000;` (WARHEAD_FIRE).
+pub const SABOTAGE_DAMAGE: i32 = 5000;
+
 /// Tiberium overlay stages used by the growth rules (0..11).
 pub const TIBERIUM_STAGES: u8 = 12;
 
@@ -606,6 +626,10 @@ pub fn mph_to_px_per_sec_infantry(mph: i32) -> f32 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnitType {
     InfantryE1,
+    /// IDATA.CPP:486-528 engineer row (INI name "E6"): captures buildings.
+    Engineer,
+    /// IDATA.CPP:563-597 commando row (INFANTRY_RAMBO): sabotages buildings.
+    Commando,
     MediumTank,
     MammothTank,
     Harvester,
@@ -617,8 +641,10 @@ pub enum UnitType {
 
 impl UnitType {
     /// Every modelled unit, in stable sidebar order.
-    pub const ALL: [UnitType; 8] = [
+    pub const ALL: [UnitType; 10] = [
         UnitType::InfantryE1,
+        UnitType::Engineer,
+        UnitType::Commando,
         UnitType::MediumTank,
         UnitType::MammothTank,
         UnitType::Harvester,
@@ -664,6 +690,36 @@ impl UnitType {
                 cost: 100,
                 tech_level: 1,
                 sight_range: 1,
+                has_turret: false,
+                rot_degrees_per_tick: 0,
+                two_shooter: false,
+                is_aircraft: false,
+                ammo: 0,
+            },
+            UnitType::Engineer => UnitStats {
+                strength: 25,
+                max_speed_mph: 8,
+                weapon: None,
+                armor: ArmorType::None,
+                is_infantry: true,
+                cost: 500,
+                tech_level: 3,
+                sight_range: 2,
+                has_turret: false,
+                rot_degrees_per_tick: 0,
+                two_shooter: false,
+                is_aircraft: false,
+                ammo: 0,
+            },
+            UnitType::Commando => UnitStats {
+                strength: 80,
+                max_speed_mph: 10,
+                weapon: Some(WeaponType::Rifle),
+                armor: ArmorType::None,
+                is_infantry: true,
+                cost: 1000,
+                tech_level: 7,
+                sight_range: 5,
                 has_turret: false,
                 rot_degrees_per_tick: 0,
                 two_shooter: false,
@@ -784,6 +840,8 @@ impl UnitType {
     pub const fn ini_name(self) -> &'static str {
         match self {
             UnitType::InfantryE1 => "E1",
+            UnitType::Engineer => "E6",
+            UnitType::Commando => "RMBO",
             UnitType::MediumTank => "MTNK",
             UnitType::MammothTank => "HTNK",
             UnitType::Harvester => "HARV",
@@ -799,6 +857,8 @@ impl UnitType {
 pub const fn unit_class_id(unit_type: UnitType) -> ClassId {
     match unit_type {
         UnitType::InfantryE1 => ClassId::InfantryE1,
+        UnitType::Engineer => ClassId::InfantryE6,
+        UnitType::Commando => ClassId::InfantryE10,
         UnitType::MediumTank => ClassId::VehicleE2,
         UnitType::MammothTank => ClassId::VehicleE4,
         UnitType::Harvester => ClassId::VehicleE6,
@@ -812,6 +872,8 @@ pub const fn unit_class_id(unit_type: UnitType) -> ClassId {
 pub fn unit_type_for_class(class_id: ClassId) -> Option<UnitType> {
     match class_id {
         ClassId::InfantryE1 => Some(UnitType::InfantryE1),
+        ClassId::InfantryE6 => Some(UnitType::Engineer),
+        ClassId::InfantryE10 => Some(UnitType::Commando),
         ClassId::VehicleE1 => Some(UnitType::Jeep),
         ClassId::VehicleE2 => Some(UnitType::MediumTank),
         ClassId::VehicleE4 => Some(UnitType::MammothTank),
@@ -834,11 +896,21 @@ pub enum StructureType {
     Helipad,
     IonCannon,
     TempleOfNod,
+    /// Static GDI defence with a rotating gun (BDATA `ATWR`).
+    GuardTower,
+    /// Heavier Nod defence (BDATA `GTOWER`).
+    AdvancedGuardTower,
+    /// Cheap ground turret (BDATA `TURRET`).
+    Turret,
+    /// Anti-aircraft missile battery (BDATA `SAM`).
+    SamSite,
+    /// Nod laser defence (BDATA `OBELISK`).
+    Obelisk,
 }
 
 impl StructureType {
     /// Every modelled structure, in stable sidebar order.
-    pub const ALL: [StructureType; 9] = [
+    pub const ALL: [StructureType; 14] = [
         StructureType::ConstructionYard,
         StructureType::PowerPlant,
         StructureType::Refinery,
@@ -848,7 +920,40 @@ impl StructureType {
         StructureType::Helipad,
         StructureType::IonCannon,
         StructureType::TempleOfNod,
+        StructureType::GuardTower,
+        StructureType::AdvancedGuardTower,
+        StructureType::Turret,
+        StructureType::SamSite,
+        StructureType::Obelisk,
     ];
+
+    /// `true` when this structure shoots at enemies.
+    pub const fn is_defensive(self) -> bool {
+        matches!(
+            self,
+            StructureType::GuardTower
+                | StructureType::AdvancedGuardTower
+                | StructureType::Turret
+                | StructureType::SamSite
+                | StructureType::Obelisk
+        )
+    }
+
+    /// Anti-aircraft defences only engage air targets.
+    pub const fn is_anti_air(self) -> bool {
+        matches!(self, StructureType::SamSite)
+    }
+
+    /// Weapon carried by a defensive structure, if any.
+    pub const fn defence_weapon(self) -> Option<WeaponType> {
+        match self {
+            StructureType::GuardTower => Some(WeaponType::TurretGun),
+            StructureType::AdvancedGuardTower | StructureType::Turret => Some(WeaponType::TowTwo),
+            StructureType::SamSite => Some(WeaponType::Nike),
+            StructureType::Obelisk => Some(WeaponType::ObeliskLaser),
+            _ => None,
+        }
+    }
 }
 
 /// True when a Rules.ini `Owner=` token list admits the given side.
@@ -869,7 +974,9 @@ pub fn owner_token_allows(tokens: &[String], is_gdi: bool) -> bool {
 /// Hard-coded TD unit ownership, used when Rules.ini omits `Owner=`.
 pub const fn default_unit_owner(unit: UnitType, is_gdi: bool) -> bool {
     match unit {
-        UnitType::InfantryE1 | UnitType::Harvester => true,
+        UnitType::InfantryE1 | UnitType::Engineer | UnitType::Commando | UnitType::Harvester => {
+            true
+        }
         UnitType::MediumTank | UnitType::MammothTank | UnitType::Jeep | UnitType::Orca => is_gdi,
         UnitType::Buggy | UnitType::Apache => !is_gdi,
     }
@@ -908,6 +1015,9 @@ pub struct StructureStats {
     pub produces: Option<ProductionKind>,
     /// BDATA.CPP CAPACITY: tiberium storage capacity.
     pub capacity: i32,
+    /// BDATA.CPP "Can this building be captured?" (BuildingTypeClass::
+    /// IsCaptureable), the flag `BuildingClass::Can_Capture` reads.
+    pub is_captureable: bool,
 }
 
 impl StructureType {
@@ -923,6 +1033,7 @@ impl StructureType {
                 sight_range: 3,
                 produces: Some(ProductionKind::Building),
                 capacity: 0,
+                is_captureable: true,
             },
             StructureType::PowerPlant => StructureStats {
                 strength: 200,
@@ -934,6 +1045,7 @@ impl StructureType {
                 sight_range: 2,
                 produces: None,
                 capacity: 0,
+                is_captureable: true,
             },
             StructureType::Refinery => StructureStats {
                 strength: 450,
@@ -945,6 +1057,7 @@ impl StructureType {
                 sight_range: 4,
                 produces: None,
                 capacity: 1000,
+                is_captureable: true,
             },
             StructureType::Silo => StructureStats {
                 strength: 150,
@@ -956,6 +1069,7 @@ impl StructureType {
                 sight_range: 2,
                 produces: None,
                 capacity: 1500,
+                is_captureable: true,
             },
             StructureType::Barracks => StructureStats {
                 strength: 400,
@@ -967,6 +1081,7 @@ impl StructureType {
                 sight_range: 3,
                 produces: Some(ProductionKind::Infantry),
                 capacity: 0,
+                is_captureable: true,
             },
             StructureType::WarFactory => StructureStats {
                 strength: 500,
@@ -978,6 +1093,7 @@ impl StructureType {
                 sight_range: 3,
                 produces: Some(ProductionKind::Unit),
                 capacity: 0,
+                is_captureable: true,
             },
             StructureType::Helipad => StructureStats {
                 strength: 400,
@@ -989,6 +1105,7 @@ impl StructureType {
                 sight_range: 3,
                 produces: Some(ProductionKind::Aircraft),
                 capacity: 0,
+                is_captureable: true,
             },
             StructureType::IonCannon => StructureStats {
                 strength: 500,
@@ -1000,6 +1117,7 @@ impl StructureType {
                 sight_range: 3,
                 produces: None,
                 capacity: 0,
+                is_captureable: false,
             },
             StructureType::TempleOfNod => StructureStats {
                 strength: 1000,
@@ -1011,6 +1129,69 @@ impl StructureType {
                 sight_range: 4,
                 produces: None,
                 capacity: 0,
+                is_captureable: false,
+            },
+            // Defensive structures: values from BDATA.CPP ClassATower /
+            // ClassGunTurret / ClassTurret / ClassSAM / ClassObelisk.
+            StructureType::GuardTower => StructureStats {
+                strength: 300,
+                cost: 1000,
+                tech_level: 4,
+                armor: ArmorType::Aluminum,
+                power: 0,
+                drain: 20,
+                sight_range: 4,
+                produces: None,
+                capacity: 0,
+                is_captureable: false,
+            },
+            StructureType::AdvancedGuardTower => StructureStats {
+                strength: 400,
+                cost: 1500,
+                tech_level: 7,
+                armor: ArmorType::Steel,
+                power: 0,
+                drain: 30,
+                sight_range: 5,
+                produces: None,
+                capacity: 0,
+                is_captureable: false,
+            },
+            StructureType::Turret => StructureStats {
+                strength: 200,
+                cost: 600,
+                tech_level: 3,
+                armor: ArmorType::Aluminum,
+                power: 0,
+                drain: 10,
+                sight_range: 3,
+                produces: None,
+                capacity: 0,
+                is_captureable: false,
+            },
+            StructureType::SamSite => StructureStats {
+                strength: 200,
+                cost: 750,
+                tech_level: 6,
+                armor: ArmorType::Steel,
+                power: 0,
+                drain: 20,
+                sight_range: 3,
+                produces: None,
+                capacity: 0,
+                is_captureable: false,
+            },
+            StructureType::Obelisk => StructureStats {
+                strength: 400,
+                cost: 1500,
+                tech_level: 8,
+                armor: ArmorType::Concrete,
+                power: 0,
+                drain: 150,
+                sight_range: 5,
+                produces: None,
+                capacity: 0,
+                is_captureable: false,
             },
         }
     }
@@ -1030,6 +1211,11 @@ impl StructureType {
             StructureType::Helipad => "HPAD",
             StructureType::IonCannon => "EYE",
             StructureType::TempleOfNod => "TMPL",
+            StructureType::GuardTower => "ATWR",
+            StructureType::AdvancedGuardTower => "GTOWER",
+            StructureType::Turret => "TURRET",
+            StructureType::SamSite => "SAM",
+            StructureType::Obelisk => "OBLI",
         }
     }
 
@@ -1044,6 +1230,12 @@ impl StructureType {
             StructureType::Helipad => ClassId::Helipad,
             StructureType::IonCannon => ClassId::Radar,
             StructureType::TempleOfNod => ClassId::MissileSilo,
+            // Defences share the AA_Gun / TeslaCoil ClassIds by role.
+            StructureType::GuardTower => ClassId::AA_Gun,
+            StructureType::AdvancedGuardTower => ClassId::TeslaCoil,
+            StructureType::Turret => ClassId::AA_Gun,
+            StructureType::SamSite => ClassId::AA_Gun,
+            StructureType::Obelisk => ClassId::TeslaCoil,
         }
     }
 
@@ -1078,6 +1270,11 @@ pub fn structure_from_ini_name(name: &str) -> Option<StructureType> {
         "HPAD" | "AFLD" | "HELIPAD" => Some(StructureType::Helipad),
         "EYE" | "RADAR" => Some(StructureType::IonCannon),
         "TMPL" | "TEMPLE" => Some(StructureType::TempleOfNod),
+        "ATWR" => Some(StructureType::GuardTower),
+        "GTOWER" => Some(StructureType::AdvancedGuardTower),
+        "TURRET" => Some(StructureType::Turret),
+        "SAM" => Some(StructureType::SamSite),
+        "OBLI" | "OBELISK" => Some(StructureType::Obelisk),
         _ => None,
     }
 }
@@ -1288,5 +1485,159 @@ mod tests {
         assert!(stats.two_shooter);
         assert_eq!(stats.rot_degrees_per_tick, 5);
         assert!((stats.speed_px_per_sec() - 18.0).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn commando_row_matches_idata_cpp() {
+        // IDATA.CPP:563-597 `static InfantryTypeClass const Commando(`
+        // (INFANTRY_RAMBO, "RMBO", level 7, STRUCTF_EYE, strength 80, sight
+        // 5, cost 1000, WEAPON_RIFLE, MPH_SLOW_ISH).
+        let stats = UnitType::Commando.stats();
+        assert_eq!(UnitType::Commando.ini_name(), "RMBO");
+        assert_eq!(stats.strength, 80);
+        assert_eq!(stats.max_speed_mph, 10);
+        assert_eq!(stats.weapon, Some(WeaponType::Rifle));
+        assert_eq!(stats.cost, 1000);
+        assert_eq!(stats.tech_level, 7);
+        assert_eq!(stats.sight_range, 5);
+        assert!(stats.is_infantry);
+        assert!(!stats.has_turret);
+        assert!(UnitType::ALL.contains(&UnitType::Commando));
+        assert_eq!(unit_class_id(UnitType::Commando), ClassId::InfantryE10);
+        assert_eq!(
+            unit_type_for_class(ClassId::InfantryE10),
+            Some(UnitType::Commando)
+        );
+        // IDATA.CPP OWNABLE bits list every house.
+        for is_gdi in [true, false] {
+            assert!(default_unit_owner(UnitType::Commando, is_gdi));
+        }
+    }
+
+    #[test]
+    fn engineer_row_matches_idata_cpp() {
+        // IDATA.CPP:486-528 `static InfantryTypeClass const E7(` (the TD
+        // engineer, ini name "E6"): level 3, strength 25, sight 2, cost 500,
+        // WEAPON_NONE, MPH_SLOW and `Can this infantry type capture a
+        // building? = true`.
+        let stats = UnitType::Engineer.stats();
+        assert_eq!(UnitType::Engineer.ini_name(), "E6");
+        assert_eq!(stats.strength, 25);
+        assert_eq!(stats.max_speed_mph, 8);
+        assert_eq!(stats.weapon, None);
+        assert_eq!(stats.cost, 500);
+        assert_eq!(stats.tech_level, 3);
+        assert_eq!(stats.sight_range, 2);
+        assert!(stats.is_infantry);
+        assert!(UnitType::ALL.contains(&UnitType::Engineer));
+        assert_eq!(unit_class_id(UnitType::Engineer), ClassId::InfantryE6);
+        assert_eq!(
+            unit_type_for_class(ClassId::InfantryE6),
+            Some(UnitType::Engineer)
+        );
+        for is_gdi in [true, false] {
+            assert!(default_unit_owner(UnitType::Engineer, is_gdi));
+        }
+    }
+
+    #[test]
+    fn sabotage_constants_match_infantry_cpp() {
+        // INFANTRY.CPP:725 `building->CountDown.Set(20);`
+        assert_eq!(SABOTAGE_COUNTDOWN_SECONDS, 20.0);
+        // BUILDING.CPP:1245 `int damage = 5000;`
+        assert_eq!(SABOTAGE_DAMAGE, 5000);
+    }
+
+    #[test]
+    fn structure_rows_carry_bdata_is_captureable() {
+        // BDATA.CPP "Can this building be captured?" column, one line per
+        // BuildingTypeClass row (e.g. ClassConst:581 true, ClassEye:702 false).
+        let expected: [(StructureType, bool); 9] = [
+            (StructureType::ConstructionYard, true),
+            (StructureType::PowerPlant, true),
+            (StructureType::Refinery, true),
+            (StructureType::Silo, true),
+            (StructureType::Barracks, true),
+            (StructureType::WarFactory, true),
+            (StructureType::Helipad, true),
+            (StructureType::IonCannon, false),
+            (StructureType::TempleOfNod, false),
+        ];
+        for (structure, captureable) in expected {
+            assert_eq!(
+                structure.stats().is_captureable,
+                captureable,
+                "{} captureable flag",
+                structure.ini_name()
+            );
+        }
+    }
+
+    #[test]
+    fn defensive_structures_are_flagged_and_armed() {
+        for structure in [
+            StructureType::GuardTower,
+            StructureType::AdvancedGuardTower,
+            StructureType::Turret,
+            StructureType::SamSite,
+            StructureType::Obelisk,
+        ] {
+            assert!(
+                structure.is_defensive(),
+                "{} must be defensive",
+                structure.ini_name()
+            );
+            assert!(
+                structure.defence_weapon().is_some(),
+                "{} must carry a weapon",
+                structure.ini_name()
+            );
+        }
+        // Economy buildings never shoot back.
+        for structure in [
+            StructureType::PowerPlant,
+            StructureType::Refinery,
+            StructureType::Barracks,
+        ] {
+            assert!(!structure.is_defensive());
+            assert!(structure.defence_weapon().is_none());
+        }
+    }
+
+    #[test]
+    fn only_the_sam_site_is_anti_air() {
+        assert!(StructureType::SamSite.is_anti_air());
+        assert!(!StructureType::GuardTower.is_anti_air());
+        assert!(!StructureType::Obelisk.is_anti_air());
+    }
+
+    #[test]
+    fn defence_stats_follow_bdata() {
+        // BDATA.CPP ClassATower: STRNTH 300, COST 1000, DRAIN 20.
+        let tower = StructureType::GuardTower.stats();
+        assert_eq!(tower.strength, 300);
+        assert_eq!(tower.cost, 1000);
+        assert_eq!(tower.drain, 20);
+
+        // BDATA.CPP ClassSAM: STRNTH 200, COST 750.
+        let sam = StructureType::SamSite.stats();
+        assert_eq!(sam.strength, 200);
+        assert_eq!(sam.cost, 750);
+    }
+
+    #[test]
+    fn defence_ini_names_round_trip() {
+        for (structure, name) in [
+            (StructureType::GuardTower, "ATWR"),
+            (StructureType::SamSite, "SAM"),
+            (StructureType::Turret, "TURRET"),
+        ] {
+            assert_eq!(structure.ini_name(), name);
+            assert_eq!(
+                structure_from_ini_name(name),
+                Some(structure),
+                "the scenario loader must resolve the defence by its BDATA name"
+            );
+        }
     }
 }

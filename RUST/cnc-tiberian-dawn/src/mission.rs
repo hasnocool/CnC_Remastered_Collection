@@ -93,6 +93,15 @@ impl Comparison {
     }
 }
 
+/// Which class of asset an elimination or kill-count condition covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Eliminated {
+    Units,
+    Buildings,
+    /// Units and buildings together (`EVENT_ALL_DESTROYED`).
+    Both,
+}
+
 /// A level-triggered campaign condition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Condition {
@@ -136,6 +145,35 @@ pub enum Condition {
         zone: u32,
         owner: Option<u8>,
     },
+    /// `EVENT_DISCOVERED`: the player has explored a cell for the first time.
+    ///
+    /// `cell` is the discovered cell; `None` matches any new discovery.
+    Discovered {
+        cell: Option<Vec2i>,
+    },
+    /// `EVENT_UNITS_DESTROYED`/`EVENT_BUILDINGS_DESTROYED`/`EVENT_ALL_DESTROYED`:
+    /// a house has lost everything. `what` selects which.
+    HouseEliminated {
+        owner: u8,
+        what: Eliminated,
+    },
+    /// `EVENT_NBUILDINGS_DESTROYED`/`EVENT_NUNITS_DESTROYED`: cumulative
+    /// kills by the player reached a threshold.
+    KillsAtLeast {
+        owner: u8,
+        what: Eliminated,
+        count: i64,
+    },
+    /// `EVENT_NOFACTORIES`: the house owns no production structure.
+    NoFactories {
+        owner: u8,
+    },
+    /// `EVENT_BUILD`: the house owns at least one of this structure (it was
+    /// built, whether by production or scripted).
+    BuiltStructure {
+        owner: u8,
+        structure: StructureType,
+    },
     /// A named mission flag has been set by an earlier action.
     FlagSet(String),
     Not(Box<Condition>),
@@ -149,6 +187,37 @@ impl Condition {
         match self {
             Self::Always => true,
             Self::Never => false,
+            Self::HouseEliminated { owner, what } => {
+                let units = game
+                    .units
+                    .iter()
+                    .filter(|u| u.owner == *owner && u.is_alive())
+                    .count();
+                let buildings = game
+                    .buildings
+                    .iter()
+                    .filter(|b| b.owner == *owner && b.is_alive())
+                    .count();
+                match what {
+                    Eliminated::Units => units == 0,
+                    Eliminated::Buildings => buildings == 0,
+                    Eliminated::Both => units == 0 && buildings == 0,
+                }
+            }
+            Self::KillsAtLeast { owner, what, count } => game.kills_by(*owner, *what) >= *count,
+            Self::NoFactories { owner } => !game.buildings.iter().any(|b| {
+                b.owner == *owner
+                    && b.is_alive()
+                    && b.structure_type()
+                        .is_some_and(|s| s.stats().produces.is_some())
+            }),
+            Self::BuiltStructure { owner, structure } => game.buildings.iter().any(|b| {
+                b.owner == *owner && b.is_alive() && b.structure_type() == Some(*structure)
+            }),
+            Self::Discovered { cell } => match cell {
+                Some(wanted) => game.was_discovered(*wanted),
+                None => game.any_discovery_pending(),
+            },
             Self::Elapsed { seconds } => game.elapsed >= Fixed16_16::from_int(*seconds as i32),
             Self::UnitCount {
                 owner,
@@ -261,6 +330,37 @@ pub enum Action {
     CompleteObjective(u32),
     /// Run a named `[Script*]` action list.
     RunScript(String),
+    /// `ACTION_AIRSTRIKE`: a flight of aircraft strafes a map cell.
+    Airstrike {
+        owner: u8,
+        cell: Vec2i,
+    },
+    /// `ACTION_NUKE`: detonate a nuclear missile on a map cell without
+    /// requiring the firing house to own a Temple of Nod.
+    Nuke {
+        owner: u8,
+        cell: Vec2i,
+    },
+    /// `ACTION_ION`: fire the Ion Cannon at a map cell without requiring
+    /// the firing house to own the Ion Cannon building.
+    IonCannon {
+        owner: u8,
+        cell: Vec2i,
+    },
+    /// `ACTION_DZ`: drop reinforcements at the given waypoint.
+    Dropzone {
+        owner: u8,
+        cell: Vec2i,
+    },
+    /// `ACTION_CREATE_TEAM`: activate a `[TeamTypes]` entry by name.
+    CreateTeam {
+        owner: u8,
+        team: String,
+    },
+    /// `ACTION_ALL_HUNT`: every unit of the house switches to hunting.
+    AllToHunt {
+        owner: u8,
+    },
 }
 
 /// One campaign trigger.
@@ -319,6 +419,14 @@ pub struct Mission {
     /// Optional briefing text shown before the mission.
     #[serde(default)]
     pub briefing: String,
+    /// Optional generated static briefing-art key (`[Basic] BriefingImage`,
+    /// or the `BriefPicture` spelling). Missions written before this key
+    /// existed parse to `None`, so saves and INIs stay compatible. The value
+    /// names art produced by `cnc_procgen::briefing` (static emblems/
+    /// portraits; the original VQA briefing movies are out of reach because
+    /// the licensed decoders are stubs).
+    #[serde(default)]
+    pub briefing_image: Option<String>,
     /// House index controlled by the player (0 = GDI, 1 = Nod).
     pub player: u8,
     pub triggers: Vec<Trigger>,
@@ -339,6 +447,7 @@ impl Mission {
         Self {
             name,
             briefing: String::new(),
+            briefing_image: None,
             player: 0,
             triggers: Vec::new(),
             scripts: Vec::new(),
@@ -466,6 +575,9 @@ impl Mission {
         if let Some(basic) = basic {
             if let Some(briefing) = text_value(basic, &["Briefing"]) {
                 mission.briefing = briefing;
+            }
+            if let Some(image) = text_value(basic, &["BriefingImage", "BriefPicture"]) {
+                mission.briefing_image = Some(image);
             }
             if let Some(player) = int_value(basic, &["Player", "Side"]).transpose()? {
                 mission.player = player as u8;
@@ -897,6 +1009,40 @@ Actions=message:One minute elapsed|credits:0:250
                     amount: 250
                 }
             ]
+        );
+    }
+
+    #[test]
+    fn briefing_image_absent_is_none() {
+        // Missions written before the key existed must stay compatible.
+        let mission = Mission::from_ini_str(mission_ini()).unwrap();
+        assert_eq!(mission.briefing_image, None);
+        assert_eq!(Mission::new("fresh".to_string()).briefing_image, None);
+    }
+
+    #[test]
+    fn briefing_image_present_round_trips() {
+        let ini = r#"
+[Basic]
+Name=GDI 02 - Strip Club
+Briefing=Hold the river crossing
+BriefingImage=td_gdi_portrait
+
+[Objectives]
+1=Destroy the Nod base
+"#;
+        let mission = Mission::from_ini_str(ini).unwrap();
+        assert_eq!(mission.briefing, "Hold the river crossing");
+        assert_eq!(mission.briefing_image.as_deref(), Some("td_gdi_portrait"));
+
+        // The `BriefPicture` spelling is accepted as an alias.
+        let aliased = "[Basic]\nName=Nod 01\nBriefPicture=td_nod_emblem\n";
+        assert_eq!(
+            Mission::from_ini_str(aliased)
+                .unwrap()
+                .briefing_image
+                .as_deref(),
+            Some("td_nod_emblem")
         );
     }
 

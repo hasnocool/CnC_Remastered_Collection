@@ -65,6 +65,14 @@ where to find it.
 | Helicopter flight, ammo and helipad rearm | AIRCRAFT.CPP | `Unit::is_aircraft`, `Game::update_aircraft` |
 | Helipad factory (produces aircraft) | BDATA.CPP | `StructureType::Helipad`, `ProductionKind::Aircraft` |
 | Refinery/Silo storage capacity | BDATA.CPP | `StructureStats::capacity`, `Game::refresh_house_power` |
+| Commando / engineer `InfantryTypeClass` rows | IDATA.CPP (563-597 / 486-528) | `td_rules::UnitType::{Commando, Engineer}`, `Unit::{is_commando, is_engineer}` |
+| Commando action rewrite (`ACTION_SABOTAGE`) | INFANTRY.CPP:2891-2901 | `Game::order_sabotage` |
+| `Mission_Sabotage` planting (IsGoingToBlow / CountDown(20) / WhomToRepay / Scatter) | INFANTRY.CPP:717-735 | `Building::plant_c4`, `Game::update_special_missions` |
+| Demolition timeout (`IsGoingToBlow && CountDown.Expired()` → 5000 WARHEAD_FIRE) | BUILDING.CPP:1229-1246 | `Building::detonate` / `Building::sabotage_damage` in `Game::update_special_missions` |
+| `Mission_Capture` (`tech->Captured(House); Delete_This();`) | INFANTRY.CPP:669-698 | `Game::order_capture` / `Building::capture` / `Game::consume_unit` |
+| `BuildingClass::Can_Capture` (`Class->IsCaptureable`) | BUILDING.CPP:3873-3885 | `StructureStats::is_captureable` + `Building::is_captureable` |
+| `Building` demolition / capture flags | BUILDING.H:95-144 | `Building::{is_going_to_blow, count_down, whom_to_repay, is_captured}` |
+| Lockstep `Command::Sabotage` apply arm | network.rs `Command::Sabotage` | `Game::apply_command` |
 
 ## Deliberate differences
 
@@ -94,6 +102,21 @@ where to find it.
 - Harvester steps go through House tiberium storage (25 credits per step,
   capped by refinery/silo capacity) and spending consumes tiberium before
   cash, as in HouseClass::Spend_Money.
+- Commando sabotage and engineer capture are ported as mission-level flows:
+  the unit approaches with the ordinary move order and the charge is armed when
+  it enters the building cell (`Game::update_special_missions`), which is the
+  Per_Cell_Process check without the lepton-accurate centre crossing.
+  `Special.IsScatter` is modelled as "the mission ends, the unit goes idle",
+  because the Rust port has no Scatter flee movement; after detonation the
+  building does not run the fire/burning animation chain, and `WhomToRepay` is
+  stored for kill credit but the TD port has no kill-credit ledger to pay it
+  out. Capturing keeps the crew/`IsCaptured` flag and moves the structure in
+  the house registries, but does not replay the capture animation or the
+  production reset.
+- The launcher UI does not offer the two new special rows on the sidebar yet
+  and has no click-to-order path for sabotage/capture; `Game::order_sabotage`,
+  `Game::order_capture` and `Game::apply_command` are the headless entry points
+  (network/replay/tests) until the UI is wired up.
 
 ## Presentation assets
 
@@ -146,3 +169,14 @@ and round-tripped as PNG + JSON. Two pipelines write the same atlas format
   placement validation, aircraft ammo/rearm/overflight, homing re-aim,
   primary/secondary weapon selection, Ion Cannon/Nuke charge and blasts, and
   dynamic cell reservation.
+- `td_rules` tests pin the commando and engineer rows against IDATA.CPP, the
+  20 s / 5000-point C4 constants against INFANTRY.CPP and BUILDING.CPP, and the
+  BDATA.CPP `IsCaptureable` column for every structure row.
+- `unit` tests pin the commando/engineer role flags and class ids.
+- `building` tests pin the `IsGoingToBlow`/`CountDown`/`WhomToRepay` trio, the
+  WARHEAD_FIRE detonation damage and the ownership transfer on capture.
+- `game` tests cover the full commando sabotage flow (approach → plant C4 →
+  countdown → 5000-point detonation), the engineer capture flow (owner transfer
+  plus consumption), the BDATA captureable gate, `Command::Sabotage` round-trip
+  through the network codec plus `Game::apply_command`, and that two identical
+  games tick the same command stream to identical sabotage state.

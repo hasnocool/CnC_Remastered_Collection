@@ -71,6 +71,15 @@ pub struct Unit {
     pub harvest_timer: Fixed16_16,
     /// True while the harvester is unloading at a refinery.
     pub unloading: bool,
+    /// IDATA.CPP commando row (INFANTRY_RAMBO): may sabotage a building with
+    /// vertical C4 (INFANTRY.CPP `What_Action` -> `ACTION_SABOTAGE`).
+    pub is_commando: bool,
+    /// IDATA.CPP engineer row ("E6"): `IsCapture` is true, so this infantry can
+    /// take a building over (INFANTRY.CPP `MISSION_CAPTURE`).
+    pub is_engineer: bool,
+    /// `MISSION_SABOTAGE` / `MISSION_CAPTURE` destination: index into
+    /// `Game::buildings`. None for every ordinary unit.
+    pub special_target: Option<usize>,
     /// AADATA.CPP aircraft flag.
     pub is_aircraft: bool,
     /// Remaining ammunition (AADATA.CPP).
@@ -82,6 +91,9 @@ pub struct Unit {
     pub track_phase: f32,
     /// Countdown between rearm steps while docked at a helipad.
     pub rearm_timer: Fixed16_16,
+    /// Seconds of halved incoming damage granted by a crate armor bonus.
+    #[serde(default)]
+    pub shield: Fixed16_16,
 }
 
 impl Unit {
@@ -120,12 +132,16 @@ impl Unit {
             tiberium: 0,
             harvest_timer: Fixed16_16::ZERO,
             unloading: false,
+            is_commando: unit_type == UnitType::Commando,
+            is_engineer: unit_type == UnitType::Engineer,
+            special_target: None,
             is_aircraft: stats.is_aircraft,
             ammo: stats.ammo,
             max_ammo: stats.ammo,
             rotor_phase: 0.0,
             track_phase: 0.0,
             rearm_timer: Fixed16_16::ZERO,
+            shield: Fixed16_16::ZERO,
         }
     }
 
@@ -204,6 +220,12 @@ impl Unit {
     }
 
     pub fn take_damage(&mut self, amount: Fixed16_16) {
+        // Crate armor bonus halves incoming damage while the shield holds.
+        let amount = if self.shield > Fixed16_16::ZERO {
+            amount * Fixed16_16::from_f32(0.5)
+        } else {
+            amount
+        };
         self.health = (self.health - amount).max(Fixed16_16::ZERO);
     }
 
@@ -505,5 +527,32 @@ mod tests {
             facing_difference(unit.turret_facing, -std::f32::consts::FRAC_PI_2).abs()
                 < std::f32::consts::FRAC_PI_2
         );
+    }
+
+    #[test]
+    fn special_infantry_carry_role_flags() {
+        // IDATA.CPP:582 marks the commando `Is a leader type?` and keeps
+        // `Can this infantry type capture a building?` false; the engineer row
+        // (IDATA.CPP:501) is the mirror image.
+        let commando = Unit::new(UnitType::Commando, Vec2::zero(), 0);
+        assert!(commando.is_commando);
+        assert!(!commando.is_engineer);
+        assert_eq!(commando.class_id, ClassId::InfantryE10);
+        assert!(
+            commando.weapon.is_some(),
+            "WEAPON_RIFLE row keeps its primary weapon"
+        );
+
+        let engineer = Unit::new(UnitType::Engineer, Vec2::zero(), 0);
+        assert!(engineer.is_engineer);
+        assert!(!engineer.is_commando);
+        assert_eq!(engineer.class_id, ClassId::InfantryE6);
+        assert!(engineer.weapon.is_none(), "WEAPON_NONE carries no weapon");
+
+        // Ordinary infantry keep neither role and start without a mission.
+        let rifleman = Unit::new(UnitType::InfantryE1, Vec2::zero(), 0);
+        assert!(!rifleman.is_commando);
+        assert!(!rifleman.is_engineer);
+        assert_eq!(rifleman.special_target, None);
     }
 }

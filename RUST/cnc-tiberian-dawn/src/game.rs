@@ -14,15 +14,17 @@ use std::sync::OnceLock;
 /// (`CNC_TILESET_DIR` / `CNC_TILESET_PALETTE` environment overrides apply).
 static TD_TILESET: OnceLock<Option<cnc_asset::tileset_pack::TilesetPack>> = OnceLock::new();
 
-use crate::ai::AI;
+use crate::ai::{run_expert_ai, AIDifficulty, AI};
 use crate::building::Building;
 use crate::house::House;
 use crate::house::ProductionItem;
 use crate::map::{Map, TILE_SIZE};
 use crate::mission::{Action, Mission, MissionOutcome};
+use crate::network::Command;
 use crate::pathfind::find_path;
+use crate::powerup::{self, PowerupKind, PowerupState};
 use crate::td_rules::{
-    default_structure_owner, default_unit_owner, leptons_to_px, owner_token_allows,
+    default_structure_owner, default_unit_owner, leptons_to_px, modify_damage, owner_token_allows,
     prerequisite_token_met, production_seconds, px_to_leptons, tiberium_stage, unit_class_id,
     unit_type_for_class, ProductionKind, StructureType, UnitType, WarheadType, WeaponType,
     EXPLOSION_RANGE_LEPTONS, HARVESTER_STEP_COUNT, HARVESTER_STEP_CREDITS,
@@ -39,6 +41,28 @@ pub struct Blast {
     pub max_ttl: Fixed16_16,
     pub color: [f32; 4],
 }
+
+/// `HOUSE.CPP` `SpeakAttackDelay`: the remaster sets 35 s
+/// (`TICKS_PER_MINUTE/2 + TICKS_PER_SECOND*5`), not the original 2 minutes.
+const BASE_ATTACK_SPEAK_DELAY: f32 = 35.0;
+/// `HOUSE.CPP` `SpeakMoneyDelay` for the "insufficient funds" line: 1 minute.
+const INSUFFICIENT_FUNDS_SPEAK_DELAY: f32 = 60.0;
+/// `HOUSE.CPP` threshold below which `VOX_NO_CASH` fires.
+const INSUFFICIENT_FUNDS_THRESHOLD: i32 = 100;
+
+/// `ACTION_AIRSTRIKE` damage per strafing pass (ANIM.CPP strafing run).
+const AIRSTRIKE_DAMAGE: i32 = 200;
+/// `ACTION_NUKE` blast radius, matching `fire_nuke`'s 4-cell reach.
+const NUKE_RADIUS_PX: f32 = TILE_SIZE * 4.0;
+/// `ACTION_NUKE` centre-cell damage (ANIM.CPP ANIM_ATOM_BLAST 1000 / 3).
+const NUKE_DAMAGE: i32 = 333;
+/// `ACTION_ION` damage, matching `fire_ion_cannon` (ANIM_ION_CANNON).
+const ION_DAMAGE: i32 = 600;
+/// Infantry `ACTION_DZ` lands on a 3-wide block.
+const DROPZONE_UNITS: usize = 6;
+/// Alpha of the fog drawn over explored-but-not-visible cells; unexplored
+/// cells are drawn fully black.
+pub const SHROUD_MEMORY_ALPHA: f32 = 0.55;
 
 /// Missile launch animation from a structure to the target.
 #[derive(Clone, Copy, Debug)]
@@ -142,6 +166,41 @@ pub struct SidebarOption {
 }
 
 /// The playable game session: simulation state plus rendering entry point.
+/// HOUSE.CPP SourceType: where a house reinforcements arrive from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum ReinforcementEdge {
+    #[default]
+    North,
+    East,
+    South,
+    West,
+    /// Dropped anywhere on the map.
+    Air,
+    /// Dropped where the player can see.
+    Visible,
+    /// Dropped at the enemy base.
+    EnemyBase,
+    /// Dropped at a friendly base.
+    HomeBase,
+}
+
+impl ReinforcementEdge {
+    /// Parse a [Houses] Edge= token (Name_From_Source spelling).
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name.trim().to_ascii_uppercase().as_str() {
+            "NORTH" | "N" => Self::North,
+            "EAST" | "E" => Self::East,
+            "SOUTH" | "S" => Self::South,
+            "WEST" | "W" => Self::West,
+            "AIR" => Self::Air,
+            "VISIBLE" => Self::Visible,
+            "ENEMYBASE" => Self::EnemyBase,
+            "HOMEBASE" => Self::HomeBase,
+            "" => Self::North,
+            _ => return None,
+        })
+    }
+}
 pub struct Game {
     pub map: Map,
     pub houses: Vec<House>,
@@ -170,6 +229,10 @@ pub struct Game {
     pub aircraft_rearmed: u64,
     /// Shots fired with a secondary weapon (telemetry).
     pub secondary_shots: u64,
+    /// CRATE.CPP crate powerups (deterministic spawns + drive-over pickups).
+    pub powerups: PowerupState,
+    /// Per-house expert AI state (RA `Expert_AI` port; index == house index).
+    pub ai: Vec<AI>,
     /// Active superweapon blasts (visual only).
     pub blasts: Vec<Blast>,
     /// Missile launches in flight (visual; damage is scheduled separately).
@@ -179,6 +242,30 @@ pub struct Game {
     /// Optional Rules.ini overrides. An empty database falls back to the
     /// hard-coded TD stats ported from UDATA/BDATA/CONST.CPP.
     pub rules: RulesDatabase,
+    /// Per-house fog of war / shroud (`CELL.H` IsVisible/IsMapped).
+    pub shroud: cnc_core::Shroud,
+    /// `[TeamTypes]` consumer state. Empty unless a scenario defines teams.
+    pub team_manager: crate::ai::TeamManager,
+    /// EVA speech queue (`Speak`/`Speak_AI`). Game logic posts events here;
+    /// the audio layer drains it.
+    pub eva: cnc_audio::EvaQueue,
+    /// Per-house low-power announcement latch, so EVA speaks on the
+    /// transition into low power rather than every recalculation.
+    pub(crate) low_power_announced: Vec<bool>,
+    /// Cumulative kills per (house, asset class). Fed by the death
+    /// announcement scan, which already samples every alive-to-dead edge.
+    pub kills: std::collections::HashMap<(u8, crate::mission::Eliminated), i64>,
+    /// Cells newly explored by the player since the last trigger evaluation.
+    /// `EVENT_DISCOVERED` reads this; it is drained each tick so a trigger
+    /// fires once per discovery rather than every frame thereafter.
+    pub discovered_cells: std::collections::HashSet<Vec2i>,
+    /// Units/buildings whose destruction has already been announced.
+    pub(crate) dead_units_announced: Vec<usize>,
+    pub(crate) dead_buildings_announced: Vec<usize>,
+    /// Elapsed time when "base under attack" may next be spoken.
+    pub(crate) next_base_attack_speak: Fixed16_16,
+    /// Elapsed time when "insufficient funds" may next be spoken.
+    pub(crate) next_funds_speak: Fixed16_16,
     pub(crate) pending_blasts: Vec<PendingBlast>,
 }
 
@@ -215,12 +302,87 @@ impl Game {
             aircraft_shots: 0,
             aircraft_rearmed: 0,
             secondary_shots: 0,
+            powerups: PowerupState::new(),
+            ai: Vec::new(),
             blasts: Vec::new(),
             strikes: Vec::new(),
             beams: Vec::new(),
             rules: RulesDatabase::default(),
+            // Skirmish starts fully revealed; missions may install a shrouded
+            // grid via `enable_shroud`.
+            shroud: cnc_core::Shroud::fully_revealed(width, height),
+            team_manager: crate::ai::TeamManager::default(),
+            eva: cnc_audio::EvaQueue::new(),
+            low_power_announced: Vec::new(),
+            kills: std::collections::HashMap::new(),
+            discovered_cells: std::collections::HashSet::new(),
+            dead_units_announced: Vec::new(),
+            dead_buildings_announced: Vec::new(),
+            next_base_attack_speak: Fixed16_16::ZERO,
+            next_funds_speak: Fixed16_16::ZERO,
             pending_blasts: Vec::new(),
         }
+    }
+
+    /// Start with fog of war: nothing revealed until `refresh_shroud` runs.
+    pub fn enable_shroud(&mut self) {
+        self.shroud = cnc_core::Shroud::new(self.map.width, self.map.height);
+    }
+
+    /// Recompute every house's current sight from its units and buildings.
+    ///
+    /// Clears last tick's visibility first, then reveals a square of
+    /// `sight_range` cells around each live object. Mapped history persists.
+    /// Sight radius for a unit: Rules.ini `Sight=` when present, else the
+    /// built-in UDATA stats table.
+    pub fn unit_sight_range(&self, unit: &Unit) -> i32 {
+        let name = unit.unit_type.ini_name();
+        self.rules
+            .type_rule(name)
+            .and_then(|rule| rule.sight)
+            .map(|sight| sight.clamp(0, cnc_core::shroud::MAX_SIGHT_RADIUS))
+            .unwrap_or(unit.unit_type.stats().sight_range)
+    }
+
+    /// Sight radius for a building, under the same rules-first rule.
+    pub fn structure_sight_range(&self, building: &Building) -> i32 {
+        let name = building.structure.ini_name();
+        self.rules
+            .type_rule(name)
+            .and_then(|rule| rule.sight)
+            .map(|sight| sight.clamp(0, cnc_core::shroud::MAX_SIGHT_RADIUS))
+            .unwrap_or(building.structure.stats().sight_range)
+    }
+    pub fn refresh_shroud(&mut self) {
+        // Snapshot the mapped history so the cells that become mapped during
+        // this refresh can be reported as new discoveries (EVENT_DISCOVERED).
+        let before = self.shroud.clone();
+        self.shroud.clear_visible();
+
+        let sight: Vec<(u8, cnc_core::Vec2i, i32)> = self
+            .units
+            .iter()
+            .filter(|unit| unit.is_alive())
+            .map(|unit| {
+                // Rules.ini Sight= wins over the built-in stats table.
+                let range = self.unit_sight_range(unit);
+                (unit.owner, Self::world_cell(unit.position), range)
+            })
+            .chain(self.buildings.iter().filter(|b| b.is_alive()).map(|b| {
+                let range = self.structure_sight_range(b);
+                (b.owner, Self::world_cell(b.position), range)
+            }))
+            .collect();
+
+        for (house, cell, range) in sight {
+            self.shroud.reveal(usize::from(house), cell, range);
+        }
+        self.record_discoveries(&before);
+    }
+
+    /// May `house` target `cell` right now? (Used by scoring/targeting rules.)
+    pub fn can_see(&self, house: u8, cell: cnc_core::Vec2i) -> bool {
+        self.shroud.can_target(usize::from(house), cell)
     }
 
     /// Build a game with Rules.ini overrides applied.
@@ -485,8 +647,17 @@ impl Game {
         self.units.push(orca);
 
         // A small Nod patrol so attack orders have a target. The first one is
-        // a grenadier so the demo shows arcing projectiles.
-        for (index, (cx, cy)) in [(33i32, 24i32), (35, 27), (32, 29)].into_iter().enumerate() {
+        // a grenadier so the demo shows arcing projectiles. Coordinates are
+        // resolved relative to the map, because the demo may run on any size
+        // (the original hard-coded cells sat off a 32x32 board).
+        let max_x = self.map.width.saturating_sub(1) as i32;
+        let max_y = self.map.height.saturating_sub(1) as i32;
+        let patrol = [
+            ((max_x * 33) / 40, (max_y * 24) / 40),
+            ((max_x * 35) / 40, (max_y * 27) / 40),
+            ((max_x * 32) / 40, (max_y * 29) / 40),
+        ];
+        for (index, (cx, cy)) in patrol.into_iter().enumerate() {
             let mut unit = Unit::new(UnitType::InfantryE1, Self::cell(cx, cy), 1);
             if index == 0 {
                 unit.equip_weapon(Weapon::from_type_with_rules(
@@ -508,6 +679,8 @@ impl Game {
 
     /// Recompute each house power from its structures (BDATA.CPP POWER/DRAIN).
     pub fn refresh_house_power(&mut self) {
+        // Keep the announcement latch aligned with the house count.
+        self.low_power_announced.resize(self.houses.len(), false);
         for (owner, house) in self.houses.iter_mut().enumerate() {
             let mut generated = 0;
             let mut drain = 0;
@@ -529,6 +702,15 @@ impl Game {
             if house.tiberium > house.capacity {
                 house.tiberium = house.capacity;
             }
+            // HOUSE.CPP announces low power only on the transition into it,
+            // not on every recalculation.
+            let low_now = house.power < house.max_power;
+            if low_now && !self.low_power_announced[owner] {
+                if owner as u8 == self.player_owner {
+                    self.eva.speak(cnc_audio::EvaLine::LowPower);
+                }
+            }
+            self.low_power_announced[owner] = low_now;
         }
     }
 
@@ -553,8 +735,43 @@ impl Game {
         })
     }
 
+    /// HOUSE.CPP `MaxUnit`: has the house room for one more unit?
+    ///
+    /// Counts live units plus everything still queued, so a burst of orders
+    /// cannot overshoot the cap before production lands.
+    pub fn within_unit_limit(&self, owner: u8) -> bool {
+        let Some(house) = self.houses.get(owner as usize) else {
+            return false;
+        };
+        let alive = self
+            .units
+            .iter()
+            .filter(|unit| unit.owner == owner && unit.is_alive())
+            .count() as u32;
+        let queued = house.production_queue.len() as u32;
+        alive + queued < house.max_units
+    }
+
+    /// HOUSE.CPP `MaxBuilding`: room for one more structure?
+    pub fn within_building_limit(&self, owner: u8) -> bool {
+        let Some(house) = self.houses.get(owner as usize) else {
+            return false;
+        };
+        let alive = self
+            .buildings
+            .iter()
+            .filter(|building| building.owner == owner && building.is_alive())
+            .count() as u32;
+        let queued = house
+            .production_queue
+            .iter()
+            .filter(|item| item.class_id.is_building())
+            .count() as u32;
+        alive + queued < house.max_buildings
+    }
     pub fn can_queue_unit(&self, owner: u8, unit_type: UnitType) -> bool {
-        self.meets_tech_level(owner, self.unit_tech_level(unit_type))
+        self.within_unit_limit(owner)
+            && self.meets_tech_level(owner, self.unit_tech_level(unit_type))
             && self.meets_prerequisites(owner, unit_type.ini_name())
             && self.has_producer(owner, Self::unit_factory_kind(unit_type))
             && self
@@ -564,7 +781,8 @@ impl Game {
     }
 
     pub fn can_queue_building(&self, owner: u8, structure: StructureType) -> bool {
-        self.meets_tech_level(owner, self.building_tech_level(structure))
+        self.within_building_limit(owner)
+            && self.meets_tech_level(owner, self.building_tech_level(structure))
             && self.meets_prerequisites(owner, structure.ini_name())
             && self.owns_structure(owner, StructureType::ConstructionYard)
             && self
@@ -661,6 +879,17 @@ impl Game {
     pub fn queue_unit(&mut self, owner: u8, unit_type: UnitType) -> bool {
         let cost = self.unit_cost(unit_type);
         if !self.can_queue_unit(owner, unit_type) {
+            // Distinguish "no money" from "no tech": can_queue_unit folds both
+            // into a single false, so re-check the purse to pick the line.
+            let broke = self
+                .houses
+                .get(owner as usize)
+                .is_none_or(|house| !house.can_afford(cost));
+            if broke && owner == self.player_owner {
+                self.eva.speak(cnc_audio::EvaLine::InsufficientFunds);
+            } else if owner == self.player_owner {
+                self.eva.speak(cnc_audio::EvaLine::UnableToBuildMore);
+            }
             return false;
         }
 
@@ -738,6 +967,18 @@ impl Game {
     pub fn queue_building(&mut self, owner: u8, structure: StructureType) -> bool {
         let cost = self.building_cost(structure);
         if !self.can_queue_building(owner, structure) {
+            let broke = self
+                .houses
+                .get(owner as usize)
+                .is_none_or(|house| !house.can_afford(cost));
+            if owner == self.player_owner {
+                let line = if broke {
+                    cnc_audio::EvaLine::InsufficientFunds
+                } else {
+                    cnc_audio::EvaLine::UnableToBuildMore
+                };
+                self.eva.speak(line);
+            }
             return false;
         }
 
@@ -745,6 +986,9 @@ impl Game {
             return false;
         };
         if !house.can_afford(cost) {
+            if owner == self.player_owner {
+                self.eva.speak(cnc_audio::EvaLine::InsufficientFunds);
+            }
             return false;
         }
         let seconds = production_seconds(cost, house.power, house.max_power);
@@ -824,6 +1068,8 @@ impl Game {
     }
 
     fn update_superweapons(&mut self, delta_time: Fixed16_16) {
+        let mut ion_ready_line = false;
+        let mut nuke_ready_line = false;
         for (owner, house) in self.houses.iter_mut().enumerate() {
             let ion_ready = self.buildings.iter().any(|building| {
                 building.owner as usize == owner
@@ -835,7 +1081,24 @@ impl Game {
                     && building.is_alive()
                     && building.structure_type() == Some(StructureType::TempleOfNod)
             });
+            let ion_was_ready = house.ion_charge >= Fixed16_16::ONE;
+            let nuke_was_ready = house.nuke_charge >= Fixed16_16::ONE;
             house.charge_superweapons(ion_ready, temple_ready, delta_time);
+            // HOUSE.CPP passes VOX_ION_READY / VOX_NUKE_AVAILABLE as the
+            // "became available" lines: speak on the charging→ready edge only.
+            if owner as u8 == self.player_owner {
+                if !ion_was_ready && house.ion_charge >= Fixed16_16::ONE {
+                    ion_ready_line = true;
+                }
+                if !nuke_was_ready && house.nuke_charge >= Fixed16_16::ONE {
+                    nuke_ready_line = true;
+                }
+            }
+        }
+        if ion_ready_line {
+            self.eva.speak(cnc_audio::EvaLine::IonCannonReady);
+        } else if nuke_ready_line {
+            self.eva.speak(cnc_audio::EvaLine::NuclearWeaponAvailable);
         }
     }
 
@@ -1059,6 +1322,106 @@ impl Game {
         }
     }
 
+    /// Announce newly destroyed enemy assets once per frame.
+    ///
+    /// Mirrors `FOOT.CPP`/`BUILDING.CPP` `Death_Announcement`: the player hears
+    /// about losses on their own side (`UNIT_LOST`/`STRUCTURE_LOST`) and about
+    /// kills (`ENEMY_UNIT`/`ENEMY_STRUCTURE`). Deaths reach the simulation
+    /// through several paths, so this samples the alive→dead transition rather
+    /// than hooking every damage site.
+    fn update_death_announcements(&mut self) {
+        let mut spoken: Option<cnc_audio::EvaLine> = None;
+        for index in 0..self.units.len() {
+            if self.units[index].is_alive() {
+                continue;
+            }
+            if self.dead_units_announced.contains(&index) {
+                continue;
+            }
+            self.dead_units_announced.push(index);
+            let victim = self.units[index].owner;
+            let line = if victim == self.player_owner {
+                cnc_audio::EvaLine::UnitLost
+            } else {
+                // Credit the kill to the opposing house.
+                let killer = if victim == 0 { 1 } else { 0 };
+                *self
+                    .kills
+                    .entry((killer, crate::mission::Eliminated::Units))
+                    .or_insert(0) += 1;
+                cnc_audio::EvaLine::EnemyUnitDestroyed
+            };
+            spoken.get_or_insert(line);
+        }
+        for index in 0..self.buildings.len() {
+            if self.buildings[index].is_alive() {
+                continue;
+            }
+            if self.dead_buildings_announced.contains(&index) {
+                continue;
+            }
+            self.dead_buildings_announced.push(index);
+            let victim = self.buildings[index].owner;
+            let line = if victim == self.player_owner {
+                cnc_audio::EvaLine::StructureLost
+            } else {
+                let killer = if victim == 0 { 1 } else { 0 };
+                *self
+                    .kills
+                    .entry((killer, crate::mission::Eliminated::Buildings))
+                    .or_insert(0) += 1;
+                cnc_audio::EvaLine::EnemyStructureDestroyed
+            };
+            spoken.get_or_insert(line);
+        }
+        if let Some(line) = spoken {
+            self.eva.speak(line);
+        }
+    }
+
+    /// `HOUSE.CPP` `Attacked()`: warn when a player structure is taking damage.
+    ///
+    /// Gated by the same speech cooldown the remaster uses so a sustained
+    /// assault does not spam the line.
+    fn announce_base_attack(&mut self) {
+        if self.elapsed < self.next_base_attack_speak {
+            return;
+        }
+        let under_attack = self.buildings.iter().any(|building| {
+            building.owner == self.player_owner
+                && building.is_alive()
+                && building.health < building.max_health
+        });
+        if under_attack {
+            self.eva.speak(cnc_audio::EvaLine::BaseUnderAttack);
+            self.next_base_attack_speak =
+                self.elapsed + Fixed16_16::from_f32(BASE_ATTACK_SPEAK_DELAY);
+        }
+    }
+
+    /// `HOUSE.CPP` `SpeakMoneyDelay`: warn when the player cannot afford to
+    /// build. Requires at least one factory, exactly as the original does.
+    fn announce_insufficient_funds(&mut self) {
+        if self.elapsed < self.next_funds_speak {
+            return;
+        }
+        let Some(house) = self.houses.get(self.player_owner as usize) else {
+            return;
+        };
+        if house.credits >= INSUFFICIENT_FUNDS_THRESHOLD {
+            return;
+        }
+        let has_factory = self
+            .buildings
+            .iter()
+            .any(|building| building.owner == self.player_owner && building.is_alive());
+        if !has_factory {
+            return;
+        }
+        self.eva.speak(cnc_audio::EvaLine::InsufficientFunds);
+        self.next_funds_speak = self.elapsed + Fixed16_16::from_f32(INSUFFICIENT_FUNDS_SPEAK_DELAY);
+    }
+
     /// Advance production queues and spawn completed units at a factory.
     pub fn update_production(&mut self, delta_time: Fixed16_16) {
         let mut completed = Vec::new();
@@ -1070,6 +1433,11 @@ impl Game {
 
         for (owner, item) in completed {
             if let Some(structure) = crate::td_rules::StructureType::from_class_id(item.class_id) {
+                // BUILDING.CPP: a finished structure announces "construction
+                // complete" to the player who owns it.
+                if owner == self.player_owner {
+                    self.eva.speak(cnc_audio::EvaLine::ConstructionComplete);
+                }
                 self.ready_buildings.push((owner, structure));
                 continue;
             }
@@ -1089,9 +1457,38 @@ impl Game {
             }
             self.units.push(unit);
             self.units_produced += 1;
+            // UNIT.CPP: a completed unit announces "unit ready" to its owner.
+            if owner == self.player_owner {
+                self.eva.speak(cnc_audio::EvaLine::UnitReady);
+            }
         }
     }
 
+    /// Map-edge entry point for a house with no factory, per its `Edge=`.
+    ///
+    /// `Air`, `Visible` and the base-relative modes have no distinct
+    /// spawn point of their own, so they fall back to the map centre; only
+    /// the four compass edges actually move the spawn.
+    pub fn edge_entry_cell(&self, owner: u8) -> (i32, i32) {
+        let cx = self.map.width as i32 / 2;
+        let cy = self.map.height as i32 / 2;
+        let edge = self
+            .houses
+            .get(owner as usize)
+            .map(|house| house.edge)
+            .unwrap_or_default();
+        match edge {
+            ReinforcementEdge::North => (cx, 1),
+            ReinforcementEdge::South => (cx, self.map.height as i32 - 2),
+            ReinforcementEdge::West => (1, cy),
+            ReinforcementEdge::East => (self.map.width as i32 - 2, cy),
+            // Air / base-relative drops have no fixed entry point.
+            ReinforcementEdge::Air
+            | ReinforcementEdge::Visible
+            | ReinforcementEdge::EnemyBase
+            | ReinforcementEdge::HomeBase => (cx, cy),
+        }
+    }
     fn spawn_position(&self, owner: u8) -> Vec2 {
         let factory = self.buildings.iter().find(|building| {
             building.owner == owner
@@ -1107,11 +1504,15 @@ impl Game {
         });
 
         let (cell_x, cell_y) = match factory {
+            // Clear the factory footprint by two cells.
             Some(building) => {
                 let cell = Self::building_cell(building);
-                (cell.x, cell.y)
+                (cell.x + 2, cell.y + 2)
             }
-            None => (self.map.width as i32 / 2, self.map.height as i32 / 2),
+            // With no factory the reinforcement enters from the house's
+            // configured [Houses] Edge= (HOUSE.CPP SourceType). No offset:
+            // pushing inward would stop it being an edge entry.
+            None => self.edge_entry_cell(owner),
         };
 
         let used: Vec<(i32, i32)> = self
@@ -1119,7 +1520,7 @@ impl Game {
             .iter()
             .map(|cell| (cell.x, cell.y))
             .collect();
-        let (x, y) = self.nearby_cell(cell_x + 2, cell_y + 2, &used);
+        let (x, y) = self.nearby_cell(cell_x, cell_y, &used);
         Self::cell_center(x, y)
     }
 
@@ -1131,14 +1532,22 @@ impl Game {
             if unit.reload > Fixed16_16::ZERO {
                 unit.reload = (unit.reload - delta_time).max(Fixed16_16::ZERO);
             }
+            if unit.shield > Fixed16_16::ZERO {
+                unit.shield = (unit.shield - delta_time).max(Fixed16_16::ZERO);
+            }
         }
 
         self.update_production(delta_time);
+        self.update_death_announcements();
+        self.announce_base_attack();
+        self.announce_insufficient_funds();
         self.update_superweapons(delta_time);
         self.update_blasts(delta_time);
         self.update_strikes(delta_time);
         self.update_harvesters(delta_time);
         self.update_aircraft(delta_time);
+        self.update_special_missions(delta_time);
+        self.update_defence_combat(delta_time);
         self.update_auto_acquire();
         self.update_facings(delta_time);
         self.update_attacks();
@@ -1181,6 +1590,8 @@ impl Game {
         }
 
         self.update_projectiles(delta_time);
+        self.update_powerups();
+        self.update_house_ais(delta_time);
         self.update_mission(delta_time);
 
         // MAP.CPP grows/spreads tiberium over time rather than every tick.
@@ -1188,6 +1599,173 @@ impl Game {
         if self.tiberium_tick.is_multiple_of(30) {
             self.map.grid.tiberium_cycle();
         }
+    }
+
+    /// Enable the expert AI for every non-player house (skirmish and
+    /// quickmatch convenience; campaign scenarios stay trigger-driven
+    /// unless this is called explicitly).
+    pub fn enable_enemy_ai(&mut self, difficulty: AIDifficulty) {
+        for (index, house) in self.houses.iter_mut().enumerate() {
+            if index as u8 != self.player_owner {
+                house.ai_enabled = true;
+            }
+        }
+        if self.ai.len() < self.houses.len() {
+            for index in self.ai.len()..self.houses.len() {
+                self.ai.push(AI::new(index as u8, difficulty));
+            }
+        }
+    }
+
+    /// CRATE.CPP: advance crate spawns and apply drive-over pickups.
+    fn update_powerups(&mut self) {
+        let pickups = self.powerups.tick(&self.map.grid, &self.units);
+        for pickup in pickups {
+            match pickup.kind {
+                PowerupKind::Credits => {
+                    if let Some(house) = self.houses.get_mut(pickup.owner as usize) {
+                        house.add_credits(powerup::CREDITS_BONUS);
+                    }
+                }
+                PowerupKind::Unit => {
+                    let position = Self::cell_center(pickup.cell.x, pickup.cell.y);
+                    let unit = Unit::new(UnitType::InfantryE1, position, pickup.owner);
+                    let id = self.units.len() as u32;
+                    if let Some(house) = self.houses.get_mut(pickup.owner as usize) {
+                        house.add_unit(id);
+                    }
+                    self.units.push(unit);
+                    self.units_produced += 1;
+                }
+                PowerupKind::Armor => {
+                    if let Some(unit) = self.units.get_mut(pickup.unit_index) {
+                        unit.shield = Fixed16_16::from_f32(powerup::SHIELD_SECONDS);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Drive the per-house expert AI (RA `Expert_AI` port). AI state is
+    /// indexed parallel to `houses`; only non-player houses with
+    /// `ai_enabled` act.
+    fn update_house_ais(&mut self, delta_time: Fixed16_16) {
+        if self.ai.len() < self.houses.len() {
+            for index in self.ai.len()..self.houses.len() {
+                self.ai.push(AI::new(index as u8, AIDifficulty::Normal));
+            }
+        }
+        let mut ais = std::mem::take(&mut self.ai);
+        for (index, ai) in ais.iter_mut().enumerate() {
+            let owner = index as u8;
+            if owner == self.player_owner {
+                continue;
+            }
+            let enabled = self
+                .houses
+                .get(owner as usize)
+                .is_some_and(|house| house.ai_enabled);
+            if !enabled {
+                continue;
+            }
+            run_expert_ai(self, ai, delta_time);
+            crate::ai::run_team_manager(self, owner, ai.tick_counter);
+        }
+        self.ai = ais;
+    }
+
+    /// Order AI-owned units to attack an enemy unit (thin pub wrapper over
+    /// the private attack dispatcher for `run_expert_ai`).
+    /// World position at the centre of a cell index (row-major).
+    pub fn cell_center_position(&self, cell: i32) -> Vec2 {
+        let width = self.map.width.max(1) as i32;
+        let cell = cell.max(0);
+        Self::cell_center(cell % width, cell / width)
+    }
+
+    /// Place a fresh unit of `unit_type` for `owner` and return its index.
+    ///
+    /// Used by scenario loading and tests; production goes through
+    /// `queue_unit` and the placement path instead.
+    pub fn spawn_unit_at(&mut self, owner: u8, unit_type: UnitType, cell: Vec2i) -> u32 {
+        let position = Self::cell_center(cell.x, cell.y);
+        let unit = Unit::new(unit_type, position, owner);
+        let id = self.units.len() as u32;
+        if let Some(house) = self.houses.get_mut(owner as usize) {
+            house.add_unit(id);
+        }
+        self.units.push(unit);
+        id
+    }
+
+    /// Position of one unit by index, if it is alive.
+    pub fn unit_position(&self, unit_index: u32) -> Option<Vec2> {
+        self.units
+            .get(unit_index as usize)
+            .filter(|unit| unit.is_alive())
+            .map(|unit| unit.position)
+    }
+
+    /// `true` when the house has an unassigned, living unit of `class_id`.
+    pub fn has_free_unit_of_class(&self, owner: u8, class_id: ClassId) -> bool {
+        let claimed = self.team_assigned_units();
+        self.units.iter().enumerate().any(|(index, unit)| {
+            unit.owner == owner
+                && unit.is_alive()
+                && unit.class_id == class_id
+                && !claimed.contains(&index)
+        })
+    }
+
+    /// Claim a free unit of `class_id` for a team, returning its index.
+    pub fn take_free_unit_of_class(&self, owner: u8, class_id: ClassId) -> Option<usize> {
+        let claimed = self.team_assigned_units();
+        self.units.iter().enumerate().find_map(|(index, unit)| {
+            (unit.owner == owner
+                && unit.is_alive()
+                && unit.class_id == class_id
+                && !claimed.contains(&index))
+            .then_some(index)
+        })
+    }
+
+    /// Units already claimed by an active team.
+    fn team_assigned_units(&self) -> std::collections::HashSet<usize> {
+        self.team_manager
+            .teams
+            .iter()
+            .filter(|team| team.active && !team.suspended)
+            .flat_map(|team| team.members.iter().map(|index| index.0 as usize))
+            .collect()
+    }
+
+    /// Index of the enemy unit closest to the given own units.
+    pub fn nearest_enemy_unit_index(&self, owner: u8, own: &[u32]) -> Option<usize> {
+        let anchor = own
+            .iter()
+            .find_map(|index| self.units.get(*index as usize).map(|unit| unit.position))?;
+        let mut best: Option<(usize, Fixed16_16)> = None;
+        for (index, unit) in self.units.iter().enumerate() {
+            if unit.owner == owner || !unit.is_alive() {
+                continue;
+            }
+            let dx = unit.position.x - anchor.x;
+            let dy = unit.position.y - anchor.y;
+            let dist2 = dx * dx + dy * dy;
+            if best.is_none_or(|(_, previous)| dist2 < previous) {
+                best = Some((index, dist2));
+            }
+        }
+        best.map(|(index, _)| index)
+    }
+
+    pub fn ai_order_attack(
+        &mut self,
+        owner: u8,
+        unit_indices: &[usize],
+        target_index: usize,
+    ) -> usize {
+        self.order_attack_indices(owner, unit_indices, target_index)
     }
 
     /// Attach a campaign mission and apply its scenario settings.
@@ -1233,12 +1811,116 @@ impl Game {
                 }
             }
         }
+        // Discoveries are edge events: evaluated once, then cleared so a
+        // trigger fires on the discovery rather than on every later tick.
+        self.discovered_cells.clear();
     }
 
     fn apply_mission_action(&mut self, action: &Action) {
         match action {
-            Action::Win => self.mission.finish(MissionOutcome::Victory),
-            Action::Lose => self.mission.finish(MissionOutcome::Defeat),
+            Action::Airstrike { cell, .. } => {
+                // A strafing run: three blasts walking across the target.
+                let center = Self::cell_center(cell.x, cell.y);
+                let radius = leptons_to_px(EXPLOSION_RANGE_LEPTONS);
+                for step in 0..3 {
+                    let offset = (step - 1) as f32 * radius;
+                    let point = Vec2::new(
+                        center.x + Fixed16_16::from_f32(offset),
+                        center.y + Fixed16_16::from_f32(offset),
+                    );
+                    self.apply_blast(point, radius, AIRSTRIKE_DAMAGE, WarheadType::Ap);
+                    self.blasts.push(Blast {
+                        position: point,
+                        radius,
+                        ttl: Fixed16_16::from_f32(0.5),
+                        max_ttl: Fixed16_16::from_f32(0.5),
+                        color: [1.0, 0.75, 0.25, 1.0],
+                    });
+                }
+                self.aircraft_shots += 1;
+            }
+            Action::Nuke { cell, .. } => {
+                // A scripted nuke ignores the Temple prerequisite.
+                let center = Self::cell_center(cell.x, cell.y);
+                self.apply_blast(center, NUKE_RADIUS_PX, NUKE_DAMAGE, WarheadType::Fire);
+                self.blasts.push(Blast {
+                    position: center,
+                    radius: NUKE_RADIUS_PX,
+                    ttl: Fixed16_16::from_f32(0.8),
+                    max_ttl: Fixed16_16::from_f32(0.8),
+                    color: [1.0, 0.45, 0.10, 1.0],
+                });
+            }
+            Action::IonCannon { cell, .. } => {
+                // Same shape as fire_ion_cannon minus the building/charge gate.
+                let center = Self::cell_center(cell.x, cell.y);
+                let radius = leptons_to_px(EXPLOSION_RANGE_LEPTONS);
+                self.apply_blast(center, radius, ION_DAMAGE, WarheadType::Pb);
+                self.beams.push(Beam {
+                    position: center,
+                    ttl: Fixed16_16::from_f32(0.5),
+                    max_ttl: Fixed16_16::from_f32(0.5),
+                    width: 26.0,
+                });
+                self.blasts.push(Blast {
+                    position: center,
+                    radius,
+                    ttl: Fixed16_16::from_f32(0.6),
+                    max_ttl: Fixed16_16::from_f32(0.6),
+                    color: [0.60, 0.85, 1.00, 1.0],
+                });
+            }
+            Action::Dropzone { owner, cell } => {
+                for index in 0..DROPZONE_UNITS {
+                    let x = cell.x + (index % 3) as i32;
+                    let y = cell.y + (index / 3) as i32;
+                    self.spawn_unit_at(*owner, UnitType::InfantryE1, Vec2i::new(x, y));
+                }
+            }
+            Action::CreateTeam { team, .. } => {
+                if let Some(team_type) = self
+                    .team_manager
+                    .types
+                    .iter()
+                    .find(|candidate| candidate.name.eq_ignore_ascii_case(team))
+                    .cloned()
+                {
+                    let already = self
+                        .team_manager
+                        .teams
+                        .iter()
+                        .any(|existing| existing.team_type == team_type.id && existing.active);
+                    if !already {
+                        let id = self.team_manager.next_team_id;
+                        self.team_manager.next_team_id = id.wrapping_add(1);
+                        let mut instance = cnc_core::entity::Team::from_type(id, &team_type);
+                        instance.active = true;
+                        instance.suspended = false;
+                        self.team_manager.teams.push(instance);
+                    }
+                }
+            }
+            Action::AllToHunt { owner } => {
+                for index in 0..self.units.len() {
+                    if self.units[index].owner == *owner
+                        && self.units[index].is_alive()
+                        && self.units[index].weapon.is_some()
+                    {
+                        self.units[index].target = None;
+                        self.units[index].path.clear();
+                        self.units[index].path_index = 0;
+                        self.units[index].ordered = false;
+                    }
+                }
+            }
+            Action::Win => {
+                self.eva.speak(cnc_audio::EvaLine::MissionAccomplished);
+                self.mission.finish(MissionOutcome::Victory);
+            }
+            Action::Lose => {
+                self.eva.speak(cnc_audio::EvaLine::MissionFailed);
+                self.mission.finish(MissionOutcome::Defeat);
+            }
             Action::Credits { owner, amount } => {
                 if let Some(house) = self.houses.get_mut(*owner as usize) {
                     house.add_credits(*amount);
@@ -1500,9 +2182,18 @@ impl Game {
                 let dx = candidate.position.x.to_f32() - position.x.to_f32();
                 let dy = candidate.position.y.to_f32() - position.y.to_f32();
                 let distance_squared = dx * dx + dy * dy;
-                if distance_squared <= scan_squared
-                    && best.is_none_or(|(_, current)| distance_squared < current)
+                if distance_squared > scan_squared {
+                    continue;
+                }
+                // Fog of war: a unit cannot acquire a target it cannot see.
+                // With the default fully-revealed shroud this never rejects.
+                if !self
+                    .shroud
+                    .can_target(usize::from(owner), Self::world_cell(candidate.position))
                 {
+                    continue;
+                }
+                if best.is_none_or(|(_, current)| distance_squared < current) {
                     best = Some((other, distance_squared));
                 }
             }
@@ -1535,6 +2226,193 @@ impl Game {
             }
             let desired = dy.atan2(dx);
             self.units[index].rotate_toward(desired, delta_time);
+        }
+    }
+
+    /// Centre of a building's footprint, matching the collision centre used by
+    /// `apply_blast` and the docking checks in `update_harvesters`.
+    fn building_center(building: &Building) -> Vec2 {
+        building.position + Vec2::new(Fixed16_16::from_int(12), Fixed16_16::from_int(12))
+    }
+
+    /// INFANTRY.CPP:2891-2901 `InfantryClass::What_Action`: a commando aimed at
+    /// a building is rerouted from ACTION_ATTACK to ACTION_SABOTAGE.
+    ///
+    /// The unit walks into the building cell, then
+    /// [`Game::update_special_missions`] runs the Per_Cell_Process arms.
+    pub fn order_sabotage(&mut self, unit_index: usize, building_index: usize) -> bool {
+        let Some(building) = self.buildings.get(building_index) else {
+            return false;
+        };
+        if !building.is_alive() {
+            return false;
+        }
+        let Some(unit) = self.units.get(unit_index) else {
+            return false;
+        };
+        if !unit.is_alive() || !unit.is_commando || unit.owner == building.owner {
+            return false;
+        }
+
+        let destination = Self::building_center(building);
+        let unit = &mut self.units[unit_index];
+        unit.attack_target = None;
+        unit.clear_path();
+        unit.special_target = Some(building_index);
+        unit.target = Some(destination);
+        unit.ordered = true;
+        true
+    }
+
+    /// INFANTRY.CPP:669-698 `MISSION_CAPTURE`: an engineer enters a captureable
+    /// enemy building, hands it to his house and is consumed (Delete_This).
+    pub fn order_capture(&mut self, unit_index: usize, building_index: usize) -> bool {
+        let Some(building) = self.buildings.get(building_index) else {
+            return false;
+        };
+        // BUILDING.CPP:3873-3885 Can_Capture: Class->IsCaptureable.
+        if !building.is_alive() || !building.is_captureable() {
+            return false;
+        }
+        let Some(unit) = self.units.get(unit_index) else {
+            return false;
+        };
+        if !unit.is_alive() || !unit.is_engineer || unit.owner == building.owner {
+            return false;
+        }
+
+        let destination = Self::building_center(building);
+        let unit = &mut self.units[unit_index];
+        unit.attack_target = None;
+        unit.clear_path();
+        unit.special_target = Some(building_index);
+        unit.target = Some(destination);
+        unit.ordered = true;
+        true
+    }
+
+    /// Apply one lockstep command to the simulation; true when it had effect.
+    ///
+    /// The wire format already carries sabotage (network.rs
+    /// `Command::Sabotage`), so this is only the game-side arm. Orders are
+    /// validated against the issuing player, and the simulation advances on unit
+    /// and building indices only, so every peer applying the same command stream
+    /// reaches identical state (see `sabotage_ticks_deterministically_across_
+    /// identical_games`).
+    pub fn apply_command(&mut self, player: u8, command: &Command) -> bool {
+        // The per-variant game-side arms live in network.rs next to the wire
+        // format; this is only the dispatch entry point for replay/UI callers.
+        crate::network::apply_sabotage(self, command, player)
+    }
+
+    /// INFANTRY.CPP:660-740 `InfantryClass::Per_Cell_Process`: resolve the
+    /// MISSION_SABOTAGE and MISSION_CAPTURE arrivals, then run the BUILDING.CPP
+    /// demolition timeout.
+    ///
+    /// Iteration order is the stable unit/building vectors (no hash maps, no
+    /// wall-clock), so lockstep peers agree on every planted charge.
+    fn update_special_missions(&mut self, delta_time: Fixed16_16) {
+        let mut captures: Vec<(usize, usize)> = Vec::new();
+        let mut detonations: Vec<usize> = Vec::new();
+
+        for (index, unit) in self.units.iter_mut().enumerate() {
+            let Some(target) = unit.special_target else {
+                continue;
+            };
+            let alive_target = self
+                .buildings
+                .get(target)
+                .is_some_and(|building| building.is_alive());
+            if !unit.is_alive() || !alive_target {
+                unit.special_target = None;
+                continue;
+            }
+            let entered = Self::building_center(&self.buildings[target])
+                .distance(unit.position)
+                .to_f32()
+                <= TILE_SIZE;
+            if !entered {
+                continue;
+            }
+            if unit.is_engineer {
+                unit.special_target = None;
+                captures.push((index, target));
+            } else if unit.is_commando {
+                // INFANTRY.CPP:725-733: arm the charge, then Scatter away.
+                if let Some(building) = self.buildings.get_mut(target) {
+                    building.plant_c4(index as u32);
+                }
+                unit.special_target = None;
+                unit.ordered = false;
+                unit.target = None;
+                unit.clear_path();
+            } else {
+                unit.special_target = None;
+            }
+        }
+
+        // BUILDING.CPP:1229-1246: once IsGoingToBlow and CountDown expired the
+        // building takes SABOTAGE_DAMAGE of WARHEAD_FIRE, credited to
+        // WhomToRepay (the saboteur's house, BUILDING.H:140-142).
+        let fire = self.warhead_profile(WarheadType::Fire);
+        for index in 0..self.buildings.len() {
+            let Some(building) = self.buildings.get_mut(index) else {
+                continue;
+            };
+            if !building.is_going_to_blow || !building.is_alive() {
+                continue;
+            }
+            building.count_down = (building.count_down - delta_time).max(Fixed16_16::ZERO);
+            if building.demolition_expired() {
+                detonations.push(index);
+            }
+        }
+        for index in detonations {
+            if let Some(building) = self.buildings.get_mut(index) {
+                building.detonate(&fire);
+            }
+        }
+
+        for (unit_index, building_index) in captures {
+            let new_owner = self.units[unit_index].owner;
+            let previous = self
+                .buildings
+                .get(building_index)
+                .map(|building| building.owner);
+            if let Some(building) = self.buildings.get_mut(building_index) {
+                building.capture(new_owner);
+            }
+            // Ownership bookkeeping mirrors sell_building: the structure moves
+            // to the capturing house's registry and power is recomputed.
+            if let Some(previous) = previous.filter(|owner| *owner != new_owner) {
+                if let Some(old) = self.houses.get_mut(previous as usize) {
+                    old.remove_building(building_index as u32);
+                }
+                if let Some(new) = self.houses.get_mut(new_owner as usize) {
+                    new.add_building(building_index as u32);
+                }
+            }
+            self.refresh_house_power();
+            // INFANTRY.CPP:696 Delete_This: the engineer is spent.
+            self.consume_unit(unit_index);
+        }
+    }
+
+    /// INFANTRY.CPP `Delete_This`: the object leaves the world but its index
+    /// stays stable (the port never compacts `Game::units`), so it is simply
+    /// marked dead and stripped of every order like a killed unit.
+    fn consume_unit(&mut self, index: usize) {
+        if let Some(unit) = self.units.get_mut(index) {
+            unit.health = Fixed16_16::ZERO;
+            unit.is_selected = false;
+            unit.attack_target = None;
+            unit.special_target = None;
+            unit.target = None;
+            unit.ordered = false;
+            unit.clear_path();
+            if let Some(house) = self.houses.get_mut(unit.owner as usize) {
+                house.remove_unit(index as u32);
+            }
         }
     }
 
@@ -1675,6 +2553,106 @@ impl Game {
         }
     }
 
+    /// TD defences (guard towers, turrets, SAM sites, obelisks) acquire and
+    /// shoot at enemy units in range.
+    ///
+    /// Damage is applied directly (no projectile bookkeeping): a defence needs
+    /// a target, power and an expired reload to fire.
+    fn update_defence_combat(&mut self, delta_time: Fixed16_16) {
+        // Snapshot each potential target plus, per house, whether that house
+        // can see the cell (a defence cannot shoot what its owner cannot see).
+        let targets: Vec<(Vec2, u8, bool, bool, Vec<bool>)> = self
+            .units
+            .iter()
+            .map(|unit| {
+                let cell = Self::world_cell(unit.position);
+                let visibility: Vec<bool> = (0..cnc_core::MAX_HOUSES)
+                    .map(|house| self.shroud.can_target(house, cell))
+                    .collect();
+                (
+                    unit.position,
+                    unit.owner,
+                    unit.is_alive(),
+                    unit.is_aircraft,
+                    visibility,
+                )
+            })
+            .collect();
+
+        let mut hits: Vec<(usize, i32, WarheadType)> = Vec::new();
+
+        for building in &mut self.buildings {
+            if !building.is_alive() {
+                continue;
+            }
+            building.reload = (building.reload - delta_time).max(Fixed16_16::ZERO);
+
+            let Some(structure) = building.structure_type() else {
+                continue;
+            };
+            if !structure.is_defensive() {
+                continue;
+            }
+            // Low power disables defensive fire, as the original gates on it.
+            if !building.is_powered {
+                continue;
+            }
+            let Some(weapon_type) = structure.defence_weapon() else {
+                continue;
+            };
+            let stats = weapon_type.stats();
+            let range = Fixed16_16::from_f32(stats.range_px());
+            let anti_air_only = structure.is_anti_air();
+
+            if building.reload > Fixed16_16::ZERO {
+                continue;
+            }
+
+            let mut best: Option<(usize, Fixed16_16)> = None;
+            for (index, (position, owner, alive, is_air, visibility)) in targets.iter().enumerate()
+            {
+                if !*alive || *owner == building.owner {
+                    continue;
+                }
+                // Fog of war: no shooting at cells the owner cannot see.
+                if !visibility
+                    .get(usize::from(building.owner))
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                // SAM sites only engage aircraft.
+                if anti_air_only && !*is_air {
+                    continue;
+                }
+                let distance = building.position.distance(*position);
+                if distance > range {
+                    continue;
+                }
+                if best.is_none_or(|(_, current)| distance < current) {
+                    best = Some((index, distance));
+                }
+            }
+
+            let Some((target_index, _)) = best else {
+                continue;
+            };
+
+            hits.push((target_index, stats.damage, stats.warhead()));
+            building.reload = Fixed16_16::from_f32(stats.cooldown_seconds());
+        }
+
+        for (index, damage, warhead) in hits {
+            if let Some(unit) = self.units.get_mut(index) {
+                let modified = modify_damage(
+                    damage, warhead, unit.armor,
+                    0, // direct fire: no distance falloff at the impact point
+                );
+                unit.health = (unit.health - Fixed16_16::from_int(modified)).max(Fixed16_16::ZERO);
+            }
+        }
+    }
     fn update_projectiles(&mut self, delta_time: Fixed16_16) {
         // BULLET.CPP homing missiles re-aim at the target every other frame.
         let target_positions: Vec<Option<Vec2>> = self
@@ -1734,6 +2712,85 @@ impl Game {
         self.render_with_sprites(renderer, None);
     }
 
+    /// Record any cell the player has newly explored.
+    ///
+    /// `refresh_shroud` keeps `mapped` as a running history, so the set of
+    /// cells that *were* mapped before a refresh versus after it is exactly
+    /// the set the player just discovered.
+    pub(crate) fn record_discoveries(&mut self, before: &cnc_core::Shroud) {
+        let player = self.player_owner as usize;
+        for y in 0..self.map.height as i32 {
+            for x in 0..self.map.width as i32 {
+                let cell = Vec2i::new(x, y);
+                if self.shroud.is_mapped(player, cell) && !before.is_mapped(player, cell) {
+                    self.discovered_cells.insert(cell);
+                }
+            }
+        }
+    }
+
+    /// Kills credited to `owner` for one asset class.
+    pub fn kills_by(&self, owner: u8, what: crate::mission::Eliminated) -> i64 {
+        self.kills.get(&(owner, what)).copied().unwrap_or(0)
+    }
+
+    /// Was the given cell discovered since the last drain?
+    pub fn was_discovered(&self, cell: Vec2i) -> bool {
+        self.discovered_cells.contains(&cell)
+    }
+
+    /// Any discovery pending evaluation?
+    pub fn any_discovery_pending(&self) -> bool {
+        !self.discovered_cells.is_empty()
+    }
+
+    /// Is this cell currently visible to the local player?
+    pub fn visible_to_player(&self, cell: Vec2i) -> bool {
+        self.shroud.is_visible(self.player_owner as usize, cell)
+    }
+
+    /// Is this cell explored (seen at least once) by the local player?
+    pub fn mapped_by_player(&self, cell: Vec2i) -> bool {
+        self.shroud.is_mapped(self.player_owner as usize, cell)
+    }
+
+    /// Draw the fog-of-war overlay: unexplored cells are black, explored but
+    /// not currently visible cells are shaded.
+    ///
+    /// This is the "draw the shroud" half that was missing — the grid already
+    /// gated targeting, but nothing rendered it.
+    fn render_shroud(&self, renderer: &mut dyn Renderer) {
+        // A fully revealed board needs no overlay. The guard must be "every
+        // cell is visible", not "some cell is hidden" — the latter is also
+        // true when the whole board is hidden, which is when fog matters most.
+        let player_cells = (self.map.width * self.map.height) as u32;
+        if self.shroud.visible_count(self.player_owner as usize) >= player_cells {
+            return;
+        }
+        let player = self.player_owner as usize;
+        for y in 0..self.map.height as i32 {
+            for x in 0..self.map.width as i32 {
+                let cell = Vec2i::new(x, y);
+                if self.shroud.is_visible(player, cell) {
+                    continue;
+                }
+                let color = if self.shroud.is_mapped(player, cell) {
+                    // Explored but out of sight: dim, not black.
+                    [0.0, 0.0, 0.0, SHROUD_MEMORY_ALPHA]
+                } else {
+                    [0.0, 0.0, 0.0, 1.0]
+                };
+                renderer.draw_rect(
+                    x as f32 * TILE_SIZE,
+                    y as f32 * TILE_SIZE,
+                    TILE_SIZE,
+                    TILE_SIZE,
+                    color,
+                );
+            }
+        }
+    }
+
     pub fn render_with_sprites(&self, renderer: &mut dyn Renderer, atlas: Option<&SpriteAtlas>) {
         // Terrain layer. The tileset pack owns its own texture slot
         // (`TILESET_TEXTURE_ID`) via the multi-atlas renderer API, so terrain
@@ -1760,11 +2817,20 @@ impl Game {
         });
         self.map.render_with_tiles(renderer, tileset.as_ref());
         for building in &self.buildings {
+            // CELL.CPP only draws what the player can actually see or has
+            // explored: hidden units are not drawn at all.
+            if !self.visible_to_player(Self::building_cell(building)) {
+                continue;
+            }
             building.render_with(renderer, atlas);
         }
         for unit in &self.units {
+            if !self.visible_to_player(Self::unit_cell(unit)) {
+                continue;
+            }
             unit.render_with(renderer, atlas);
         }
+        self.render_shroud(renderer);
         for projectile in &self.projectiles {
             let x = projectile.position.x.to_f32();
             let y = projectile.position.y.to_f32();
@@ -2316,6 +3382,30 @@ mod tests {
 
     struct CountingRenderer {
         sprites: usize,
+        /// Every rect drawn, so tests can inspect the fog overlay.
+        rects: Vec<(f32, f32, f32, f32, [f32; 4])>,
+    }
+
+    impl CountingRenderer {
+        fn new() -> Self {
+            Self {
+                sprites: 0,
+                rects: Vec::new(),
+            }
+        }
+
+        /// Rects whose alpha is the fog memory value or fully opaque black.
+        fn fog_rects(&self) -> Vec<&(f32, f32, f32, f32, [f32; 4])> {
+            self.rects
+                .iter()
+                .filter(|(_, _, _, _, color)| {
+                    color[0] == 0.0
+                        && color[1] == 0.0
+                        && color[2] == 0.0
+                        && (color[3] == 1.0 || (color[3] - SHROUD_MEMORY_ALPHA).abs() < 1.0e-6)
+                })
+                .collect()
+        }
     }
 
     impl cnc_renderer::Renderer for CountingRenderer {
@@ -2326,7 +3416,9 @@ mod tests {
         fn draw_sprite(&mut self, _sprite: &cnc_renderer::Sprite) {
             self.sprites += 1;
         }
-        fn draw_rect(&mut self, _x: f32, _y: f32, _w: f32, _h: f32, _color: [f32; 4]) {}
+        fn draw_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
+            self.rects.push((x, y, w, h, color));
+        }
         fn draw_text(&mut self, _text: &str, _x: f32, _y: f32, _size: f32, _color: [f32; 4]) {}
         fn set_camera(&mut self, _camera: &cnc_renderer::Camera) {}
         fn resize(&mut self, _width: u32, _height: u32) {}
@@ -2334,6 +3426,146 @@ mod tests {
         fn uses_sprites(&self) -> bool {
             true
         }
+    }
+
+    #[test]
+    fn discovering_a_cell_is_recorded() {
+        let mut game = Game::new("disc", 40, 40);
+        game.setup_demo();
+        game.enable_shroud();
+        game.refresh_shroud();
+        // enable_shroud wipes history, so the first refresh discovers
+        // everything the player currently sees.
+        assert!(
+            game.any_discovery_pending(),
+            "the first refresh must report discoveries"
+        );
+    }
+
+    #[test]
+    fn a_repeated_refresh_reports_no_new_discovery() {
+        let mut game = Game::new("disc", 40, 40);
+        game.setup_demo();
+        game.enable_shroud();
+        game.refresh_shroud();
+        game.discovered_cells.clear();
+        game.refresh_shroud();
+        assert!(
+            !game.any_discovery_pending(),
+            "standing still discovers nothing new"
+        );
+    }
+
+    #[test]
+    fn moving_into_the_dark_discovers_new_cells() {
+        let mut game = Game::new("disc", 40, 40);
+        game.setup_demo();
+        game.enable_shroud();
+        game.refresh_shroud();
+        game.discovered_cells.clear();
+
+        // Teleport a unit into unexplored territory and refresh.
+        let Some(unit) = game.units.iter_mut().find(|u| u.owner == 0) else {
+            return;
+        };
+        unit.position = Game::cell_center(2, 2);
+        game.refresh_shroud();
+        assert!(
+            game.any_discovery_pending(),
+            "vision opening on new ground is a discovery"
+        );
+    }
+
+    #[test]
+    fn a_discovered_cell_matches_the_discovered_condition() {
+        let mut game = Game::new("disc", 40, 40);
+        game.setup_demo();
+        game.enable_shroud();
+        game.refresh_shroud();
+        let cell = *game.discovered_cells.iter().next().expect("a discovery");
+        let condition = crate::mission::Condition::Discovered { cell: Some(cell) };
+        assert!(condition.matches(&game, &Default::default()));
+
+        let elsewhere = crate::mission::Condition::Discovered {
+            cell: Some(Vec2i::new(0, 0)),
+        };
+        assert!(!elsewhere.matches(&game, &Default::default()) || cell == Vec2i::new(0, 0));
+    }
+
+    #[test]
+    fn discoveries_are_drained_after_trigger_evaluation() {
+        let mut game = Game::new("disc", 40, 40);
+        game.setup_demo();
+        game.enable_shroud();
+        game.refresh_shroud();
+        assert!(game.any_discovery_pending());
+        game.update_mission(Fixed16_16::ZERO);
+        assert!(
+            !game.any_discovery_pending(),
+            "a discovery must not re-fire every tick"
+        );
+    }
+
+    #[test]
+    fn a_fully_revealed_game_draws_no_fog() {
+        let game = Game::new("fog", 40, 40);
+        let mut renderer = CountingRenderer::new();
+        game.render_shroud(&mut renderer);
+        assert!(
+            renderer.fog_rects().is_empty(),
+            "default games are fully revealed and must not draw fog"
+        );
+    }
+
+    #[test]
+    fn unrevealed_cells_draw_opaque_fog() {
+        let mut game = Game::new("fog", 40, 40);
+        game.enable_shroud();
+        // Reveal a small patch; everything else stays unexplored.
+        game.shroud.reveal(0, Vec2i::new(20, 20), 3);
+        let mut renderer = CountingRenderer::new();
+        game.render_shroud(&mut renderer);
+        let fog = renderer.fog_rects();
+        assert!(!fog.is_empty(), "hidden cells must be covered");
+        assert!(
+            fog.iter().any(|(_, _, _, _, c)| c[3] == 1.0),
+            "unexplored cells are fully black"
+        );
+    }
+
+    #[test]
+    fn explored_but_unseen_cells_draw_partial_fog() {
+        let mut game = Game::new("fog", 40, 40);
+        game.enable_shroud();
+        game.shroud.reveal(0, Vec2i::new(20, 20), 2);
+        // Clear visibility but keep the mapped flags.
+        game.shroud.clear_visible();
+        let mut renderer = CountingRenderer::new();
+        game.render_shroud(&mut renderer);
+        let fog = renderer.fog_rects();
+        assert!(
+            fog.iter()
+                .any(|(_, _, _, _, c)| (c[3] - SHROUD_MEMORY_ALPHA).abs() < 1.0e-6),
+            "explored-but-unseen cells use the memory alpha"
+        );
+    }
+
+    #[test]
+    fn units_in_unseen_cells_are_not_drawn() {
+        let mut game = Game::new("fog", 40, 40);
+        game.enable_shroud();
+        game.units.clear();
+        // Hide the whole board, then place a unit in the dark.
+        game.shroud.clear_visible();
+
+        game.spawn_unit_at(0, UnitType::InfantryE1, Vec2i::new(30, 30));
+
+        let mut renderer = CountingRenderer::new();
+        game.render_with_sprites(&mut renderer, None);
+        assert_eq!(
+            renderer.sprites, 0,
+            "a unit the player cannot see must not be drawn"
+        );
     }
 
     #[test]
@@ -2362,16 +3594,28 @@ mod tests {
         let mut game = Game::new("test", 32, 32);
         game.setup_demo();
         let atlas = SpriteAtlas::generate(AtlasStyle::Neon);
-        let mut renderer = CountingRenderer { sprites: 0 };
+        let mut renderer = CountingRenderer::new();
 
         game.render_with_sprites(&mut renderer, Some(&atlas));
 
-        let expected = game.buildings.len() + game.units.len();
+        // Fog hides objects the player cannot see, so only objects standing
+        // on visible cells are drawn.
+        let visible = game
+            .buildings
+            .iter()
+            .filter(|b| game.visible_to_player(Game::building_cell(b)))
+            .count()
+            + game
+                .units
+                .iter()
+                .filter(|u| game.visible_to_player(Game::unit_cell(u)))
+                .count();
         assert!(
-            renderer.sprites >= expected,
-            "expected at least {expected} sprites, got {}",
+            renderer.sprites >= visible,
+            "expected at least {visible} sprites, got {}",
             renderer.sprites
         );
+        assert!(visible > 0, "the demo must show the player something");
     }
 
     #[test]
@@ -3105,7 +4349,466 @@ mod tests {
         mammoth_duel(117.0, WeaponType::MammothTusk);
     }
 
+    /// A game with houses set up and exactly one player-owned structure.
+    ///
+    /// `Game::new` leaves `houses` empty — only `setup_demo` populates them —
+    /// so any test that touches credits, power or EVA must seed them first.
+    fn eva_game_with_player_building() -> (Game, usize) {
+        let mut game = Game::new("eva", 40, 40);
+        game.setup_demo();
+        game.player_owner = 0;
+        game.buildings.clear();
+        game.buildings.push(Building::from_type(
+            StructureType::PowerPlant,
+            Game::cell_center(10, 10),
+            0,
+        ));
+        (game, 0)
+    }
+
     #[test]
+    fn a_damaged_player_structure_announces_base_under_attack() {
+        let (mut game, id) = eva_game_with_player_building();
+        game.announce_base_attack();
+        assert_eq!(game.eva.pending(), None, "an undamaged base is quiet");
+
+        game.buildings[id].health = game.buildings[id].max_health - Fixed16_16::ONE;
+        game.announce_base_attack();
+        assert_eq!(
+            game.eva.pending(),
+            Some(cnc_audio::EvaLine::BaseUnderAttack)
+        );
+    }
+
+    #[test]
+    fn base_under_attack_respects_the_speech_cooldown() {
+        let (mut game, id) = eva_game_with_player_building();
+        game.buildings[id].health = game.buildings[id].max_health - Fixed16_16::ONE;
+        game.announce_base_attack();
+        game.eva.stop();
+        // Immediately again: the cooldown must suppress it.
+        game.announce_base_attack();
+        assert_eq!(game.eva.pending(), None, "cooldown not yet elapsed");
+
+        game.elapsed = Fixed16_16::from_f32(BASE_ATTACK_SPEAK_DELAY + 1.0);
+        game.announce_base_attack();
+        assert_eq!(
+            game.eva.pending(),
+            Some(cnc_audio::EvaLine::BaseUnderAttack)
+        );
+    }
+
+    #[test]
+    fn insufficient_funds_requires_a_factory() {
+        let mut game = Game::new("eva", 40, 40);
+        game.player_owner = 0;
+        game.buildings.retain(|b| b.owner != 0);
+        if let Some(house) = game.houses.get_mut(0) {
+            house.credits = 0;
+        }
+        game.announce_insufficient_funds();
+        assert_eq!(game.eva.pending(), None, "no factory, no announcement");
+    }
+
+    #[test]
+    fn insufficient_funds_announces_when_broke_with_a_factory() {
+        let (mut game, _) = eva_game_with_player_building();
+        if let Some(house) = game.houses.get_mut(0) {
+            house.credits = INSUFFICIENT_FUNDS_THRESHOLD - 1;
+        }
+        game.announce_insufficient_funds();
+        assert_eq!(
+            game.eva.pending(),
+            Some(cnc_audio::EvaLine::InsufficientFunds)
+        );
+    }
+
+    #[test]
+    fn a_full_purse_is_not_announced() {
+        let (mut game, _) = eva_game_with_player_building();
+        game.houses[0].credits = INSUFFICIENT_FUNDS_THRESHOLD * 10;
+        game.announce_insufficient_funds();
+        assert_eq!(game.eva.pending(), None);
+    }
+
+    #[test]
+    fn superweapon_becoming_ready_announces_once() {
+        let (mut game, _) = eva_game_with_player_building();
+        game.buildings.clear();
+        game.buildings.push(Building::from_type(
+            StructureType::IonCannon,
+            Game::cell_center(12, 12),
+            0,
+        ));
+        if let Some(house) = game.houses.get_mut(0) {
+            house.ion_charge = Fixed16_16::from_f32(0.99);
+        }
+        game.update_superweapons(Fixed16_16::from_f32(10.0));
+        assert_eq!(game.eva.pending(), Some(cnc_audio::EvaLine::IonCannonReady));
+
+        game.eva.stop();
+        game.update_superweapons(Fixed16_16::from_f32(10.0));
+        assert_eq!(game.eva.pending(), None, "already ready, must not repeat");
+    }
+
+    #[test]
+    fn edge_entry_cell_follows_the_configured_side() {
+        let mut game = Game::new("edge", 40, 40);
+        game.setup_demo();
+        let (cx, cy) = (40 / 2, 40 / 2);
+
+        game.houses[0].edge = ReinforcementEdge::North;
+        assert_eq!(game.edge_entry_cell(0), (cx, 1));
+        game.houses[0].edge = ReinforcementEdge::South;
+        assert_eq!(game.edge_entry_cell(0), (cx, 38));
+        game.houses[0].edge = ReinforcementEdge::West;
+        assert_eq!(game.edge_entry_cell(0), (1, cy));
+        game.houses[0].edge = ReinforcementEdge::East;
+        assert_eq!(game.edge_entry_cell(0), (38, cy));
+    }
+
+    #[test]
+    fn non_compass_edges_fall_back_to_the_map_centre() {
+        let mut game = Game::new("edge", 40, 40);
+        game.setup_demo();
+        for edge in [
+            ReinforcementEdge::Air,
+            ReinforcementEdge::Visible,
+            ReinforcementEdge::EnemyBase,
+            ReinforcementEdge::HomeBase,
+        ] {
+            game.houses[0].edge = edge;
+            assert_eq!(game.edge_entry_cell(0), (20, 20), "{edge:?}");
+        }
+    }
+
+    #[test]
+    fn spawn_position_uses_the_edge_when_no_factory_exists() {
+        let mut game = Game::new("edge", 40, 40);
+        game.setup_demo();
+        game.buildings.retain(|b| b.owner != 1);
+        game.houses[1].edge = ReinforcementEdge::West;
+        let position = game.spawn_position(1);
+        let cell = Game::world_cell(position);
+        assert_eq!(cell.x, 1, "enters from the west edge");
+    }
+    #[test]
+    fn house_eliminated_fires_only_when_everything_is_gone() {
+        let mut game = Game::new("cond", 40, 40);
+        game.setup_demo();
+        let cond = crate::mission::Condition::HouseEliminated {
+            owner: 1,
+            what: crate::mission::Eliminated::Units,
+        };
+        let flags = Default::default();
+        assert!(!cond.matches(&game, &flags), "Nod still fields units");
+        for unit in game.units.iter_mut().filter(|u| u.owner == 1) {
+            unit.health = Fixed16_16::ZERO;
+        }
+        assert!(cond.matches(&game, &flags), "all Nod units dead");
+    }
+
+    #[test]
+    fn kills_are_credited_to_the_opposing_house() {
+        let mut game = Game::new("cond", 40, 40);
+        game.setup_demo();
+        game.player_owner = 0;
+        let id = game.spawn_unit_at(1, UnitType::InfantryE1, Vec2i::new(20, 20));
+        game.units[id as usize].health = Fixed16_16::ZERO;
+        let before = game.kills_by(0, crate::mission::Eliminated::Units);
+        game.update_death_announcements();
+        assert_eq!(
+            game.kills_by(0, crate::mission::Eliminated::Units),
+            before + 1,
+            "GDI is credited with the kill"
+        );
+    }
+
+    #[test]
+    fn no_factories_detects_a_house_without_a_producer() {
+        let mut game = Game::new("cond", 40, 40);
+        game.setup_demo();
+        let cond = crate::mission::Condition::NoFactories { owner: 0 };
+        let flags = Default::default();
+        assert!(!cond.matches(&game, &flags), "GDI owns factories");
+        for building in game.buildings.iter_mut().filter(|b| b.owner == 0) {
+            building.health = Fixed16_16::ZERO;
+        }
+        assert!(cond.matches(&game, &flags), "no GDI factories remain");
+    }
+    #[test]
+    fn reinforcement_edge_parses_the_original_tokens() {
+        use ReinforcementEdge::*;
+        assert_eq!(ReinforcementEdge::from_name("North"), Some(North));
+        assert_eq!(ReinforcementEdge::from_name("EAST"), Some(East));
+        assert_eq!(ReinforcementEdge::from_name("south"), Some(South));
+        assert_eq!(ReinforcementEdge::from_name("West"), Some(West));
+        assert_eq!(ReinforcementEdge::from_name("Air"), Some(Air));
+        assert_eq!(ReinforcementEdge::from_name("HomeBase"), Some(HomeBase));
+        assert_eq!(ReinforcementEdge::from_name(""), Some(North), "default");
+        assert_eq!(ReinforcementEdge::from_name("nonsense"), None);
+    }
+    #[test]
+    fn max_unit_limit_blocks_further_queues() {
+        let mut game = Game::new("limits", 40, 40);
+        game.setup_demo();
+        game.houses[0].max_units = game
+            .units
+            .iter()
+            .filter(|u| u.owner == 0 && u.is_alive())
+            .count() as u32;
+        assert!(!game.within_unit_limit(0), "already at the cap");
+        assert!(!game.can_queue_unit(0, UnitType::MediumTank));
+    }
+
+    #[test]
+    fn max_unit_limit_counts_queued_units() {
+        let mut game = Game::new("limits", 40, 40);
+        game.setup_demo();
+        let alive = game
+            .units
+            .iter()
+            .filter(|u| u.owner == 0 && u.is_alive())
+            .count() as u32;
+        game.houses[0].max_units = alive + 1;
+        game.houses[0].credits = 100_000;
+        assert!(game.within_unit_limit(0), "one slot free");
+        game.queue_unit(0, UnitType::MediumTank);
+        assert!(
+            !game.within_unit_limit(0),
+            "the queued order fills the last slot"
+        );
+    }
+
+    #[test]
+    fn max_building_limit_blocks_further_structures() {
+        let mut game = Game::new("limits", 40, 40);
+        game.setup_demo();
+        game.houses[0].max_buildings = game
+            .buildings
+            .iter()
+            .filter(|b| b.owner == 0 && b.is_alive())
+            .count() as u32;
+        assert!(!game.within_building_limit(0));
+        assert!(!game.can_queue_building(0, StructureType::PowerPlant));
+    }
+    #[test]
+    fn rules_sight_overrides_the_builtin_td_table() {
+        let mut game = Game::new("sight", 40, 40);
+        game.setup_demo();
+        // A single-house Rules.ini carrying a Sight override for E1.
+        let ini = cnc_core::IniFile::parse("[E1]\nSight=9\n").expect("ini");
+        game.set_rules(cnc_core::RulesDatabase::from_ini(&ini));
+        let Some(unit) = game
+            .units
+            .iter()
+            .find(|u| u.unit_type == UnitType::InfantryE1)
+        else {
+            return;
+        };
+        assert_eq!(game.unit_sight_range(unit), 9, "Rules.ini Sight wins");
+    }
+
+    #[test]
+    fn rules_sight_is_clamped_to_the_engine_maximum() {
+        let mut game = Game::new("sight", 40, 40);
+        game.setup_demo();
+        let ini = cnc_core::IniFile::parse("[E1]\nSight=99\n").expect("ini");
+        game.set_rules(cnc_core::RulesDatabase::from_ini(&ini));
+        let Some(unit) = game
+            .units
+            .iter()
+            .find(|u| u.unit_type == UnitType::InfantryE1)
+        else {
+            return;
+        };
+        assert_eq!(
+            game.unit_sight_range(unit),
+            cnc_core::shroud::MAX_SIGHT_RADIUS,
+            "an absurd Sight cannot reveal the whole map"
+        );
+    }
+    #[test]
+    fn queueing_an_unaffordable_unit_announces_insufficient_funds() {
+        let mut game = Game::new("eva", 40, 40);
+        game.setup_demo();
+        game.player_owner = 0;
+        game.houses[0].credits = 0;
+        game.houses[0].tiberium = 0;
+        let queued = game.queue_unit(0, UnitType::MediumTank);
+        assert!(!queued, "cannot afford it");
+        assert_eq!(
+            game.eva.pending(),
+            Some(cnc_audio::EvaLine::InsufficientFunds)
+        );
+    }
+    #[test]
+    fn losing_an_owned_unit_announces_unit_lost() {
+        let mut game = Game::new("eva", 40, 40);
+        game.player_owner = 0;
+        let id = game.spawn_unit_at(0, UnitType::InfantryE1, Vec2i::new(10, 10));
+        game.update_death_announcements();
+        assert_eq!(game.eva.pending(), None, "a live unit says nothing");
+
+        game.units[id as usize].health = Fixed16_16::ZERO;
+        game.update_death_announcements();
+        assert_eq!(game.eva.pending(), Some(cnc_audio::EvaLine::UnitLost));
+    }
+
+    #[test]
+    fn destroying_an_enemy_unit_announces_enemy_unit() {
+        let mut game = Game::new("eva", 40, 40);
+        game.player_owner = 0;
+        let id = game.spawn_unit_at(1, UnitType::InfantryE1, Vec2i::new(10, 10));
+        game.units[id as usize].health = Fixed16_16::ZERO;
+        game.update_death_announcements();
+        assert_eq!(
+            game.eva.pending(),
+            Some(cnc_audio::EvaLine::EnemyUnitDestroyed)
+        );
+    }
+
+    #[test]
+    fn a_death_is_announced_only_once() {
+        let mut game = Game::new("eva", 40, 40);
+        game.player_owner = 0;
+        let id = game.spawn_unit_at(0, UnitType::InfantryE1, Vec2i::new(10, 10));
+        game.units[id as usize].health = Fixed16_16::ZERO;
+        game.update_death_announcements();
+        assert!(game.eva.pending().is_some());
+        game.eva.stop();
+        game.update_death_announcements();
+        assert_eq!(game.eva.pending(), None, "the same corpse must not repeat");
+    }
+
+    #[test]
+    fn losing_an_owned_structure_announces_structure_lost() {
+        let mut game = Game::new("eva", 40, 40);
+        game.player_owner = 0;
+        let id = game
+            .buildings
+            .iter()
+            .position(|b| b.owner == 0)
+            .unwrap_or_else(|| {
+                let before = game.buildings.len();
+                game.buildings.push(crate::building::Building::from_type(
+                    StructureType::PowerPlant,
+                    Game::cell_center(5, 5),
+                    0,
+                ));
+                before
+            });
+        game.buildings[id].health = Fixed16_16::ZERO;
+        game.update_death_announcements();
+        assert_eq!(game.eva.pending(), Some(cnc_audio::EvaLine::StructureLost));
+    }
+
+    #[test]
+    fn winning_the_mission_queues_eva_speech() {
+        let mut game = Game::new("eva", 40, 40);
+        assert_eq!(game.eva.pending(), None, "nothing queued at start");
+        game.apply_mission_action(&Action::Win);
+        assert_eq!(
+            game.eva.pending(),
+            Some(cnc_audio::EvaLine::MissionAccomplished)
+        );
+    }
+
+    #[test]
+    fn losing_the_mission_queues_failure_speech() {
+        let mut game = Game::new("eva", 40, 40);
+        game.apply_mission_action(&Action::Lose);
+        assert_eq!(game.eva.pending(), Some(cnc_audio::EvaLine::MissionFailed));
+    }
+
+    #[test]
+    fn airstrike_action_damages_units_in_the_target_cell() {
+        let mut game = Game::new("strike", 40, 40);
+        let victim = game.spawn_unit_at(0, UnitType::InfantryE1, Vec2i::new(20, 20));
+        let before = game.units[victim as usize].health;
+        game.apply_mission_action(&Action::Airstrike {
+            owner: 1,
+            cell: Vec2i::new(20, 20),
+        });
+        let after = game.units[victim as usize].health;
+        assert!(after < before, "airstrike must damage the unit in the cell");
+        assert_eq!(game.aircraft_shots, 1, "the run is counted");
+    }
+
+    #[test]
+    fn nuke_action_does_not_require_a_temple() {
+        let mut game = Game::new("nuke", 40, 40);
+        let victim = game.spawn_unit_at(0, UnitType::InfantryE1, Vec2i::new(20, 20));
+        let before = game.units[victim as usize].health;
+        // No Temple of Nod exists for house 1.
+        game.apply_mission_action(&Action::Nuke {
+            owner: 1,
+            cell: Vec2i::new(20, 20),
+        });
+        let after = game.units[victim as usize].health;
+        assert!(after < before, "scripted nuke ignores the building gate");
+    }
+
+    #[test]
+    fn ion_action_does_not_require_the_ion_cannon_building() {
+        let mut game = Game::new("ion", 40, 40);
+        let victim = game.spawn_unit_at(0, UnitType::InfantryE1, Vec2i::new(20, 20));
+        let before = game.units[victim as usize].health;
+        game.apply_mission_action(&Action::IonCannon {
+            owner: 0,
+            cell: Vec2i::new(20, 20),
+        });
+        let after = game.units[victim as usize].health;
+        assert!(
+            after < before,
+            "scripted ion strike ignores the charge gate"
+        );
+        assert!(!game.beams.is_empty(), "the beam is drawn");
+    }
+
+    #[test]
+    fn dropzone_action_spawns_infantry() {
+        let mut game = Game::new("dz", 40, 40);
+        let before = game.units.iter().filter(|u| u.owner == 1).count();
+        game.apply_mission_action(&Action::Dropzone {
+            owner: 1,
+            cell: Vec2i::new(20, 20),
+        });
+        let after = game.units.iter().filter(|u| u.owner == 1).count();
+        assert_eq!(after - before, DROPZONE_UNITS);
+    }
+
+    #[test]
+    fn all_to_hunt_clears_orders_for_armed_units_only() {
+        let mut game = Game::new("hunt", 40, 40);
+        let armed = game.spawn_unit_at(0, UnitType::MediumTank, Vec2i::new(10, 10));
+        game.units[armed as usize].ordered = true;
+        game.units[armed as usize].target =
+            Some(Vec2::new(Fixed16_16::from_int(5), Fixed16_16::from_int(5)));
+        game.apply_mission_action(&Action::AllToHunt { owner: 0 });
+        assert!(!game.units[armed as usize].ordered);
+        assert!(game.units[armed as usize].target.is_none());
+    }
+
+    #[test]
+    fn create_team_activates_a_matching_team_type() {
+        let mut game = Game::new("ct", 40, 40);
+        let ini = cnc_core::IniFile::parse(
+            "[TaskForces]\n1=TF_X\n[TF_X]\n1=MTNK,1\n             [TeamTypes]\n1=STRIKE\n[STRIKE]\nName=Strike\nOwner=Nod\n             TaskForce=TF_X\nMission=attack\nActive=no\n",
+        )
+        .expect("ini");
+        let types = cnc_core::entity::team_types_from_ini(&ini).expect("types");
+        game.team_manager = crate::ai::TeamManager::new(types);
+        assert!(game.team_manager.teams.is_empty());
+
+        game.apply_mission_action(&Action::CreateTeam {
+            owner: 1,
+            team: "Strike".to_string(),
+        });
+        assert_eq!(game.team_manager.teams.len(), 1);
+        assert!(game.team_manager.teams[0].active);
+    }
+
     fn ion_cannon_requires_building_and_charge() {
         let mut game = Game::new("test", 16, 16);
         game.units.clear();
@@ -3427,6 +5130,202 @@ mod tests {
         assert!(status.buildings >= 1);
         assert!(status.gdi_credits > 0);
         assert!(status.nod_credits > 0);
+    }
+
+    /// A single commando, an enemy construction yard and nothing else.
+    fn sabotage_scene() -> Game {
+        let mut game = Game::new("test", 16, 16);
+        game.units.clear();
+        game.houses.clear();
+        game.buildings.clear();
+        game.projectiles.clear();
+
+        game.houses
+            .push(House::new(ClassId::HouseGDI, "GDI".to_string()));
+        game.houses
+            .push(House::new(ClassId::HouseNod, "Nod".to_string()));
+        game.buildings.push(Building::from_type(
+            StructureType::ConstructionYard,
+            Game::cell_center(6, 6),
+            1,
+        ));
+        let buildings = game.buildings.len() as u32;
+        game.houses[1].add_building(buildings - 1);
+
+        game.units
+            .push(Unit::new(UnitType::Commando, Game::cell_center(9, 9), 0));
+        let units = game.units.len() as u32;
+        game.houses[0].add_unit(units - 1);
+        game
+    }
+
+    #[test]
+    fn commando_sabotage_arms_the_building_then_blows_it_up() {
+        let mut game = sabotage_scene();
+        let commando = 0;
+        let yard = 0;
+        assert!(game.units[commando].is_commando);
+
+        assert!(game.order_sabotage(commando, yard));
+        assert_eq!(game.units[commando].special_target, Some(yard));
+        assert_eq!(game.units[commando].attack_target, None);
+
+        // Walk into the building: INFANTRY.CPP:717-735 Per_Cell_Process plants
+        // the charge when the infantry enters the building cell.
+        for _ in 0..400 {
+            game.update(Fixed16_16::from_f32(0.05));
+            if game.buildings[yard].is_going_to_blow {
+                break;
+            }
+        }
+        assert!(
+            game.buildings[yard].is_going_to_blow,
+            "entering the building plants C4"
+        );
+        assert_eq!(
+            game.buildings[yard].whom_to_repay,
+            Some(commando as u32),
+            "BUILDING.H WhomToRepay names the saboteur"
+        );
+        assert!(
+            game.buildings[yard].count_down > Fixed16_16::ZERO,
+            "INFANTRY.CPP sets a 20 second CountDown"
+        );
+        assert_eq!(
+            game.units[commando].special_target, None,
+            "the commando scatters away from the charge"
+        );
+
+        // BUILDING.CPP:1229-1246: once the countdown expires the building takes
+        // 5000 points of WARHEAD_FIRE and dies.
+        let before = game.buildings[yard].health;
+        for _ in 0..600 {
+            game.update(Fixed16_16::from_f32(0.05));
+            if !game.buildings[yard].is_going_to_blow {
+                break;
+            }
+        }
+        assert!(!game.buildings[yard].is_going_to_blow);
+        assert_eq!(game.buildings[yard].health, Fixed16_16::ZERO);
+        assert!(before > Fixed16_16::ZERO);
+    }
+
+    #[test]
+    fn sabotage_orders_are_restricted_to_commandos_and_enemy_buildings() {
+        let mut game = sabotage_scene();
+        // A rifleman cannot sabotage (INFANTRY.CPP:2891-2901 only rewrites the
+        // rambo's action).
+        game.units[0] = Unit::new(UnitType::InfantryE1, Game::cell_center(9, 9), 0);
+        assert!(!game.order_sabotage(0, 0));
+        assert_eq!(game.units[0].special_target, None);
+
+        // Even a commando cannot touch a friendly building.
+        game.units[0] = Unit::new(UnitType::Commando, Game::cell_center(9, 9), 0);
+        game.buildings[0].owner = 0;
+        assert!(!game.order_sabotage(0, 0));
+
+        // Out-of-range indices are rejected.
+        assert!(!game.order_sabotage(9, 0));
+        assert!(!game.order_sabotage(0, 9));
+    }
+
+    #[test]
+    fn engineer_captures_an_enemy_building_and_is_consumed() {
+        let mut game = sabotage_scene();
+        // Swap the commando for an engineer (IDATA.CPP IsCapture = true).
+        game.units[0] = Unit::new(UnitType::Engineer, Game::cell_center(9, 9), 0);
+        let engineer = 0;
+        let yard = 0;
+        assert!(game.units[engineer].is_engineer);
+
+        assert!(game.order_capture(engineer, yard));
+        assert_eq!(game.units[engineer].special_target, Some(yard));
+
+        for _ in 0..400 {
+            game.update(Fixed16_16::from_f32(0.05));
+            if !game.units[engineer].is_alive() {
+                break;
+            }
+        }
+        assert_eq!(
+            game.buildings[yard].owner, 0,
+            "INFANTRY.CPP:695 tech->Captured(House)"
+        );
+        assert!(game.buildings[yard].is_captured);
+        assert!(
+            !game.units[engineer].is_alive(),
+            "INFANTRY.CPP:696 Delete_This consumes the engineer"
+        );
+        assert_eq!(game.units[engineer].special_target, None);
+    }
+
+    #[test]
+    fn capture_respects_the_bdata_captureable_flag() {
+        let mut game = sabotage_scene();
+        game.units[0] = Unit::new(UnitType::Engineer, Game::cell_center(9, 9), 0);
+        // The Eye (radar) is not captureable in BDATA.CPP.
+        game.buildings[0] =
+            Building::from_type(StructureType::IonCannon, Game::cell_center(6, 6), 1);
+        assert!(!game.buildings[0].is_captureable());
+        assert!(!game.order_capture(0, 0));
+    }
+
+    #[test]
+    fn sabotage_command_applies_through_the_network_handler() {
+        // network.rs already serialises Command::Sabotage { unit, target }; this
+        // pins the game-side apply arm and its lockstep determinism.
+        let mut game = sabotage_scene();
+        let packet = crate::network::NetPacket::new(
+            0,
+            0,
+            vec![crate::network::NetCommand::new(
+                0,
+                0,
+                crate::network::Command::Sabotage { unit: 0, target: 0 },
+            )],
+        );
+        let wire = packet.encode().unwrap();
+        let decoded = crate::network::NetPacket::decode(&wire).unwrap();
+        assert_eq!(decoded, packet);
+
+        assert!(game.apply_command(0, &decoded.commands[0].command));
+        assert_eq!(game.units[0].special_target, Some(0));
+
+        // The same command applied to a peer reproduces identical state, and a
+        // mismatched owner is not allowed to command someone else's commando.
+        let mut peer = sabotage_scene();
+        assert!(peer.apply_command(0, &decoded.commands[0].command));
+        assert_eq!(
+            peer.units[0].special_target, game.units[0].special_target,
+            "identical command stream, identical state"
+        );
+        let mut outsider = sabotage_scene();
+        assert!(!outsider.apply_command(1, &decoded.commands[0].command));
+    }
+
+    #[test]
+    fn sabotage_ticks_deterministically_across_identical_games() {
+        let mut first = sabotage_scene();
+        let mut second = sabotage_scene();
+        assert!(first.order_sabotage(0, 0));
+        assert!(second.order_sabotage(0, 0));
+
+        for step in 0..800 {
+            let delta = Fixed16_16::from_f32(0.05);
+            first.update(delta);
+            second.update(delta);
+            assert_eq!(
+                first.buildings[0].is_going_to_blow, second.buildings[0].is_going_to_blow,
+                "sabotage must not drift at step {step}"
+            );
+            assert_eq!(
+                first.buildings[0].count_down.to_bits(),
+                second.buildings[0].count_down.to_bits(),
+                "the countdown must tick identically at step {step}"
+            );
+        }
+        assert!(!first.buildings[0].is_alive());
+        assert_eq!(first.buildings[0].health, second.buildings[0].health);
     }
 }
 
@@ -4151,5 +6050,304 @@ mod prerequisite_tests {
         let _ = nod_start;
         game.units[gdi_id as usize].health = Fixed16_16::ZERO;
         assert_eq!(game.order_units_stop(0, &[gdi_id]), 0);
+    }
+
+    /// Spawn `structure` for `owner` at `cell` and return its index.
+    fn add_defence(game: &mut Game, owner: u8, structure: StructureType, cell: Vec2i) -> usize {
+        let position = Game::cell_center(cell.x, cell.y);
+        let mut building = Building::from_type(structure, position, owner);
+        building.set_powered(true);
+        building.reload = Fixed16_16::ZERO;
+        game.buildings.push(building);
+        game.buildings.len() - 1
+    }
+
+    #[test]
+    fn guard_tower_shoots_an_enemy_unit_in_range() {
+        let mut game = Game::new("defence", 32, 32);
+        let tower = add_defence(&mut game, 0, StructureType::GuardTower, Vec2i::new(10, 10));
+
+        // An enemy vehicle two cells away is well inside the turret's reach.
+        let mut enemy = Unit::new(UnitType::Jeep, Game::cell_center(12, 10), 1);
+        enemy.health = enemy.max_health;
+        let before = enemy.health;
+        let enemy_index = game.units.len();
+        game.units.push(enemy);
+
+        game.update_defence_combat(Fixed16_16::from_int(1));
+
+        let after = game.units[enemy_index].health;
+        assert!(
+            after < before,
+            "the guard tower must damage an in-range enemy"
+        );
+        assert!(
+            game.buildings[tower].reload > Fixed16_16::ZERO,
+            "firing must start the reload timer"
+        );
+    }
+
+    #[test]
+    fn defences_hold_fire_out_of_range() {
+        let mut game = Game::new("defence", 32, 32);
+        add_defence(&mut game, 0, StructureType::GuardTower, Vec2i::new(2, 2));
+
+        let mut enemy = Unit::new(UnitType::Jeep, Game::cell_center(28, 28), 1);
+        enemy.health = enemy.max_health;
+        let before = enemy.health;
+        let index = game.units.len();
+        game.units.push(enemy);
+
+        game.update_defence_combat(Fixed16_16::from_int(1));
+        assert_eq!(
+            game.units[index].health, before,
+            "out of range must not hit"
+        );
+    }
+
+    #[test]
+    fn sam_site_only_engages_aircraft() {
+        let mut game = Game::new("defence", 32, 32);
+        add_defence(&mut game, 0, StructureType::SamSite, Vec2i::new(10, 10));
+
+        // A ground vehicle right next to the SAM must be ignored.
+        let mut ground = Unit::new(UnitType::Jeep, Game::cell_center(11, 10), 1);
+        ground.health = ground.max_health;
+        let ground_before = ground.health;
+        let ground_index = game.units.len();
+        game.units.push(ground);
+
+        game.update_defence_combat(Fixed16_16::from_int(1));
+        assert_eq!(
+            game.units[ground_index].health, ground_before,
+            "a SAM site must not shoot ground units"
+        );
+
+        // An aircraft in range is engaged.
+        let mut aircraft = Unit::new(UnitType::Orca, Game::cell_center(11, 11), 1);
+        aircraft.health = aircraft.max_health;
+        let air_before = aircraft.health;
+        let air_index = game.units.len();
+        game.units.push(aircraft);
+
+        game.update_defence_combat(Fixed16_16::from_int(1));
+        assert!(
+            game.units[air_index].health < air_before,
+            "a SAM site must engage aircraft"
+        );
+    }
+
+    #[test]
+    fn unpowered_defences_do_not_fire() {
+        let mut game = Game::new("defence", 32, 32);
+        let tower = add_defence(&mut game, 0, StructureType::GuardTower, Vec2i::new(10, 10));
+        game.buildings[tower].set_powered(false);
+
+        let mut enemy = Unit::new(UnitType::Jeep, Game::cell_center(12, 10), 1);
+        enemy.health = enemy.max_health;
+        let before = enemy.health;
+        let index = game.units.len();
+        game.units.push(enemy);
+
+        game.update_defence_combat(Fixed16_16::from_int(1));
+        assert_eq!(
+            game.units[index].health, before,
+            "an unpowered defence must stay silent"
+        );
+    }
+
+    #[test]
+    fn economy_buildings_never_shoot() {
+        let mut game = Game::new("defence", 32, 32);
+        add_defence(&mut game, 0, StructureType::PowerPlant, Vec2i::new(10, 10));
+
+        let mut enemy = Unit::new(UnitType::Jeep, Game::cell_center(11, 10), 1);
+        enemy.health = enemy.max_health;
+        let before = enemy.health;
+        let index = game.units.len();
+        game.units.push(enemy);
+
+        game.update_defence_combat(Fixed16_16::from_int(1));
+        assert_eq!(
+            game.units[index].health, before,
+            "non-defences have no weapon"
+        );
+    }
+
+    #[test]
+    fn skirmish_starts_fully_revealed() {
+        let game = Game::new("shroud", 32, 32);
+        assert!(game.can_see(0, Vec2i::new(0, 0)));
+        assert!(game.can_see(0, Vec2i::new(31, 31)));
+    }
+
+    #[test]
+    fn enabling_shroud_hides_everything_until_refresh() {
+        let mut game = Game::new("shroud", 32, 32);
+        game.enable_shroud();
+        assert!(
+            !game.can_see(0, Vec2i::new(5, 5)),
+            "nothing seen before a refresh"
+        );
+
+        // `Game::new` populates no objects, so a refresh with an empty board
+        // reveals nothing. `setup_demo` adds units; sight follows them.
+        game.refresh_shroud();
+        assert_eq!(game.shroud.visible_count(0), 0);
+
+        game.setup_demo();
+        game.refresh_shroud();
+        assert!(
+            game.shroud.visible_count(0) > 0,
+            "refreshing must reveal around friendly objects"
+        );
+    }
+
+    #[test]
+    fn movement_updates_visibility() {
+        let mut game = Game::new("shroud", 32, 32);
+        game.enable_shroud();
+        game.units.clear();
+        game.buildings.clear();
+
+        let mut scout = Unit::new(UnitType::Jeep, Game::cell_center(1, 1), 0);
+        scout.health = scout.max_health;
+        game.units.push(scout);
+        game.refresh_shroud();
+
+        assert!(
+            game.can_see(0, Vec2i::new(1, 1)),
+            "the scout sees its own cell"
+        );
+        assert!(!game.can_see(0, Vec2i::new(20, 20)), "far cells stay dark");
+    }
+
+    #[test]
+    fn sight_is_per_house() {
+        let mut game = Game::new("shroud", 32, 32);
+        game.enable_shroud();
+        game.units.clear();
+        game.buildings.clear();
+
+        let mut friend = Unit::new(UnitType::Jeep, Game::cell_center(2, 2), 0);
+        friend.health = friend.max_health;
+        game.units.push(friend);
+        game.refresh_shroud();
+
+        assert!(game.can_see(0, Vec2i::new(2, 2)));
+        assert!(
+            !game.can_see(1, Vec2i::new(2, 2)),
+            "house 1 must not inherit house 0's sight"
+        );
+    }
+
+    #[test]
+    fn mapped_history_survives_losing_sight() {
+        let mut game = Game::new("shroud", 32, 32);
+        game.enable_shroud();
+        game.units.clear();
+        game.buildings.clear();
+
+        let mut scout = Unit::new(UnitType::Jeep, Game::cell_center(4, 4), 0);
+        scout.health = scout.max_health;
+        game.units.push(scout);
+        game.refresh_shroud();
+        let seen = Vec2i::new(4, 4);
+        assert!(game.shroud.is_mapped(0, seen));
+
+        game.units[0].health = Fixed16_16::ZERO;
+        game.refresh_shroud();
+        assert!(!game.can_see(0, seen), "no unit, no current sight");
+        assert!(game.shroud.is_mapped(0, seen), "the cell stays on the map");
+    }
+
+    #[test]
+    fn units_do_not_acquire_unseen_targets() {
+        let mut game = Game::new("shroud", 32, 32);
+        game.enable_shroud();
+        game.units.clear();
+        game.buildings.clear();
+
+        let mut tank = Unit::new(UnitType::MediumTank, Game::cell_center(10, 10), 0);
+        tank.health = tank.max_health;
+        let mut buggy = Unit::new(UnitType::Buggy, Game::cell_center(12, 10), 1);
+        buggy.health = buggy.max_health;
+        game.units.push(tank);
+        game.units.push(buggy);
+
+        game.update_auto_acquire();
+        assert!(
+            game.units[0].attack_target.is_none(),
+            "an unseen enemy must not be acquired"
+        );
+    }
+
+    #[test]
+    fn units_acquire_once_the_shroud_reveals_the_target() {
+        let mut game = Game::new("shroud", 32, 32);
+        game.enable_shroud();
+        game.units.clear();
+        game.buildings.clear();
+
+        let mut tank = Unit::new(UnitType::MediumTank, Game::cell_center(10, 10), 0);
+        tank.health = tank.max_health;
+        let mut buggy = Unit::new(UnitType::Buggy, Game::cell_center(12, 10), 1);
+        buggy.health = buggy.max_health;
+        game.units.push(tank);
+        game.units.push(buggy);
+
+        game.shroud.reveal(0, Vec2i::new(12, 10), 0);
+        game.update_auto_acquire();
+        assert_eq!(
+            game.units[0].attack_target,
+            Some(1),
+            "a visible enemy is acquired"
+        );
+    }
+
+    #[test]
+    fn default_game_acquires_targets_without_shroud() {
+        // Regression guard: the default fully-revealed shroud blocks nothing.
+        let mut game = Game::new("noshroud", 32, 32);
+        game.units.clear();
+        game.buildings.clear();
+
+        let mut tank = Unit::new(UnitType::MediumTank, Game::cell_center(10, 10), 0);
+        tank.health = tank.max_health;
+        let mut buggy = Unit::new(UnitType::Buggy, Game::cell_center(12, 10), 1);
+        buggy.health = buggy.max_health;
+        game.units.push(tank);
+        game.units.push(buggy);
+
+        game.update_auto_acquire();
+        assert_eq!(game.units[0].attack_target, Some(1));
+    }
+
+    #[test]
+    fn defences_hold_fire_on_unseen_targets() {
+        let mut game = Game::new("shroud", 32, 32);
+        game.units.clear();
+        game.buildings.clear();
+        game.enable_shroud();
+
+        add_defence(&mut game, 0, StructureType::GuardTower, Vec2i::new(10, 10));
+
+        let mut enemy = Unit::new(UnitType::Jeep, Game::cell_center(11, 10), 1);
+        enemy.health = enemy.max_health;
+        let before = enemy.health;
+        game.units.push(enemy);
+
+        game.update_defence_combat(Fixed16_16::from_int(1));
+        assert_eq!(
+            game.units[0].health, before,
+            "a tower cannot shell a cell its owner cannot see"
+        );
+
+        game.shroud.reveal(0, Vec2i::new(11, 10), 0);
+        game.update_defence_combat(Fixed16_16::from_int(1));
+        assert!(
+            game.units[0].health < before,
+            "the tower fires once the target is visible"
+        );
     }
 }

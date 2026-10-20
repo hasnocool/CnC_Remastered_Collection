@@ -23,6 +23,13 @@ pub struct House {
     pub tiberium: i32,
     /// Tiberium storage capacity from refineries and silos.
     pub capacity: i32,
+    /// HOUSE.CPP MaxUnit: cap on simultaneously owned units.
+    pub max_units: u32,
+    /// HOUSE.CPP MaxBuilding: cap on simultaneously owned structures.
+    pub max_buildings: u32,
+    /// HOUSE.CPP Edge: where this house's reinforcements enter the map.
+    #[serde(default)]
+    pub edge: crate::game::ReinforcementEdge,
     pub harvested_credits: i64,
     pub credits_spent: i64,
     /// Ion Cannon charge (0..1), from HOUSE.CPP IonCannon.
@@ -58,6 +65,10 @@ impl House {
             buildings: Vec::new(),
             units: Vec::new(),
             tech_level: 98,
+            // HOUSE.CPP clamps MaxUnit/MaxBuilding to at least 150.
+            max_units: 150,
+            max_buildings: 150,
+            edge: crate::game::ReinforcementEdge::North,
             ai_enabled: false,
         }
     }

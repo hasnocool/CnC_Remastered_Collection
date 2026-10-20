@@ -1,5 +1,6 @@
 //! Network/Command queue for Tiberian Dawn
 
+use crate::game::Game;
 use cnc_core::{ClassId, Vec2};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
@@ -94,6 +95,8 @@ impl NetCommand {
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
+pub const PROTOCOL_VERSION: u32 = 1;
+
 fn mix(hash: &mut u64, value: u64) {
     *hash ^= value;
     *hash = hash.wrapping_mul(FNV_PRIME);
@@ -175,6 +178,34 @@ fn mix_ids(hash: &mut u64, units: &[u32]) {
     for unit in units {
         mix(hash, u64::from(*unit));
     }
+}
+
+/// Game-side apply arm for the sabotage command.
+///
+/// The wire variant, stable tag (12) and the packet codec below already carry
+/// [`Command::Sabotage`]; what was missing is the step that turns the decoded
+/// command into a simulation order. INFANTRY.CPP:2891-2901
+/// (`InfantryClass::What_Action`) is where the original engine rewrites a
+/// commando's attack on a building into `ACTION_SABOTAGE`, so the command names
+/// a unit index and a building index.
+///
+/// Only the issuing player's own living unit may be ordered, mirroring how the
+/// other order dispatchers validate ownership. The resulting order carries no
+/// random or time-derived data — `Game::order_sabotage` reads nothing but those
+/// two indices — so two peers applying the same command stream reach identical
+/// state, which is what the lockstep frame checksums compare.
+pub fn apply_sabotage(game: &mut Game, command: &Command, player: u8) -> bool {
+    let Command::Sabotage { unit, target } = command else {
+        return false;
+    };
+    let owned = game
+        .units
+        .get(*unit as usize)
+        .is_some_and(|unit| unit.is_alive() && unit.owner == player);
+    if !owned {
+        return false;
+    }
+    game.order_sabotage(*unit as usize, *target as usize)
 }
 
 fn mix_vec2(hash: &mut u64, vector: &Vec2) {
@@ -2108,6 +2139,113 @@ mod tests {
 
         let same = NetPacket::new(42, 0, commands);
         assert_eq!(packet.checksum, same.checksum);
+    }
+    /// Cell centre of a world cell (`Game::cell_center` is crate-private).
+    fn cell_center(cell: i32) -> Vec2 {
+        use crate::map::TILE_SIZE;
+        let centre = cell as f32 * TILE_SIZE + TILE_SIZE / 2.0;
+        point(centre as i32, centre as i32)
+    }
+
+    /// One live commando, one enemy construction yard and nothing else, so the
+    /// sabotage arm is the only thing that can change the state.
+    fn sabotage_scene() -> Game {
+        use crate::building::Building;
+        use crate::td_rules::{StructureType, UnitType};
+        use crate::unit::Unit;
+        use crate::House;
+        use cnc_core::ClassId;
+
+        let mut game = Game::new("net-sabotage", 16, 16);
+        game.units.clear();
+        game.houses.clear();
+        game.buildings.clear();
+        game.projectiles.clear();
+        game.houses
+            .push(House::new(ClassId::HouseGDI, "GDI".to_string()));
+        game.houses
+            .push(House::new(ClassId::HouseNod, "Nod".to_string()));
+        game.buildings.push(Building::from_type(
+            StructureType::ConstructionYard,
+            cell_center(6),
+            1,
+        ));
+        game.units
+            .push(Unit::new(UnitType::Commando, cell_center(9), 0));
+        game
+    }
+
+    /// Debug fingerprint of the simulation state the sabotage arm touches.
+    fn sabotage_fingerprint(game: &Game) -> String {
+        format!("{:?}|{:?}", game.buildings, game.units)
+    }
+
+    #[test]
+    fn sabotage_command_decodes_and_reaches_the_simulation() {
+        let mut game = sabotage_scene();
+        let command = Command::Sabotage { unit: 0, target: 0 };
+        let packet = NetPacket::new(3, 0, vec![NetCommand::new(3, 0, command.clone())]);
+        let decoded = NetPacket::decode(&packet.encode().unwrap()).unwrap();
+        assert_eq!(decoded.commands[0].command, command);
+        assert_eq!(decoded.commands[0].command.tag(), 12);
+
+        assert!(apply_sabotage(&mut game, &decoded.commands[0].command, 0));
+        assert_eq!(game.units[0].special_target, Some(0));
+
+        // Another player may not command someone else's commando, and the arm
+        // rejects anything that is not a sabotage command.
+        let mut other = sabotage_scene();
+        let untouched = sabotage_fingerprint(&other);
+        assert!(!apply_sabotage(&mut other, &command, 1));
+        assert!(!apply_sabotage(&mut other, &Command::Deploy { unit: 0 }, 0));
+        assert_eq!(
+            sabotage_fingerprint(&other),
+            untouched,
+            "rejected commands must leave the state untouched"
+        );
+    }
+
+    #[test]
+    fn sabotage_apply_is_deterministic_across_peers() {
+        // Two peers fed the same command stream must stay identical; that is
+        // exactly what LockstepSession::frame_checksum compares between hosts
+        // (see frame_checksums_are_order_independent_and_detect_desync).
+        let mut first = sabotage_scene();
+        let mut second = sabotage_scene();
+        let command = Command::Sabotage { unit: 0, target: 0 };
+        assert!(apply_sabotage(&mut first, &command, 0));
+        assert!(apply_sabotage(&mut second, &command, 0));
+        assert_eq!(
+            sabotage_fingerprint(&first),
+            sabotage_fingerprint(&second),
+            "the apply arm itself must not diverge"
+        );
+
+        let mut armed_at = None;
+        for step in 0..600 {
+            let delta = Fixed16_16::from_f32(0.05);
+            first.update(delta);
+            second.update(delta);
+            assert_eq!(
+                sabotage_fingerprint(&first),
+                sabotage_fingerprint(&second),
+                "peers diverged at step {step}"
+            );
+            if armed_at.is_none() && first.buildings[0].is_going_to_blow {
+                armed_at = Some(step);
+            }
+        }
+
+        // The commando reached the yard, planted the charge
+        // (INFANTRY.CPP:717-735) and the 5000-point detonation killed it
+        // (BUILDING.CPP:1229-1246); both peers agree on every step.
+        assert!(armed_at.is_some(), "the charge must be planted");
+        assert!(!first.buildings[0].is_alive(), "the yard must be destroyed");
+        assert!(!second.buildings[0].is_alive());
+        assert_eq!(
+            first.buildings[0].health.to_bits(),
+            second.buildings[0].health.to_bits()
+        );
     }
 }
 
