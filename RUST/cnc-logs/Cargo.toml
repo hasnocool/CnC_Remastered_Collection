@@ -1,0 +1,31 @@
+[package]
+name = "cnc-logs"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+description = "Structured logging and log management for C&C Remastered Collection"
+
+[lib]
+name = "cnc_logs"
+path = "src/lib.rs"
+
+[dependencies]
+cnc-core = { path = "../cnc-core" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["chrono", "env-filter", "fmt"] }
+tracing-appender = "0.2"
+tracing-core = "0.1"
+parking_lot = { workspace = true }
+once_cell = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+flate2 = { workspace = true }
+
+[dev-dependencies]
+criterion = "0.5"
+tempfile = "3.5"

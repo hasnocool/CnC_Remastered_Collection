@@ -1,0 +1,30 @@
+[package]
+name = "cnc-events"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+description = "Event system and event tracking for C&C Remastered Collection"
+
+[lib]
+name = "cnc_events"
+path = "src/lib.rs"
+
+[dependencies]
+cnc-core = { path = "../cnc-core" }
+cnc-logs = { path = "../cnc-logs" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+parking_lot = { workspace = true }
+once_cell = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+uuid = { workspace = true }
+crossbeam-channel = "0.5"
+dashmap = "5.5"
+smallvec = { version = "1.10", features = ["serde"] }
+
+[dev-dependencies]
+criterion = "0.5"
