@@ -11,6 +11,7 @@ pub mod house;
 pub mod map;
 pub mod mcv;
 pub mod naval;
+pub mod original_scenario;
 pub mod pathfind;
 pub mod render;
 pub mod scenario;
@@ -18,7 +19,7 @@ pub mod spy;
 pub mod superweapon;
 pub mod tesla;
 
-pub use aircraft::{Aircraft, Airfield, Helipad};
+pub use aircraft::{AIRFIELD_CAPACITY, DEFAULT_AMMO, REARM_SECONDS};
 pub use game::{
     AiCommander, BuildError, Game, GameCommand, GameStatus, GameStructure, GameUnit,
     ObjectiveState, RunningTrigger, ScenarioOutcome, Shot, TargetRef, UnitRole, WeaponSpec,
@@ -27,7 +28,7 @@ pub use gapgen::GapGenerator;
 pub use house::{Country, Faction, House, ProductionItem};
 pub use map::{Map, Terrain, TILE_SIZE};
 pub use mcv::{can_deploy_at, yard_footprint, MCV};
-pub use naval::{Ship, Submarine};
+pub use naval::{SHIP_SPEED_PX_PER_SEC, SUB_SPEED_PX_PER_SEC, SUB_TORPEDOES};
 pub use pathfind::{find_path, MoveClass};
 pub use render::{entity_asset, render_entity};
 pub use scenario::{Scenario, ScenarioObject, ScenarioTrigger};

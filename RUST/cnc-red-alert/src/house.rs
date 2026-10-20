@@ -67,7 +67,7 @@ impl Country {
         match self {
             Self::England => ClassId::GapGenerator,
             Self::Germany => ClassId::Chronosphere,
-            Self::France => ClassId::Chronosphere,
+            Self::France => ClassId::GrandCannon,
             Self::Russia => ClassId::IronCurtain,
             Self::Ukraine => ClassId::TeslaCoil,
         }
@@ -204,6 +204,8 @@ mod tests {
         assert_eq!(Country::Germany.faction(), Faction::Allied);
         assert_eq!(Country::Ukraine.faction(), Faction::Soviet);
         assert_eq!(Country::England.unique_structure(), ClassId::GapGenerator);
+        assert_eq!(Country::France.unique_structure(), ClassId::GrandCannon);
+        assert_eq!(Country::Germany.unique_structure(), ClassId::Chronosphere);
         assert_eq!(Country::Russia.unique_structure(), ClassId::IronCurtain);
         assert_eq!(Country::Ukraine.unique_structure(), ClassId::TeslaCoil);
     }
