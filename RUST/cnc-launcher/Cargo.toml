@@ -26,6 +26,7 @@ cnc-renderer = { path = "../cnc-renderer" }
 cnc-audio = { path = "../cnc-audio" }
 cnc-asset = { path = "../cnc-asset" }
 anyhow = { workspace = true }
+uuid = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 clap = { workspace = true }

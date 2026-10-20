@@ -46,7 +46,9 @@ use cnc_renderer::{Camera, Renderer, SoftwareRenderer, Sprite, WgpuRenderer};
 use cnc_tiberian_dawn::network::{
     Command as NetCommandKind, LiveEvent, LiveSession, NetCommand, NetPacket, NetworkConfig,
 };
-use cnc_tiberian_dawn::{Buildable, Game, Mission, MissionOutcome, StructureType, UnitType};
+use cnc_tiberian_dawn::{
+    Buildable, Carryover, Game, Mission, MissionOutcome, StructureType, UnitType,
+};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -54,20 +56,34 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
+mod lobby;
 mod menu;
+mod options;
+mod ready;
+mod score;
 
-use menu::{GameChoice, LaunchTarget, MainMenu, MenuCommand};
+use menu::{
+    GameChoice, LaunchTarget, MainMenu, MenuCommand, OptionsAction, OptionsModal, VolumeBus,
+};
+use options::LauncherOptions;
+use ready::{format_ready_line, parse_ready_line, ReadyTracker};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
-const MAP_SIZE: u32 = 64;
+pub(crate) const MAP_SIZE: u32 = 64;
 
 #[derive(Parser)]
 #[command(name = "cnc-launcher")]
 #[command(about = "Command & Conquer Remastered Collection - Rust Clone")]
 struct Args {
-    /// Renderer backend: "wgpu" (default) or "software".
-    #[arg(short, long, default_value = "wgpu")]
-    renderer: String,
+    /// Renderer backend: "wgpu" (default) or "software". Omit it to take
+    /// the persisted launcher-options choice.
+    #[arg(short, long)]
+    renderer: Option<String>,
+
+    /// Optional launcher options INI (video/audio defaults); overrides the
+    /// saves/launcher-options.ini location.
+    #[arg(long)]
+    options: Option<PathBuf>,
 
     #[arg(short, long, default_value_t = 1024)]
     width: u32,
@@ -162,8 +178,8 @@ impl GameKind {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RendererKind {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RendererKind {
     Wgpu,
     Software,
 }
@@ -257,6 +273,8 @@ fn build_label(buildable: Buildable) -> &'static str {
         Buildable::Unit(UnitType::Buggy) => "Buggy",
         Buildable::Unit(UnitType::Orca) => "Orca",
         Buildable::Unit(UnitType::Apache) => "Apache",
+        Buildable::Unit(UnitType::Commando) => "Commando",
+        Buildable::Unit(UnitType::Engineer) => "Engineer",
         Buildable::Structure(StructureType::ConstructionYard) => "Con Yard",
         Buildable::Structure(StructureType::PowerPlant) => "Power Plant",
         Buildable::Structure(StructureType::Refinery) => "Refinery",
@@ -266,6 +284,11 @@ fn build_label(buildable: Buildable) -> &'static str {
         Buildable::Structure(StructureType::Helipad) => "Helipad",
         Buildable::Structure(StructureType::IonCannon) => "Ion Cannon",
         Buildable::Structure(StructureType::TempleOfNod) => "Temple",
+        Buildable::Structure(StructureType::GuardTower) => "Guard Tower",
+        Buildable::Structure(StructureType::AdvancedGuardTower) => "Adv Guard Tower",
+        Buildable::Structure(StructureType::Turret) => "Turret",
+        Buildable::Structure(StructureType::SamSite) => "SAM Site",
+        Buildable::Structure(StructureType::Obelisk) => "Obelisk",
     }
 }
 
@@ -303,7 +326,30 @@ fn ra_save_path_for(slot: usize) -> PathBuf {
     PathBuf::from(dir).join(file)
 }
 
-fn draw_td_briefing(renderer: &mut dyn Renderer, mission: &Mission, width: u32, height: u32) {
+fn draw_td_briefing(
+    renderer: &mut dyn Renderer,
+    mission: &Mission,
+    tileset: Option<&TilesetPack>,
+    width: u32,
+    height: u32,
+) -> bool {
+    // Video first (plan box 212): only drawn when the screen's tileset pack is
+    // resident so the borrowed texture slot can be restored once the briefing
+    // ends. Any miss (no asset, unreadable file, unsupported variant, no atlas
+    // backend) falls through to the text panel below.
+    if tileset.is_some()
+        && draw_briefing_video(renderer, mission.briefing_image.as_deref(), width, height)
+    {
+        renderer.draw_text(&mission.name, 40.0, 22.0, 16.0, [0.95, 0.93, 0.88, 1.0]);
+        renderer.draw_text(
+            "Enter: begin mission    Esc: quit",
+            40.0,
+            height as f32 - 34.0,
+            12.0,
+            [0.78, 0.85, 0.95, 1.0],
+        );
+        return true;
+    }
     let w = width as f32;
     let h = height as f32;
     renderer.draw_rect(0.0, 0.0, w, h, [0.05, 0.05, 0.07, 1.0]);
@@ -354,6 +400,177 @@ fn draw_td_briefing(renderer: &mut dyn Renderer, mission: &Mission, width: u32, 
         10.0,
         [0.70, 0.80, 0.92, 1.0],
     );
+    false
+}
+
+/// Shared texture slot a briefing video borrows: the RTS tileset slot
+/// ([`cnc_renderer::TILESET_TEXTURE_ID`]). A briefing screen draws no terrain
+/// or units, so the slot is idle while a briefing is shown. The decoded frame
+/// is uploaded there and drawn aspect-fit; the owning tileset atlas is
+/// re-uploaded at the call site after the frame is presented so the mission
+/// that follows still samples the real tileset (the batch carries only two
+/// atlas slots; see cnc-renderer's `MAX_ATLAS_TEXTURES`). No `.VQA` assets are
+/// bundled yet, so the runtime path always begins in the text fallback.
+const BRIEFING_VIDEO_TEXTURE_ID: u32 = cnc_renderer::TILESET_TEXTURE_ID;
+
+/// Deterministic synthetic display palette for a decoded VQA frame.
+///
+/// A v1 container carries a 256-entry codebook of 2×2 block pixel *indices*,
+/// not a display palette, and the asset crate deliberately does not parse the
+/// 768-byte VQA palette yet (see [`cnc_asset::video`]). Until a real palette
+/// ships, each index maps to a fixed, non-black colour so a decoded frame
+/// renders as visible "codebook colour" and asserts crisply headlessly.
+fn vqa_index_to_rgba(index: u8) -> [u8; 4] {
+    [
+        index.saturating_add(16),
+        index.wrapping_mul(2).saturating_add(24),
+        index.wrapping_mul(3).saturating_add(48),
+        255,
+    ]
+}
+
+/// Expand a codebook-decoded 8-bit index image into RGBA8 using
+/// [`vqa_index_to_rgba`]. Output is `4 * indices.len()` bytes.
+fn vqa_indices_to_rgba(indices: &[u8]) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity(indices.len() * 4);
+    for &index in indices {
+        rgba.extend_from_slice(&vqa_index_to_rgba(index));
+    }
+    rgba
+}
+
+/// Resolve a briefing video's first decoded RGBA frame from raw container bytes.
+///
+/// Demuxes the v1 IFF container, takes the first `CBF0` codebook and first
+/// `VQFL` full frame, decodes it to 8-bit indices and converts them to RGBA.
+/// Returns `(rgba, width_px, height_px)`; returns `None` on *any* demux or
+/// decode error (missing codebook/frame, unsupported variant, dimension
+/// mismatch) so callers fall back to the text briefing panel.
+fn briefing_video_first_frame(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    use cnc_asset::video::{decode_frame, demux, VqaChunk};
+
+    let vqa = demux(bytes).ok()?;
+    let codebook = vqa.chunks.iter().find_map(|chunk| match chunk {
+        VqaChunk::CodebookFull { data } => Some(data),
+        _ => None,
+    })?;
+    let frame = vqa.chunks.iter().find_map(|chunk| match chunk {
+        VqaChunk::FrameFull { data } => Some(data),
+        _ => None,
+    })?;
+    let indices = decode_frame(
+        codebook,
+        frame,
+        vqa.header.width_blocks,
+        vqa.header.height_blocks,
+    )
+    .ok()?;
+    let width_px = u32::from(vqa.header.width_blocks) * 2;
+    let height_px = u32::from(vqa.header.height_blocks) * 2;
+    Some((vqa_indices_to_rgba(&indices), width_px, height_px))
+}
+
+/// Resolve a briefing video's raw container bytes from disk.
+///
+/// Mirrors the launcher's other `CNC_ASSETS`-relative asset loads (see
+/// `LauncherApp::resumed`): returns `None` when the key is absent/empty or the
+/// file is unreadable. `Path::join` with an absolute key resolves to that
+/// absolute path (a std path join quirk the headless tests lean on).
+fn read_briefing_asset(image_key: Option<&str>) -> Option<Vec<u8>> {
+    let key = image_key?;
+    if key.is_empty() {
+        return None;
+    }
+    let assets_dir = std::env::var("CNC_ASSETS").unwrap_or_else(|_| "assets".to_string());
+    let path = Path::new(&assets_dir).join(key);
+    match std::fs::read(&path) {
+        Ok(bytes) => Some(bytes),
+        Err(_) => {
+            tracing::debug!(%key, dir = %assets_dir, "briefing video asset unreadable; text panel");
+            None
+        }
+    }
+}
+
+/// Upload one decoded RGBA frame into the borrowed briefing slot and draw it
+/// aspect-fit and centered over `width x height`.
+///
+/// Returns `true` when the frame uploaded and drew, `false` when the backend
+/// rejected the upload (no atlas support) or the frame is empty — the caller
+/// keeps the text panel. This is the render half only (no resolve, no decode),
+/// so the headless tests drive it directly on [`SoftwareRenderer`].
+fn draw_video_frame(
+    renderer: &mut dyn Renderer,
+    rgba: &[u8],
+    frame_w: u32,
+    frame_h: u32,
+    width: u32,
+    height: u32,
+) -> bool {
+    if frame_w == 0 || frame_h == 0 {
+        return false;
+    }
+    if renderer
+        .set_atlas_texture(BRIEFING_VIDEO_TEXTURE_ID, frame_w, frame_h, rgba)
+        .is_err()
+    {
+        return false;
+    }
+    let (screen_w, screen_h) = (width.max(1) as f32, height.max(1) as f32);
+    let scale = (screen_w / frame_w as f32).min(screen_h / frame_h as f32);
+    let draw_w = (frame_w as f32 * scale).max(1.0);
+    let draw_h = (frame_h as f32 * scale).max(1.0);
+    let origin_x = (screen_w - draw_w) * 0.5;
+    let origin_y = (screen_h - draw_h) * 0.5;
+    let mut sprite = Sprite::new(
+        BRIEFING_VIDEO_TEXTURE_ID,
+        Vec2::new(
+            Fixed16_16::from_f32(origin_x),
+            Fixed16_16::from_f32(origin_y),
+        ),
+        Vec2::new(Fixed16_16::from_f32(draw_w), Fixed16_16::from_f32(draw_h)),
+    );
+    sprite.uv_rect = cnc_core::Rect::new(0, 0, frame_w as i32, frame_h as i32);
+    renderer.draw_sprite(&sprite);
+    true
+}
+
+/// Draw a briefing video still (the first decoded frame) for the mission.
+///
+/// Returns `true` when a real frame was drawn — the caller then adds its own
+/// title/footer overlay. Returns `false` for a missing key, an unreadable
+/// file, an unsupported/malformed container, or a backend without atlas
+/// support, so the caller keeps the existing text panel. Never panics.
+fn draw_briefing_video(
+    renderer: &mut dyn Renderer,
+    image_key: Option<&str>,
+    width: u32,
+    height: u32,
+) -> bool {
+    let Some(bytes) = read_briefing_asset(image_key) else {
+        return false;
+    };
+    let Some((rgba, frame_w, frame_h)) = briefing_video_first_frame(&bytes) else {
+        return false;
+    };
+    renderer.draw_rect(
+        0.0,
+        0.0,
+        width as f32,
+        height as f32,
+        [0.03, 0.03, 0.04, 1.0],
+    );
+    draw_video_frame(renderer, &rgba, frame_w, frame_h, width, height)
+}
+
+/// Deterministic RA briefing-video asset key for a campaign mission index.
+///
+/// `RaGame` carries only `briefing`/`objectives`, not the scenario's
+/// `BriefingImage` key, so the RA hook resolves a fixed convention. No bundled
+/// `.VQA` matches it yet, so RA always takes the text fallback today; a real
+/// asset (or surfacing `Scenario::briefing_image`) wires the path up.
+fn ra_briefing_video_key(index: usize) -> String {
+    format!("briefings/ra_{index:02}.vqa")
 }
 
 /// Tileset palette a screen needs. LauncherApp draws the TD screens and
@@ -433,12 +650,18 @@ impl PackTerrain {
 /// Callers pick the tileset family themselves via [`PackTerrain::tile`] for
 /// base terrain (grass/sand/rock/water), water_edges shore rows for shore
 /// water, and transitions sand_shore for Beach.
+///
+/// `col_override` pins the tile column: the transitions sheet's columns are
+/// 4-bit edge masks (N=1, E=2, S=4, W=8), so mask-driven categories must pass
+/// the computed mask here instead of receiving the deterministic per-cell
+/// variant hash used for plain texture-variant rows.
 fn draw_pack_tile_family(
     renderer: &mut dyn Renderer,
     tileset: Option<&TilesetPack>,
     category: &str,
     family: &str,
     fallback_row: u8,
+    col_override: Option<u8>,
     cell_x: u32,
     cell_y: u32,
     x: f32,
@@ -459,8 +682,11 @@ fn draw_pack_tile_family(
         .min((GRID - 1) as u8);
     let grid = GRID as usize;
     // Deterministic per-cell column variant, same scheme as the engine and
-    // editor terrain code: (x * 7 + y * 13) mod 16.
-    let col = ((cell_x as usize % grid) * 7 + (cell_y as usize % grid) * 13) % grid;
+    // editor terrain code: (x * 7 + y * 13) mod 16 — unless the caller pinned
+    // a mask column for mask-driven categories (transitions).
+    let col = col_override
+        .map(|col| col as usize % grid)
+        .unwrap_or_else(|| ((cell_x as usize % grid) * 7 + (cell_y as usize % grid) * 13) % grid);
     let Some((px, py, pw, ph)) = pack.tile_px_rect(category, row, col as u8) else {
         renderer.draw_rect(x, y, w, h, fallback_color);
         return false;
@@ -502,6 +728,7 @@ fn draw_pack_fx(
         "resources_fx",
         family,
         fallback_row,
+        None,
         cell_x,
         cell_y,
         x,
@@ -515,55 +742,52 @@ fn draw_pack_fx(
     )
 }
 
-/// The eight neighbours of a cell classified by `is_land`, in
-/// (n, e, s, w, nw, ne, sw, se) order. `is_land` must treat out-of-map
-/// coordinates as water so shore edges only point at real land.
-fn land_neighbours(cx: i32, cy: i32, is_land: impl Fn(i32, i32) -> bool) -> [bool; 8] {
-    [
-        is_land(cx, cy - 1),
-        is_land(cx + 1, cy),
-        is_land(cx, cy + 1),
-        is_land(cx - 1, cy),
-        is_land(cx - 1, cy - 1),
-        is_land(cx + 1, cy - 1),
-        is_land(cx - 1, cy + 1),
-        is_land(cx + 1, cy + 1),
-    ]
-}
-
-/// Water-edge family for a water cell given land-contact booleans in
-/// (n, e, s, w, nw, ne, sw, se) order. Orthogonal contacts win over diagonal
-/// corners; the fixed priority keeps the tile choice deterministic per cell
-/// regardless of draw order. Returns None for open water (plain deep_water).
-fn water_shore_family(neighbours: [bool; 8]) -> Option<(&'static str, u8)> {
-    let [n, e, s, w, nw, ne, sw, se] = neighbours;
-    if n {
-        Some(("shore_north", 2))
-    } else if e {
-        Some(("shore_east", 3))
-    } else if s {
-        Some(("shore_south", 4))
-    } else if w {
-        Some(("shore_west", 5))
-    } else if nw {
-        Some(("shore_nw", 6))
-    } else if ne {
-        Some(("shore_ne", 7))
-    } else if sw {
-        Some(("shore_sw", 8))
-    } else if se {
-        Some(("shore_se", 9))
-    } else {
-        None
+/// Water-edge family for a water cell, keyed by the 4-bit land mask of its
+/// orthogonal neighbours (N=1, E=2, S=4, W=8) — the same mask the TD engine's
+/// `water_edges_layout` and the map editor's `water_shore_family` consume and
+/// the pack's `water_edges` art was generated for. The pack's shore art names
+/// the side its *water* half occupies, so land to the north selects
+/// `shore_south` (water in the south half) and corners follow the same rule.
+/// Opposite land pairs select the river-flow families; a water cell ringed by
+/// land falls back to `shallow_water`. Returns None for open water (plain
+/// deep_water).
+fn water_shore_tile(land_mask: u8) -> Option<(&'static str, u8)> {
+    match land_mask {
+        0 => None,
+        0b0001 => Some(("shore_south", 4)), // land at north
+        0b0010 => Some(("shore_west", 5)),  // land at east
+        0b0100 => Some(("shore_north", 2)), // land at south
+        0b1000 => Some(("shore_east", 3)),  // land at west
+        0b0011 => Some(("shore_sw", 8)),    // land at north+east
+        0b0110 => Some(("shore_nw", 6)),    // land at east+south
+        0b1001 => Some(("shore_se", 9)),    // land at north+west
+        0b1100 => Some(("shore_ne", 7)),    // land at south+west
+        // Opposite land pairs: the water flows through.
+        0b0101 => Some(("river_flow_e_w", 11)),
+        0b1010 => Some(("river_flow_n_s", 10)),
+        // Three land sides: one side stays open to water.
+        0b1110 => Some(("shore_north", 2)),
+        0b1101 => Some(("shore_east", 3)),
+        0b1011 => Some(("shore_south", 4)),
+        0b0111 => Some(("shore_west", 5)),
+        _ => Some(("shallow_water", 1)), // ringed by land on all sides
     }
 }
 
 /// Tileset family for one RA terrain cell at (`px`, `py`): water against land
 /// picks water_edges shore rows computed directly from `map.terrain`, open
-/// water stays deep_water; Beach renders the transitions sand_shore row; the
-/// rest use the base terrain families.
-fn ra_terrain_tile(map: &cnc_red_alert::Map, px: u32, py: u32) -> (&'static str, &'static str, u8) {
-    let is_land = |cx: i32, cy: i32| -> bool {
+/// water stays deep_water; Beach renders the transitions sand_shore row with
+/// the column set to the 4-bit mask of water neighbours (the transitions
+/// sheet's columns are edge masks: N=1, E=2, S=4, W=8 — a set bit draws the
+/// water half against that side); the rest use the base terrain families.
+/// The fourth tuple element overrides the per-cell variant column for
+/// mask-driven categories and is None for plain variant rows.
+fn ra_terrain_tile(
+    map: &cnc_red_alert::Map,
+    px: u32,
+    py: u32,
+) -> (&'static str, &'static str, u8, Option<u8>) {
+    let is_water = |cx: i32, cy: i32| -> bool {
         if cx < 0 || cy < 0 || cx as u32 >= map.width || cy as u32 >= map.height {
             return false;
         }
@@ -571,7 +795,7 @@ fn ra_terrain_tile(map: &cnc_red_alert::Map, px: u32, py: u32) -> (&'static str,
             .get(cy as usize * map.width as usize + cx as usize)
             .copied()
             .unwrap_or(cnc_red_alert::Terrain::Water)
-            != cnc_red_alert::Terrain::Water
+            == cnc_red_alert::Terrain::Water
     };
     let terrain = map
         .terrain
@@ -579,30 +803,54 @@ fn ra_terrain_tile(map: &cnc_red_alert::Map, px: u32, py: u32) -> (&'static str,
         .copied()
         .unwrap_or(cnc_red_alert::Terrain::Grass);
     if terrain == cnc_red_alert::Terrain::Water {
-        if let Some((family, row)) =
-            water_shore_family(land_neighbours(px as i32, py as i32, is_land))
-        {
-            return ("water_edges", family, row);
+        // Off-map sides are never land, so shore edges only point at real
+        // cells (open map borders stay open water).
+        let is_land = |cx: i32, cy: i32| -> bool {
+            cx >= 0
+                && cy >= 0
+                && (cx as u32) < map.width
+                && (cy as u32) < map.height
+                && !is_water(cx, cy)
+        };
+        let land_mask = land_mask_at(px as i32, py as i32, is_land);
+        if let Some((family, row)) = water_shore_tile(land_mask) {
+            return ("water_edges", family, row, None);
         }
-        return ("water_edges", "deep_water", 0);
+        return ("water_edges", "deep_water", 0, None);
     }
     if terrain == cnc_red_alert::Terrain::Beach {
-        return ("transitions", "sand_shore", 10);
+        // Edge mask of the water sides: the sand_shore art draws its water
+        // half (terrain B) against every side whose bit is set, so the blend
+        // meets the actual neighbouring water cells.
+        let water_mask = land_mask_at(px as i32, py as i32, is_water);
+        return ("transitions", "sand_shore", 10, Some(water_mask));
     }
-    PackTerrain::from_ra(terrain).tile()
+    let (category, family, row) = PackTerrain::from_ra(terrain).tile();
+    (category, family, row, None)
+}
+
+/// 4-bit orthogonal neighbour mask (N=1, E=2, S=4, W=8) for the cell at
+/// (`cx`, `cy`) using `matches`. Out-of-map coordinates never match.
+fn land_mask_at(cx: i32, cy: i32, matches: impl Fn(i32, i32) -> bool) -> u8 {
+    let n = matches(cx, cy - 1) as u8;
+    let e = matches(cx + 1, cy) as u8;
+    let s = matches(cx, cy + 1) as u8;
+    let w = matches(cx - 1, cy) as u8;
+    n | (e << 1) | (s << 2) | (w << 3)
 }
 
 /// Tileset family for one raw campaign terrain cell (codes: 1 water, 2 sand,
 /// 4 rock, otherwise grass): water against land picks water_edges shore rows
 /// computed over the campaign grid, open water stays deep_water, the rest use
-/// the base terrain families.
+/// the base terrain families. Column override stays None: campaign previews
+/// have no transition-category cells.
 fn campaign_terrain_tile(
     terrain: &[u8],
     width: u32,
     height: u32,
     px: u32,
     py: u32,
-) -> (&'static str, &'static str, u8) {
+) -> (&'static str, &'static str, u8, Option<u8>) {
     let code = |cx: i32, cy: i32| -> u8 {
         if cx < 0 || cy < 0 || cx as u32 >= width || cy as u32 >= height {
             return 0;
@@ -617,14 +865,14 @@ fn campaign_terrain_tile(
             let in_map = cx >= 0 && cy >= 0 && (cx as u32) < width && (cy as u32) < height;
             in_map && code(cx, cy) != 1
         };
-        if let Some((family, row)) =
-            water_shore_family(land_neighbours(px as i32, py as i32, is_land))
-        {
-            return ("water_edges", family, row);
+        let land_mask = land_mask_at(px as i32, py as i32, is_land);
+        if let Some((family, row)) = water_shore_tile(land_mask) {
+            return ("water_edges", family, row, None);
         }
-        return ("water_edges", "deep_water", 0);
+        return ("water_edges", "deep_water", 0, None);
     }
-    PackTerrain::from_campaign(code(px as i32, py as i32)).tile()
+    let (category, family, row) = PackTerrain::from_campaign(code(px as i32, py as i32)).tile();
+    (category, family, row, None)
 }
 
 /// resources_fx family for a TD tiberium cell chosen by amount bucket
@@ -679,10 +927,12 @@ fn draw_td_minimap(
             // tiberium_ground family as the underlay (terrain and resources_fx
             // category sheets compose over each other). The flat fallback
             // colours keep the legacy look when no tile art is available.
-            let (category, family, fallback_row) = if cell.has_tiberium {
-                ("terrain", "tiberium_ground", 5)
+            let (category, family, fallback_row, col_override) = if cell.has_tiberium {
+                ("terrain", "tiberium_ground", 5, None)
             } else {
-                PackTerrain::from_td(cell.terrain_type).tile()
+                let (category, family, fallback_row) =
+                    PackTerrain::from_td(cell.terrain_type).tile();
+                (category, family, fallback_row, None)
             };
             let fallback = if cell.has_tiberium {
                 [0.10, 0.60, 0.15, 1.0]
@@ -702,6 +952,7 @@ fn draw_td_minimap(
                 category,
                 family,
                 fallback_row,
+                col_override,
                 cell_x,
                 cell_y,
                 tile_x,
@@ -1239,7 +1490,7 @@ const MIN_GAME_ZOOM: f32 = 0.5;
 const MAX_GAME_ZOOM: f32 = 4.0;
 /// Starting zoom for a match. 24 px cells at 2x match the original games' field
 /// of view much more closely than 1:1 pixels, which shows nearly a whole map.
-const DEFAULT_GAME_ZOOM: f32 = 2.0;
+pub(crate) const DEFAULT_GAME_ZOOM: f32 = 2.0;
 /// Multiplier for one keyboard zoom step ("+" / "-").
 const KEY_ZOOM_STEP: f32 = 1.2;
 
@@ -1441,7 +1692,7 @@ fn draw_ra_setup_preview(
             let fallback = if ore { [0.62, 0.55, 0.18, 1.0] } else { base };
             // Water against land gets shore edge tiles, Beach transitions to
             // sand_shore, the rest keep the base terrain family.
-            let (category, family, fallback_row) = ra_terrain_tile(map, px, py);
+            let (category, family, fallback_row, col_override) = ra_terrain_tile(map, px, py);
             let tile_s = scale * step as f32;
             let drew_tile = draw_pack_tile_family(
                 renderer,
@@ -1449,6 +1700,7 @@ fn draw_ra_setup_preview(
                 category,
                 family,
                 fallback_row,
+                col_override,
                 px,
                 py,
                 x + px as f32 * scale,
@@ -1548,6 +1800,16 @@ fn draw_ra_setup(
     );
 }
 
+/// Format a ready-up roster for the network lobby, preserving
+/// `ReadyTracker::roster`'s name-sorted order: one
+/// `<player>: READY|waiting` row per peer.
+fn net_lobby_roster_rows(roster: &[(String, bool)]) -> Vec<String> {
+    roster
+        .iter()
+        .map(|(name, ready)| format!("{}: {}", name, if *ready { "READY" } else { "waiting" }))
+        .collect()
+}
+
 /// Host/join lobby screen shared by the TD and RA network modes.
 fn draw_net_lobby(
     renderer: &mut dyn Renderer,
@@ -1555,6 +1817,7 @@ fn draw_net_lobby(
     lobby: &NetLobby,
     scan: Option<&LanScan>,
     error: Option<&str>,
+    roster: &[(String, bool)],
     width: u32,
     height: u32,
 ) {
@@ -1584,7 +1847,7 @@ fn draw_net_lobby(
     } else {
         ""
     };
-    let rows = [
+    let mut rows: Vec<String> = vec![
         format!("Role: {}    (R)", lobby.role_label()),
         format!("Local port: {}    ([ / ])", port),
         format!("{address_label}: {address}_ {editing}"),
@@ -1592,8 +1855,9 @@ fn draw_net_lobby(
         "Tab: switch field   Backspace: delete".to_string(),
         "L: scan LAN   Up/Down: pick host".to_string(),
         "Enter: start network game".to_string(),
-        "Esc: stop scan / back to setup".to_string(),
     ];
+    rows.extend(net_lobby_roster_rows(roster));
+    rows.push("Esc: stop scan / back to setup".to_string());
     let mut y = 160.0;
     for (index, row) in rows.iter().enumerate() {
         let color = if index >= 4 {
@@ -1878,7 +2142,7 @@ fn draw_ra_campaign(
                         let fallback = if ore { [0.85, 0.72, 0.22, 1.0] } else { base };
                         // Water against land gets shore edge tiles computed
                         // over the campaign grid, open water stays deep_water.
-                        let (category, family, fallback_row) = campaign_terrain_tile(
+                        let (category, family, fallback_row, col_override) = campaign_terrain_tile(
                             &entry.terrain,
                             entry.width,
                             entry.height,
@@ -1891,6 +2155,7 @@ fn draw_ra_campaign(
                             category,
                             family,
                             fallback_row,
+                            col_override,
                             px,
                             py,
                             preview_x + px as f32 * cell_w,
@@ -2185,7 +2450,7 @@ fn draw_ra_minimap(
             let fallback = if ore { [0.62, 0.55, 0.18, 1.0] } else { base };
             // Water against land gets shore edge tiles, Beach transitions to
             // sand_shore, the rest keep the base terrain family.
-            let (category, family, fallback_row) = ra_terrain_tile(&game.map, px, py);
+            let (category, family, fallback_row, col_override) = ra_terrain_tile(&game.map, px, py);
             let tile_s = scale * step as f32;
             let drew_tile = draw_pack_tile_family(
                 renderer,
@@ -2193,6 +2458,7 @@ fn draw_ra_minimap(
                 category,
                 family,
                 fallback_row,
+                col_override,
                 px,
                 py,
                 x + px as f32 * scale,
@@ -2377,9 +2643,28 @@ fn draw_ra_briefing(
     mission: &str,
     game: &RaGame,
     index: usize,
+    tileset: Option<&TilesetPack>,
     width: u32,
     height: u32,
-) {
+) -> bool {
+    // Video first (plan box 212); mirrors the TD briefing. Borrows the shared
+    // tileset slot only when the RA tileset pack is resident so it can be
+    // restored afterwards; any miss falls through to the text panel below.
+    // `RaGame` carries no per-mission briefing-video key, so this resolves a
+    // deterministic index-keyed asset that no bundle ships yet (text fallback).
+    if tileset.is_some()
+        && draw_briefing_video(renderer, Some(&ra_briefing_video_key(index)), width, height)
+    {
+        renderer.draw_text(mission, 40.0, 22.0, 16.0, [0.95, 0.93, 0.88, 1.0]);
+        renderer.draw_text(
+            "Enter: begin mission    Esc: quit",
+            40.0,
+            height as f32 - 34.0,
+            12.0,
+            [0.78, 0.85, 0.95, 1.0],
+        );
+        return true;
+    }
     let w = width as f32;
     let h = height as f32;
     renderer.draw_rect(0.0, 0.0, w, h, [0.04, 0.05, 0.08, 1.0]);
@@ -2437,16 +2722,17 @@ fn draw_ra_briefing(
         11.0,
         [0.70, 0.80, 0.92, 1.0],
     );
+    false
 }
 
-struct LauncherApp {
+pub struct LauncherApp {
     kind: RendererKind,
     width: u32,
     height: u32,
     window: Option<Arc<Window>>,
     renderer: Option<Box<dyn Renderer>>,
-    camera: Camera,
-    game: Game,
+    pub camera: Camera,
+    pub game: Game,
     sprite_atlas: Option<SpriteAtlas>,
     /// RTS 16×16 tileset packs, one per palette: `ra_inspired` backs the RA
     /// screens, `td_inspired` the TD screens. `load_default` honors
@@ -2463,6 +2749,10 @@ struct LauncherApp {
     assets: AssetRegistry,
     #[allow(dead_code)]
     mixer: AudioMixer,
+    /// Persisted launcher options (plan line 206); the options-modal UI
+    /// lane mutates this in place.
+    #[allow(dead_code)] // Read by the Phase 9.1 options modal.
+    pub options: LauncherOptions,
     cursor: Option<winit::dpi::PhysicalPosition<f64>>,
     drag_start: Option<winit::dpi::PhysicalPosition<f64>>,
     drag_current: Option<winit::dpi::PhysicalPosition<f64>>,
@@ -2497,6 +2787,9 @@ struct LauncherApp {
     td_complete: bool,
     td_paused: bool,
     td_pause_choice: usize,
+    td_score: Option<score::ScoreReport>,
+    td_score_since: Option<Instant>,
+    td_carryover: Option<Carryover>,
     td_notice: Option<(String, Instant)>,
     /// True while the TD host/join lobby owns the screen.
     td_lobby_open: bool,
@@ -2505,12 +2798,21 @@ struct LauncherApp {
     td_lan_scan: Option<LanScan>,
     /// Live lockstep session while a TD network match runs.
     network: Option<TdNetwork>,
+    /// Host-side ready roster; ready flags ride out-of-band, never the
+    /// lockstep stream (see the `ready` module).
+    ready_tracker: ReadyTracker,
     /// Set when a menu-owned screen wants the shell to reopen the main menu.
     return_to_menu: bool,
 }
 
 impl LauncherApp {
-    fn new(kind: RendererKind, width: u32, height: u32, rules: RulesDatabase) -> Result<Self> {
+    pub fn new(
+        kind: RendererKind,
+        width: u32,
+        height: u32,
+        rules: RulesDatabase,
+        options: LauncherOptions,
+    ) -> Result<Self> {
         let mut game = Game::with_rules("GDI Mission 1", MAP_SIZE, MAP_SIZE, rules);
         game.setup_demo();
 
@@ -2532,7 +2834,14 @@ impl LauncherApp {
             td_tileset: cnc_asset::tileset_pack::load_default("td_inspired"),
             tileset_slot: None,
             assets: AssetRegistry::new(),
-            mixer: AudioMixer::new()?,
+            mixer: {
+                // Apply the persisted volume buses where the mixer is built
+                // (plan line 206; cnc-audio music/effects/master knobs).
+                let mixer = AudioMixer::new()?;
+                options.apply_to_mixer(&mixer);
+                mixer
+            },
+            options,
             cursor: None,
             drag_start: None,
             drag_current: None,
@@ -2567,12 +2876,16 @@ impl LauncherApp {
             td_complete: false,
             td_paused: false,
             td_pause_choice: 0,
+            td_score: None,
+            td_score_since: None,
+            td_carryover: None,
             td_notice: None,
             td_lobby_open: false,
             td_lobby: NetLobby::td_default(),
             td_lobby_error: None,
             td_lan_scan: None,
             network: None,
+            ready_tracker: ReadyTracker::new(),
             return_to_menu: false,
         })
     }
@@ -2840,6 +3153,8 @@ impl LauncherApp {
             Ok(game) => {
                 self.game = game;
                 self.camera.position = self.game.world_center();
+                self.td_score = None;
+                self.td_score_since = None;
                 self.last_produced = self.game.units_produced;
                 self.last_harvested = self.game.harvested_credits;
                 self.last_aircraft_shots = self.game.aircraft_shots;
@@ -2892,6 +3207,13 @@ impl LauncherApp {
 
     /// Start the match described by the TD lobby fields.
     fn start_td_lobby(&mut self) -> Result<()> {
+        if self.td_lobby.role == NetRole::Host
+            && self.ready_tracker.expected_count() > 0
+            && !self.ready_tracker.all_ready()
+        {
+            self.td_lobby_error = Some("Waiting for all players to ready up".to_string());
+            return Ok(());
+        }
         let setup = match self.td_lobby.role {
             NetRole::Host => NetworkSetup {
                 role: "host".to_string(),
@@ -2916,6 +3238,10 @@ impl LauncherApp {
                 self.td_lan_scan = None;
                 self.td_lobby_open = false;
                 self.td_notice = Some(("Network game started".to_string(), Instant::now()));
+                let players = self.network.as_ref().map(|net| net.session.players);
+                if let Some(players) = players {
+                    self.ready_tracker.set_expected(players as usize);
+                }
                 Ok(())
             }
             Err(error) => {
@@ -2973,6 +3299,8 @@ impl LauncherApp {
         // Both clients rebuild the same demo so pre-match input cannot leak in.
         let rules = self.game.rules.clone();
         self.game = Game::with_rules("TD Network", MAP_SIZE, MAP_SIZE, rules);
+        self.td_score = None;
+        self.td_score_since = None;
         self.game.setup_demo();
         self.game.player_owner = local_player;
         self.selecting_mission = false;
@@ -3015,6 +3343,10 @@ impl LauncherApp {
         loop {
             match net.socket.recv_from(&mut buffer) {
                 Ok((size, source)) => {
+                    if let Some((player, ready)) = parse_ready_line(&buffer[..size]) {
+                        let _ = self.ready_tracker.mark_ready(&player, ready);
+                        continue;
+                    }
                     if parse_chat_line(&buffer[..size]).is_some() {
                         continue;
                     }
@@ -3218,6 +3550,18 @@ impl LauncherApp {
         }
         self.record_mission_result();
         let won = self.game.mission.outcome == Some(MissionOutcome::Victory);
+        if won {
+            // CARRY.CPP: surviving units + treasury bridge to the next
+            // mission; persisted so a reload of the selector keeps it.
+            self.td_carryover = Some(Carryover::from_game(&self.game, self.game.player_owner));
+            if let Some(carryover) = &self.td_carryover {
+                let path = self.td_progress_path.with_file_name("td-carryover.bin");
+                match carryover.save_to_file(&path) {
+                    Ok(()) => tracing::info!(path = %path.display(), "carry-over saved"),
+                    Err(error) => tracing::warn!(%error, "failed to save carry-over"),
+                }
+            }
+        }
         self.td_briefing_open = false;
         if won && self.td_completed.iter().all(|done| *done) {
             self.td_complete = true;
@@ -3231,6 +3575,21 @@ impl LauncherApp {
             }
         }
         self.td_recorded = false;
+    }
+
+    /// First Enter after a mission ends shows the scoreboard (port of the
+    /// original `SCORE.CPP` beat); the next Enter leaves the mission.
+    fn show_td_score(&mut self) {
+        let won = self.game.mission.outcome == Some(MissionOutcome::Victory);
+        self.td_score = Some(score::compute_score(
+            self.game.harvested_credits,
+            self.game.units_produced,
+            self.game.projectiles_fired,
+            self.game.elapsed.int().max(0) as u64,
+            won,
+            score::DIFFICULTY_NEUTRAL_BP,
+        ));
+        self.td_score_since = Some(Instant::now());
     }
 
     fn record_mission_result(&mut self) {
@@ -3338,6 +3697,11 @@ impl LauncherApp {
         self.selecting_mission = false;
         self.selected_building = None;
         self.td_recorded = false;
+        // Apply the previous mission's carry-over once, after the scenario
+        // has set its default starting forces.
+        if let Some(carryover) = self.td_carryover.take() {
+            carryover.apply_to_game(&mut self.game);
+        }
         self.td_briefing_open =
             !self.game.mission.briefing.is_empty() || !self.game.mission.objectives.is_empty();
         self.camera.position = self.game.world_center();
@@ -3515,6 +3879,7 @@ impl LauncherApp {
                 &self.td_lobby,
                 self.td_lan_scan.as_ref(),
                 self.td_lobby_error.as_deref(),
+                &self.ready_tracker.roster(),
                 self.width,
                 self.height,
             );
@@ -3600,19 +3965,39 @@ impl LauncherApp {
         }
 
         if self.td_briefing_open {
-            let Some(renderer) = self.renderer.as_mut() else {
-                return;
+            let borrowed_tileset = {
+                let Some(renderer) = self.renderer.as_mut() else {
+                    return;
+                };
+                renderer.begin_frame();
+                renderer.set_camera(&screen_camera(self.width, self.height));
+                let borrowed = draw_td_briefing(
+                    renderer.as_mut(),
+                    &self.game.mission,
+                    self.td_tileset.as_ref(),
+                    self.width,
+                    self.height,
+                );
+                if let Err(error) = renderer.end_frame() {
+                    tracing::warn!(%error, "TD briefing frame presentation failed");
+                }
+                borrowed
             };
-            renderer.begin_frame();
-            renderer.set_camera(&screen_camera(self.width, self.height));
-            draw_td_briefing(
-                renderer.as_mut(),
-                &self.game.mission,
-                self.width,
-                self.height,
-            );
-            if let Err(error) = renderer.end_frame() {
-                tracing::warn!(%error, "TD briefing frame presentation failed");
+            // A playing briefing borrows the shared tileset texture slot (plan
+            // box 212); re-upload the terrain atlas now that the video frame has
+            // been presented so the mission that follows samples the real
+            // tileset. Skipped when no video played.
+            if borrowed_tileset {
+                if let (Some(renderer), Some(pack)) =
+                    (self.renderer.as_mut(), self.td_tileset.as_ref())
+                {
+                    let _ = renderer.set_atlas_texture(
+                        cnc_renderer::TILESET_TEXTURE_ID,
+                        pack.width(),
+                        pack.height(),
+                        pack.rgba(),
+                    );
+                }
             }
             self.frame_index = self.frame_index.wrapping_add(1);
             return;
@@ -3871,6 +4256,17 @@ impl LauncherApp {
             if let Some(last) = self.game.mission.messages.last() {
                 renderer.draw_text(last, left + 16.0, top + 88.0, 8.0, [0.75, 0.85, 0.95, 1.0]);
             }
+        }
+
+        // End-of-mission scoreboard (port of the original SCORE.CPP beat).
+        if let (Some(report), Some(since)) = (&self.td_score, self.td_score_since) {
+            score::draw_overlay(
+                renderer.as_mut(),
+                report,
+                since.elapsed(),
+                left + 24.0,
+                top + 100.0,
+            );
         }
 
         // Sidebar build menu (drawn in world space, anchored to the camera).
@@ -4340,7 +4736,13 @@ impl ApplicationHandler for LauncherApp {
                     if self.game.mission.outcome.is_some() {
                         match &event.logical_key {
                             Key::Named(NamedKey::Enter) => {
-                                self.finish_td_mission();
+                                if self.td_score.is_none() {
+                                    self.show_td_score();
+                                } else {
+                                    self.td_score = None;
+                                    self.td_score_since = None;
+                                    self.finish_td_mission();
+                                }
                                 return;
                             }
                             Key::Named(NamedKey::Escape) => {
@@ -5136,7 +5538,7 @@ struct TdNetwork {
     last_beacon: Instant,
 }
 
-struct RaLauncherApp {
+pub struct RaLauncherApp {
     kind: RendererKind,
     width: u32,
     height: u32,
@@ -5144,8 +5546,8 @@ struct RaLauncherApp {
     // not outlive the native window.
     renderer: Option<Box<dyn Renderer>>,
     window: Option<Arc<Window>>,
-    camera: Camera,
-    game: RaGame,
+    pub camera: Camera,
+    pub game: RaGame,
     /// RTS 16×16 tileset packs, one per palette (RA screens use `ra_inspired`,
     /// TD screens `td_inspired`, honoring `CNC_TILESET_DIR` /
     /// `CNC_TILESET_PALETTE`); None falls back to the flat terrain colours.
@@ -5191,6 +5593,7 @@ struct RaLauncherApp {
     chat_open: bool,
     chat_input: String,
     chat_log: Vec<(u8, String)>,
+    ready_tracker: ReadyTracker,
     cursor: Option<winit::dpi::PhysicalPosition<f64>>,
     selection_start: Option<winit::dpi::PhysicalPosition<f64>>,
     panning: bool,
@@ -5205,7 +5608,7 @@ struct RaLauncherApp {
 }
 
 impl RaLauncherApp {
-    fn new(kind: RendererKind, width: u32, height: u32, frame_limit: u64) -> Self {
+    pub fn new(kind: RendererKind, width: u32, height: u32, frame_limit: u64) -> Self {
         let game = RaGame::new(MAP_SIZE, MAP_SIZE);
         let mut camera = Camera::default();
         camera.set_viewport(width.max(1), height.max(1));
@@ -5260,6 +5663,7 @@ impl RaLauncherApp {
             chat_open: false,
             chat_input: String::new(),
             chat_log: Vec::new(),
+            ready_tracker: ReadyTracker::new(),
             cursor: None,
             selection_start: None,
             panning: false,
@@ -5766,6 +6170,13 @@ impl RaLauncherApp {
 
     /// Start the match current lobby settings describe (called from the UI).
     fn start_lobby(&mut self) -> Result<()> {
+        if self.lobby.role == NetRole::Host
+            && self.ready_tracker.expected_count() > 0
+            && !self.ready_tracker.all_ready()
+        {
+            self.lobby_error = Some("Waiting for all players to ready up".to_string());
+            return Ok(());
+        }
         let role = self.lobby.role;
         let setup = match role {
             NetRole::Host => NetworkSetup {
@@ -5790,6 +6201,10 @@ impl RaLauncherApp {
             Ok(()) => {
                 self.lan_scan = None;
                 self.mode = RaMode::Playing;
+                let players = self.network.as_ref().map(|net| net.session.players);
+                if let Some(players) = players {
+                    self.ready_tracker.set_expected(players as usize);
+                }
                 Ok(())
             }
             Err(error) => {
@@ -5808,6 +6223,10 @@ impl RaLauncherApp {
         loop {
             match net.socket.recv_from(&mut buffer) {
                 Ok((size, source)) => {
+                    if let Some((player, ready)) = parse_ready_line(&buffer[..size]) {
+                        let _ = self.ready_tracker.mark_ready(&player, ready);
+                        continue;
+                    }
                     if let Some((player, message)) = parse_chat_line(&buffer[..size]) {
                         self.chat_log.push((player, message));
                         if self.chat_log.len() > 20 {
@@ -6364,7 +6783,7 @@ impl RaLauncherApp {
         self.game.outcome == Some(victory)
     }
 
-    fn start_skirmish(&mut self) {
+    pub fn start_skirmish(&mut self) {
         self.game_speed = 1.0;
         let size = self.setup.map_size;
         let mut game = RaGame::new(size, size);
@@ -6517,6 +6936,24 @@ impl RaLauncherApp {
             self.chat_log.remove(0);
         }
         let line = format!("{CHAT_PREFIX} {local} {message}\n");
+        for peer in net.session.peers.values().copied() {
+            let _ = net.socket.send_to(line.as_bytes(), peer);
+        }
+    }
+
+    /// Broadcast the local player's ready flag to every known peer and record
+    /// it locally, mirroring `send_chat`. The local row keeps the roster in
+    /// sync for the player toggling ready; peers key on the same
+    /// `Player<index>` name so the receiver's `mark_ready` lines up with the
+    /// roster rows and the start gate.
+    fn send_ready(&mut self, ready: bool) {
+        let Some(net) = self.network.as_mut() else {
+            return;
+        };
+        let local = net.session.local_player;
+        let name = format!("Player{local}");
+        let _ = self.ready_tracker.mark_ready(&name, ready);
+        let line = format_ready_line(&name, ready);
         for peer in net.session.peers.values().copied() {
             let _ = net.socket.send_to(line.as_bytes(), peer);
         }
@@ -6717,6 +7154,7 @@ impl RaLauncherApp {
                 &self.lobby,
                 self.lan_scan.as_ref(),
                 self.lobby_error.as_deref(),
+                &self.ready_tracker.roster(),
                 self.width,
                 self.height,
             );
@@ -6789,16 +7227,30 @@ impl RaLauncherApp {
         if self.briefing_open {
             renderer.begin_frame();
             renderer.set_camera(&screen_camera(self.width, self.height));
-            draw_ra_briefing(
+            let borrowed = draw_ra_briefing(
                 renderer.as_mut(),
                 &self.scenario_name,
                 &self.game,
                 self.campaign_index,
+                self.ra_tileset.as_ref(),
                 self.width,
                 self.height,
             );
             if let Err(error) = renderer.end_frame() {
                 tracing::warn!(%error, "briefing frame presentation failed");
+            }
+            // A playing briefing borrows the shared tileset slot (plan box 212);
+            // re-upload the RA terrain atlas now that the video frame has been
+            // presented so the mission that follows samples the real tileset.
+            if borrowed {
+                if let Some(pack) = self.ra_tileset.as_ref() {
+                    let _ = renderer.set_atlas_texture(
+                        cnc_renderer::TILESET_TEXTURE_ID,
+                        pack.width(),
+                        pack.height(),
+                        pack.rgba(),
+                    );
+                }
             }
             self.frame_index = self.frame_index.wrapping_add(1);
             return;
@@ -7573,6 +8025,17 @@ impl ApplicationHandler for RaLauncherApp {
                             self.chat_input.clear();
                             return;
                         }
+                        if text.eq_ignore_ascii_case("r") {
+                            let local = self
+                                .network
+                                .as_ref()
+                                .map(|net| net.session.local_player)
+                                .unwrap_or(0);
+                            let name = format!("Player{local}");
+                            let ready = !self.ready_tracker.is_ready(&name);
+                            self.send_ready(ready);
+                            return;
+                        }
                     }
                 }
                 match &event.logical_key {
@@ -7701,6 +8164,20 @@ struct LauncherShell {
     height: u32,
     frame_limit: u64,
     rules_path: Option<PathBuf>,
+    /// Persisted launcher options handed to every game session this shell
+    /// builds (plan line 206).
+    options: LauncherOptions,
+    /// CLI `--options` path captured at startup; the Options modal saves to
+    /// the same file the boot path loaded.
+    options_path: Option<PathBuf>,
+    /// The Options modal while it owns the menu window's input.
+    options_modal: Option<OptionsModal>,
+    /// Persisted options snapshot taken when the modal opened; a cancel
+    /// restores it, a save keeps the live-applied edits.
+    options_backup: Option<LauncherOptions>,
+    /// Live-preview mixer for the modal's volume rows (plan line 206); built
+    /// on the first open and reused.
+    menu_mixer: Option<AudioMixer>,
     menu: MainMenu,
     menu_window: Option<Arc<Window>>,
     menu_renderer: Option<Box<dyn Renderer>>,
@@ -7719,6 +8196,8 @@ impl LauncherShell {
         height: u32,
         frame_limit: u64,
         rules_path: Option<PathBuf>,
+        options: LauncherOptions,
+        options_path: Option<PathBuf>,
     ) -> Self {
         let menu = MainMenu::discover();
         tracing::info!(
@@ -7732,6 +8211,11 @@ impl LauncherShell {
             height,
             frame_limit,
             rules_path,
+            options,
+            options_path,
+            options_modal: None,
+            options_backup: None,
+            menu_mixer: None,
             menu,
             menu_window: None,
             menu_renderer: None,
@@ -7793,6 +8277,9 @@ impl LauncherShell {
         renderer.begin_frame();
         renderer.set_camera(&screen_camera(self.width, self.height));
         self.menu.draw(renderer.as_mut(), self.width, self.height);
+        if let Some(modal) = &self.options_modal {
+            modal.draw(renderer.as_mut(), self.width, self.height);
+        }
         match renderer.end_frame() {
             Ok(()) => self.menu_presented = true,
             Err(error) => tracing::warn!(%error, "menu frame presentation failed"),
@@ -7863,7 +8350,13 @@ impl LauncherShell {
                 .with_context(|| format!("failed to load rules from {}", path.display()))?,
             None => RulesDatabase::default(),
         };
-        LauncherApp::new(self.kind, self.width, self.height, rules)
+        LauncherApp::new(
+            self.kind,
+            self.width,
+            self.height,
+            rules,
+            self.options.clone(),
+        )
     }
 
     fn start_game(&mut self, event_loop: &ActiveEventLoop, target: LaunchTarget) {
@@ -7916,6 +8409,92 @@ impl LauncherShell {
         match command {
             MenuCommand::Quit => event_loop.exit(),
             MenuCommand::Launch(target) => self.start_game(event_loop, target),
+            MenuCommand::Options => self.open_options_modal(),
+        }
+    }
+
+    /// Open the Options modal over the main menu, seeded from the persisted
+    /// settings (plan line 206).
+    fn open_options_modal(&mut self) {
+        let persisted = self.options.clone();
+        let requested = persisted.renderer.trim().to_string();
+        // An invalid persisted value never blocks boot or the modal: the
+        // resolved choice is shown and the fallback is explained.
+        let invalid = !requested.is_empty() && RendererKind::parse(&requested).is_err();
+        let choice = match persisted.resolved_renderer_kind() {
+            RendererKind::Wgpu => menu::RendererChoice::Wgpu,
+            RendererKind::Software => menu::RendererChoice::Software,
+        };
+        let note = invalid.then(|| {
+            format!(
+                "Saved renderer '{}' is invalid - using {}.",
+                requested,
+                choice.label()
+            )
+        });
+        if self.menu_mixer.is_none() {
+            self.menu_mixer = Some(AudioMixer::new().unwrap_or_else(|_| AudioMixer::headless()));
+        }
+        self.options_backup = Some(persisted.clone());
+        self.options_modal = Some(OptionsModal::new(
+            choice,
+            persisted.master_volume,
+            persisted.music_volume,
+            persisted.effects_volume,
+            persisted.controls,
+            note,
+        ));
+    }
+
+    /// Apply one modal gesture: volume edits push through the live mixer,
+    /// the renderer choice updates the persisted setting, and save/cancel
+    /// close the modal (a cancel restores the persisted snapshot).
+    fn apply_options_action(&mut self, action: OptionsAction) {
+        match action {
+            OptionsAction::Renderer(choice) => {
+                self.options.renderer = choice.label().to_string();
+            }
+            OptionsAction::Volume(bus, volume) => {
+                match bus {
+                    VolumeBus::Master => self.options.master_volume = volume,
+                    VolumeBus::Music => self.options.music_volume = volume,
+                    VolumeBus::Effects => self.options.effects_volume = volume,
+                }
+                if let Some(mixer) = &self.menu_mixer {
+                    self.options.apply_to_mixer(mixer);
+                }
+            }
+            OptionsAction::Save => {
+                let result = self.options.save(self.options_path.as_deref());
+                match result {
+                    Ok(()) => {
+                        self.close_options_modal(false);
+                        self.menu.set_notice("Options saved.");
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "saving launcher options failed");
+                        if let Some(modal) = self.options_modal.as_mut() {
+                            modal.set_status(format!("Save failed: {error}"));
+                        }
+                    }
+                }
+            }
+            OptionsAction::Cancel => self.close_options_modal(true),
+        }
+    }
+
+    /// Close the modal; `restore` puts the persisted options (and their
+    /// mixer volumes) back when the edits are discarded.
+    fn close_options_modal(&mut self, restore: bool) {
+        self.options_modal = None;
+        let backup = self.options_backup.take();
+        if restore {
+            if let Some(backup) = backup {
+                self.options = backup;
+                if let Some(mixer) = &self.menu_mixer {
+                    self.options.apply_to_mixer(mixer);
+                }
+            }
         }
     }
 }
@@ -7956,10 +8535,18 @@ impl ApplicationHandler for LauncherShell {
                     }
                     WindowEvent::CursorMoved { position, .. } => {
                         self.menu_cursor = (position.x as f32, position.y as f32);
-                        if self
-                            .menu
-                            .on_pointer(self.menu_cursor.0, self.menu_cursor.1, self.width)
-                        {
+                        let hovered = if let Some(modal) = self.options_modal.as_mut() {
+                            modal.on_pointer(
+                                self.menu_cursor.0,
+                                self.menu_cursor.1,
+                                self.width,
+                                self.height,
+                            )
+                        } else {
+                            self.menu
+                                .on_pointer(self.menu_cursor.0, self.menu_cursor.1, self.width)
+                        };
+                        if hovered {
                             action = MenuAction::Redraw;
                         }
                     }
@@ -7968,14 +8555,51 @@ impl ApplicationHandler for LauncherShell {
                         button: MouseButton::Left,
                         ..
                     } => {
-                        command =
-                            self.menu
-                                .on_click(self.menu_cursor.0, self.menu_cursor.1, self.width);
+                        if let Some(modal) = self.options_modal.as_mut() {
+                            let clicked = modal.on_click(
+                                self.menu_cursor.0,
+                                self.menu_cursor.1,
+                                self.width,
+                                self.height,
+                            );
+                            if let Some(clicked) = clicked {
+                                self.apply_options_action(clicked);
+                            }
+                            action = MenuAction::Redraw;
+                        } else {
+                            command = self.menu.on_click(
+                                self.menu_cursor.0,
+                                self.menu_cursor.1,
+                                self.width,
+                            );
+                        }
+                    }
+                    WindowEvent::MouseWheel { delta, .. } => {
+                        // The wheel scrolls the modal's controls list while it
+                        // owns the screen; the menu itself has nothing to scroll.
+                        if let Some(modal) = self.options_modal.as_mut() {
+                            use winit::event::MouseScrollDelta;
+                            let notches = match delta {
+                                MouseScrollDelta::LineDelta(_, y) => y,
+                                MouseScrollDelta::PixelDelta(position) => position.y as f32 / 40.0,
+                            };
+                            modal.scroll_controls_wheel(notches);
+                            modal.clamp_controls_scroll(self.height);
+                            action = MenuAction::Redraw;
+                        }
                     }
                     WindowEvent::KeyboardInput { event, .. }
                         if event.state == ElementState::Pressed =>
                     {
-                        command = self.menu.on_key(&event.logical_key);
+                        if let Some(modal) = self.options_modal.as_mut() {
+                            let pressed = modal.on_key(&event.logical_key);
+                            modal.clamp_controls_scroll(self.height);
+                            if let Some(pressed) = pressed {
+                                self.apply_options_action(pressed);
+                            }
+                        } else {
+                            command = self.menu.on_key(&event.logical_key);
+                        }
                         action = MenuAction::Redraw;
                     }
                     WindowEvent::RedrawRequested => action = MenuAction::Redraw,
@@ -8108,7 +8732,13 @@ fn main() -> Result<()> {
     let args = Args::parse();
     tracing_subscriber::fmt::init();
 
-    let kind = RendererKind::parse(&args.renderer)?;
+    let options = LauncherOptions::load(args.options.as_deref());
+    // Renderer precedence (plan line 206): explicit --renderer flag, then
+    // the persisted options.renderer, then the wgpu default.
+    let kind = match args.renderer.as_deref() {
+        Some(requested) => RendererKind::parse(requested)?,
+        None => options.resolved_renderer_kind(),
+    };
     let game_kind = GameKind::parse(args.game.as_deref().unwrap_or("td"))?;
 
     if let Some(dir) = &args.list_missions {
@@ -8143,6 +8773,8 @@ fn main() -> Result<()> {
             args.height.max(1),
             args.frames,
             args.rules.clone(),
+            options.clone(),
+            args.options.clone(),
         );
         let event_loop = EventLoop::new().context("failed to create the winit event loop")?;
         event_loop.set_control_flow(ControlFlow::Wait);
@@ -8223,7 +8855,7 @@ fn main() -> Result<()> {
         rules.type_count(),
         rules.weapons.len()
     );
-    let mut app = LauncherApp::new(kind, args.width.max(1), args.height.max(1), rules)?;
+    let mut app = LauncherApp::new(kind, args.width.max(1), args.height.max(1), rules, options)?;
     if let Some(dir) = &args.mission_dir {
         let count = app.load_mission_dir(dir)?;
         tracing::info!(count, dir = %dir.display(), "TD mission directory loaded");
@@ -9081,8 +9713,14 @@ mod tests {
 
     #[test]
     fn td_pause_menu_resumes_and_returns_to_selector() {
-        let mut app =
-            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
+        let mut app = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+            LauncherOptions::default(),
+        )
+        .unwrap();
         let maps = Path::new(env!("CARGO_MANIFEST_DIR")).join("../maps/td_campaign");
         app.load_mission_dir(&maps).unwrap();
         assert!(app.activate_selected_mission().unwrap());
@@ -9105,8 +9743,14 @@ mod tests {
     fn td_campaign_completion_shows_final_screen() {
         let progress = std::env::temp_dir().join(format!("td-done-{}.dat", std::process::id()));
         let _ = std::fs::remove_file(&progress);
-        let mut app =
-            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
+        let mut app = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+            LauncherOptions::default(),
+        )
+        .unwrap();
         app.td_progress_path = progress.clone();
         let maps = Path::new(env!("CARGO_MANIFEST_DIR")).join("../maps/td_campaign");
         assert_eq!(app.load_mission_dir(&maps).unwrap(), 9);
@@ -9130,8 +9774,14 @@ mod tests {
     fn td_mission_finish_returns_to_selector_and_advances() {
         let progress = std::env::temp_dir().join(format!("td-finish-{}.dat", std::process::id()));
         let _ = std::fs::remove_file(&progress);
-        let mut app =
-            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
+        let mut app = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+            LauncherOptions::default(),
+        )
+        .unwrap();
         app.td_progress_path = progress.clone();
         let maps = Path::new(env!("CARGO_MANIFEST_DIR")).join("../maps/td_campaign");
         assert_eq!(app.load_mission_dir(&maps).unwrap(), 9);
@@ -9164,8 +9814,14 @@ mod tests {
         std::fs::copy(maps.join("02.ini"), dir.join("02.ini")).unwrap();
 
         let progress = dir.join("td_progress.dat");
-        let mut app =
-            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
+        let mut app = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+            LauncherOptions::default(),
+        )
+        .unwrap();
         app.td_progress_path = progress.clone();
         assert_eq!(app.load_mission_dir(&dir).unwrap(), 2);
         assert!(app.selecting_mission);
@@ -9211,8 +9867,14 @@ mod tests {
         assert!(saved.contains("1:60"), "{saved}");
 
         // A fresh launcher resumes the saved completion/best time.
-        let mut resumed =
-            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
+        let mut resumed = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+            LauncherOptions::default(),
+        )
+        .unwrap();
         resumed.td_progress_path = progress.clone();
         assert_eq!(resumed.load_mission_dir(&dir).unwrap(), 2);
         assert!(resumed.td_completed[1]);
@@ -9348,8 +10010,14 @@ mod tests {
 
     #[test]
     fn td_repair_selected_building_costs_and_notices() {
-        let mut app =
-            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
+        let mut app = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+            LauncherOptions::default(),
+        )
+        .unwrap();
         let player = app.game.player_owner;
         let index = app
             .game
@@ -9378,8 +10046,14 @@ mod tests {
 
     #[test]
     fn td_sell_selected_building_refunds_and_notices() {
-        let mut app =
-            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
+        let mut app = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+            LauncherOptions::default(),
+        )
+        .unwrap();
         let player = app.game.player_owner;
         let index = app
             .game
@@ -9423,8 +10097,14 @@ mod tests {
         assert!(ra.game.unit(id).unwrap().selected);
         assert!(!ra.recall_control_group(1), "empty group");
 
-        let mut td =
-            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
+        let mut td = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+            LauncherOptions::default(),
+        )
+        .unwrap();
         let player = td.game.player_owner;
         let index = td
             .game
@@ -9473,8 +10153,14 @@ mod tests {
         ra.apply_ra_edge_pan(0.1);
         assert!(ra.camera.position.x < before);
 
-        let mut td =
-            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
+        let mut td = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+            LauncherOptions::default(),
+        )
+        .unwrap();
         let before = td.camera.position.x;
         td.cursor = Some(winit::dpi::PhysicalPosition::new(318.0, 120.0));
         td.apply_td_edge_pan(0.1);
@@ -9628,8 +10314,14 @@ mod tests {
         ra.activate_pause_choice();
         assert_eq!(ra.save_slot, 1, "pause menu cycles the slot");
 
-        let mut td =
-            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
+        let mut td = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+            LauncherOptions::default(),
+        )
+        .unwrap();
         assert_eq!(td.save_slot, 0);
         td.cycle_td_save_slot();
         assert_eq!(td.save_slot, 1);
@@ -9673,8 +10365,14 @@ mod tests {
             .as_ref()
             .is_some_and(|(text, _)| text.contains("locked")));
 
-        let mut td =
-            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
+        let mut td = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+            LauncherOptions::default(),
+        )
+        .unwrap();
         td.adjust_td_speed(0.5);
         assert_eq!(td.game_speed, 1.5);
         td.adjust_td_speed(10.0);
@@ -9697,8 +10395,14 @@ mod tests {
         assert_eq!(ra.camera.position, saved);
         assert!(!ra.jump_ra_bookmark(1), "empty slot");
 
-        let mut td =
-            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
+        let mut td = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+            LauncherOptions::default(),
+        )
+        .unwrap();
         let saved = Vec2::new(Fixed16_16::from_int(120), Fixed16_16::from_int(240));
         td.camera.position = saved;
         td.save_td_bookmark(2);
@@ -9739,8 +10443,14 @@ mod tests {
         assert!((ra.camera.position.y.to_f32() - 6.5 * RA_TILE_SIZE).abs() < 0.01);
         assert!(!ra.ra_minimap_click(Vec2::new(Fixed16_16::ZERO, Fixed16_16::ZERO)));
 
-        let mut td =
-            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
+        let mut td = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+            LauncherOptions::default(),
+        )
+        .unwrap();
         td.camera.zoom = Fixed16_16::ONE;
         let zoom = td.camera.zoom.to_f32().max(1.0e-6);
         let view_w = td.camera.viewport_width as f32 / zoom;
@@ -9937,10 +10647,10 @@ mod tests {
             Some(MenuCommand::Quit)
         );
 
-        // Up wraps to the Quit row.
+        // Up wraps to the Quit row (Options sits between Online Game and Quit).
         assert_eq!(menu.cursor(), 0);
         menu.on_key(&Key::Named(NamedKey::ArrowUp));
-        assert_eq!(menu.cursor(), 3);
+        assert_eq!(menu.cursor(), 4);
         assert_eq!(menu.activate(), Some(MenuCommand::Quit));
     }
 
@@ -9964,6 +10674,223 @@ mod tests {
                 GameChoice::TiberianDawn
             )))
         );
+    }
+
+    // --- Options modal wiring ---
+
+    #[test]
+    fn main_menu_options_entry_opens_the_options_modal() {
+        let mut menu = MainMenu::from_campaigns(
+            menu_test_campaign("maps/td_campaign", 9),
+            menu_test_campaign("maps/ra_campaign", 10),
+        );
+        // Campaign, Local Game, Online Game, then Options.
+        for _ in 0..3 {
+            menu.on_key(&Key::Named(NamedKey::ArrowDown));
+        }
+        assert_eq!(menu.activate(), Some(MenuCommand::Options));
+    }
+
+    /// Scratch directory for shell tests, rooted inside the workspace
+    /// (`RUST/target/`) so no test writes outside the project tree.
+    fn shell_scratch(tag: &str) -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../target/scratch-launcher")
+            .join(format!("{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    fn test_shell(options_path: Option<PathBuf>) -> LauncherShell {
+        LauncherShell::new(
+            RendererKind::Software,
+            1024,
+            768,
+            0,
+            None,
+            LauncherOptions::default(),
+            options_path,
+        )
+    }
+
+    #[test]
+    fn options_modal_opens_seeded_from_the_persisted_options() {
+        let mut shell = test_shell(None);
+        shell.open_options_modal();
+        let modal = shell.options_modal.as_ref().expect("modal opens");
+        assert_eq!(modal.renderer(), menu::RendererChoice::Wgpu);
+        assert_eq!(modal.volume(VolumeBus::Master), 1.0);
+        assert_eq!(modal.volume(VolumeBus::Music), 1.0);
+        assert_eq!(modal.volume(VolumeBus::Effects), 1.0);
+        assert!(modal.note().is_none());
+
+        // An invalid persisted renderer value seeds the resolved choice and
+        // surfaces the fallback note instead of failing.
+        shell.options.renderer = "vulkan".to_string();
+        shell.open_options_modal();
+        let modal = shell.options_modal.as_ref().expect("modal reopens");
+        assert_eq!(modal.renderer(), menu::RendererChoice::Wgpu);
+        let note = modal.note().expect("fallback note is shown");
+        assert!(note.contains("vulkan"), "{note}");
+        assert!(note.contains("using Wgpu"), "{note}");
+    }
+
+    #[test]
+    fn options_modal_volume_edits_apply_live_and_save_persists_them() {
+        let dir = shell_scratch("options-save");
+        let path = dir.join("launcher-options.ini");
+        let mut shell = test_shell(Some(path.clone()));
+        shell.open_options_modal();
+
+        // Focus the Master row and step it down through the modal.
+        shell
+            .options_modal
+            .as_mut()
+            .expect("modal opens")
+            .on_key(&Key::Named(NamedKey::ArrowDown));
+        let action = shell
+            .options_modal
+            .as_mut()
+            .expect("modal stays open")
+            .on_key(&Key::Named(NamedKey::ArrowLeft))
+            .expect("left steps the volume");
+        shell.apply_options_action(action);
+        assert!((shell.options.master_volume - 0.95).abs() < 1.0e-6);
+        let mixer = shell.menu_mixer.as_ref().expect("preview mixer exists");
+        assert!(
+            (mixer.master_volume() - 0.95).abs() < 1.0e-6,
+            "volume edits push through the live mixer"
+        );
+
+        // Save persists the live-applied values and closes the modal.
+        shell.apply_options_action(OptionsAction::Save);
+        assert!(shell.options_modal.is_none(), "save closes the modal");
+        assert_eq!(shell.menu.notice(), Some("Options saved."));
+        let reloaded = LauncherOptions::load_from(&path);
+        assert!((reloaded.master_volume - 0.95).abs() < 1.0e-6);
+        assert_eq!(reloaded.renderer, "wgpu");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn options_modal_cancel_discards_edits_and_restores_the_mixer() {
+        let mut shell = test_shell(None);
+        shell.open_options_modal();
+        // Toggle the renderer, then step the Master volume down.
+        let action = shell
+            .options_modal
+            .as_mut()
+            .expect("modal opens")
+            .on_key(&Key::Named(NamedKey::ArrowRight))
+            .expect("right toggles the renderer");
+        shell.apply_options_action(action);
+        assert_eq!(shell.options.renderer, "Software");
+        shell
+            .options_modal
+            .as_mut()
+            .expect("modal stays open")
+            .on_key(&Key::Named(NamedKey::ArrowDown));
+        let action = shell
+            .options_modal
+            .as_mut()
+            .expect("modal stays open")
+            .on_key(&Key::Named(NamedKey::ArrowLeft))
+            .expect("left steps the volume");
+        shell.apply_options_action(action);
+        assert!(shell.options.master_volume < 1.0);
+
+        // Escape-equivalent: cancel restores the persisted snapshot.
+        shell.apply_options_action(OptionsAction::Cancel);
+        assert!(shell.options_modal.is_none(), "cancel closes the modal");
+        assert_eq!(shell.options, LauncherOptions::default());
+        let mixer = shell.menu_mixer.as_ref().expect("preview mixer exists");
+        assert_eq!(mixer.master_volume(), 1.0, "the live push is reverted");
+    }
+
+    #[test]
+    fn options_modal_renderer_choice_is_persisted_on_save() {
+        let dir = shell_scratch("options-renderer");
+        let path = dir.join("launcher-options.ini");
+        let mut shell = test_shell(Some(path.clone()));
+        shell.open_options_modal();
+        shell.apply_options_action(OptionsAction::Renderer(menu::RendererChoice::Software));
+        shell.apply_options_action(OptionsAction::Save);
+        assert_eq!(LauncherOptions::load_from(&path).renderer, "Software");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Headless Options-modal capture for visual QA: renders the menu plus
+    /// the modal with the software renderer and writes a PNG under
+    /// `RUST/target/` (never /tmp). Run with:
+    /// `cargo test -p cnc-launcher options_modal_writes_a_screenshot -- --ignored --nocapture`
+    #[test]
+    #[ignore = "visual QA capture; writes RUST/target/scratch-launcher/options-modal.png"]
+    fn options_modal_writes_a_screenshot_for_visual_qa() {
+        const SHOT_W: u32 = 1280;
+        const SHOT_H: u32 = 720;
+        let menu = MainMenu::from_campaigns(
+            menu_test_campaign("maps/td_campaign", 9),
+            menu_test_campaign("maps/ra_campaign", 10),
+        );
+        let mut modal = OptionsModal::new(
+            menu::RendererChoice::Wgpu,
+            0.8,
+            0.55,
+            0.35,
+            LauncherOptions::default_controls(),
+            Some("Saved renderer 'vulkan' is invalid - using Wgpu.".to_string()),
+        );
+        // Focus the Save row so the capture shows the selection highlight.
+        let (sx, sy, sw, sh) = menu::options_button_rect(0, SHOT_W, SHOT_H);
+        let _ = modal.on_click(sx + sw * 0.5, sy + sh * 0.5, SHOT_W, SHOT_H);
+        let mut renderer = SoftwareRenderer::new(SHOT_W, SHOT_H);
+        renderer.begin_frame();
+        renderer.set_camera(&screen_camera(SHOT_W, SHOT_H));
+        menu.draw(&mut renderer, SHOT_W, SHOT_H);
+        modal.draw(&mut renderer, SHOT_W, SHOT_H);
+        renderer.end_frame().unwrap();
+
+        let pixel = |x: u32, y: u32| {
+            let value = renderer.buffer()[y as usize * SHOT_W as usize + x as usize];
+            [
+                ((value >> 16) & 0xFF) as i32,
+                ((value >> 8) & 0xFF) as i32,
+                (value & 0xFF) as i32,
+            ]
+        };
+        // The panel's orange top rule sits at y = 121 on a 1280x720 capture.
+        let accent = pixel(500, 121);
+        assert!(
+            accent[0] > 150 && accent[0] > accent[2],
+            "the modal panel top rule should be orange: {accent:?}"
+        );
+        // The focused Save button shows the row highlight at its right end.
+        let (bx, by, bw, _) = menu::options_button_rect(0, SHOT_W, SHOT_H);
+        let save = pixel((bx + bw - 12.0) as u32, (by + 15.0) as u32);
+        assert!(
+            (save[0] - 33).abs() <= 12 && (save[1] - 48).abs() <= 12,
+            "the focused Save row highlight should show: {save:?}"
+        );
+
+        let mut image_data = image::RgbaImage::new(SHOT_W, SHOT_H);
+        for (index, &value) in renderer.buffer().iter().enumerate() {
+            image_data.put_pixel(
+                (index % SHOT_W as usize) as u32,
+                (index / SHOT_W as usize) as u32,
+                image::Rgba([
+                    ((value >> 16) & 0xFF) as u8,
+                    ((value >> 8) & 0xFF) as u8,
+                    (value & 0xFF) as u8,
+                    ((value >> 24) & 0xFF) as u8,
+                ]),
+            );
+        }
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/scratch-launcher");
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        let path = dir.join("options-modal.png");
+        image_data.save(&path).expect("write the screenshot");
+        println!("Options modal screenshot: {}", path.display());
     }
 
     #[test]
@@ -10017,8 +10944,14 @@ mod tests {
 
     #[test]
     fn return_to_menu_flag_is_consumed_once() {
-        let mut td =
-            LauncherApp::new(RendererKind::Software, 320, 240, RulesDatabase::default()).unwrap();
+        let mut td = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+            LauncherOptions::default(),
+        )
+        .unwrap();
         assert!(!td.take_return_to_menu());
         td.return_to_menu = true;
         assert!(td.take_return_to_menu());
@@ -10036,8 +10969,14 @@ mod tests {
 
     #[test]
     fn zoom_defaults_clamp_and_pin_the_world_under_the_cursor() {
-        let mut td =
-            LauncherApp::new(RendererKind::Software, 1024, 768, RulesDatabase::default()).unwrap();
+        let mut td = LauncherApp::new(
+            RendererKind::Software,
+            1024,
+            768,
+            RulesDatabase::default(),
+            LauncherOptions::default(),
+        )
+        .unwrap();
         assert!((td.camera.zoom.to_f32() - DEFAULT_GAME_ZOOM).abs() < 1.0e-3);
 
         td.camera.position = Vec2::new(Fixed16_16::from_int(600), Fixed16_16::from_int(600));
@@ -10064,8 +11003,14 @@ mod tests {
 
     #[test]
     fn hud_world_maps_zoomed_clicks_to_the_same_screen_point() {
-        let mut td =
-            LauncherApp::new(RendererKind::Software, 1024, 768, RulesDatabase::default()).unwrap();
+        let mut td = LauncherApp::new(
+            RendererKind::Software,
+            1024,
+            768,
+            RulesDatabase::default(),
+            LauncherOptions::default(),
+        )
+        .unwrap();
         td.camera.zoom = Fixed16_16::from_f32(2.5);
         let screen = winit::dpi::PhysicalPosition::new(700.0, 300.0);
         let hud = td.hud_world(td.screen_to_world(screen));
@@ -10076,38 +11021,38 @@ mod tests {
     }
 
     #[test]
-    fn water_shore_family_prefers_orthogonal_then_corners() {
-        // Land-contact order: (n, e, s, w, nw, ne, sw, se).
-        assert_eq!(water_shore_family([false; 8]), None);
-        assert_eq!(
-            water_shore_family([true, false, false, false, false, false, false, false]),
-            Some(("shore_north", 2))
-        );
-        assert_eq!(
-            water_shore_family([true, false, false, true, false, false, false, false]),
-            Some(("shore_north", 2)),
-            "fixed n > e > s > w priority keeps the tile choice deterministic"
-        );
-        assert_eq!(
-            water_shore_family([false, false, false, false, true, false, false, false]),
-            Some(("shore_nw", 6))
-        );
-        assert_eq!(
-            water_shore_family([false, false, false, false, false, false, true, false]),
-            Some(("shore_sw", 8))
-        );
+    fn water_shore_tile_matches_pack_art_convention() {
+        // The pack's shore art names the side its WATER half occupies, so land
+        // to the north selects shore_south; masks are N=1 E=2 S=4 W=8.
+        assert_eq!(water_shore_tile(0), None);
+        assert_eq!(water_shore_tile(0b0001), Some(("shore_south", 4)));
+        assert_eq!(water_shore_tile(0b0010), Some(("shore_west", 5)));
+        assert_eq!(water_shore_tile(0b0100), Some(("shore_north", 2)));
+        assert_eq!(water_shore_tile(0b1000), Some(("shore_east", 3)));
+        // Two orthogonal land neighbours pick the corner art whose water half
+        // faces the open diagonal.
+        assert_eq!(water_shore_tile(0b0011), Some(("shore_sw", 8)));
+        assert_eq!(water_shore_tile(0b1001), Some(("shore_se", 9)));
+        // Opposite pairs flow; a ringed cell falls back to shallow water.
+        assert_eq!(water_shore_tile(0b0101), Some(("river_flow_e_w", 11)));
+        assert_eq!(water_shore_tile(0b1010), Some(("river_flow_n_s", 10)));
+        assert_eq!(water_shore_tile(0b1111), Some(("shallow_water", 1)));
     }
 
     #[test]
-    fn land_neighbours_treats_out_of_map_as_water() {
+    fn land_mask_at_treats_out_of_map_as_unmatched() {
         // Land only at (0, 0); everything else counts as water.
         let is_land = |x: i32, y: i32| x == 0 && y == 0;
-        // Neighbours of (1, 1): nw touches (0, 0); all others are water/off.
-        let [n, e, s, w, nw, ne, sw, se] = land_neighbours(1, 1, is_land);
-        assert!(!n && !e && !s && !w && nw && !ne && !sw && !se);
-        // Neighbours of (0, 0): off-map sides are never land.
-        let [n, e, s, w, nw, ne, sw, se] = land_neighbours(0, 0, is_land);
-        assert!(!n && !e && !s && !w && !nw && !ne && !sw && !se);
+        // (0, 1): the north neighbour (0, 0) matches -> north bit 1.
+        assert_eq!(land_mask_at(0, 1, is_land), 0b0001);
+        // (1, 1): (0, 0) is only a diagonal neighbour; orthogonals are water
+        // or off-map -> no bits.
+        assert_eq!(land_mask_at(1, 1, is_land), 0);
+        // (0, 0): all four orthogonal neighbours are off-map or water.
+        assert_eq!(land_mask_at(0, 0, is_land), 0);
+        // Bit order sanity: matched north neighbour sets bit 1 only.
+        let is_north = |x: i32, y: i32| y == -1 && x == 5;
+        assert_eq!(land_mask_at(5, 0, is_north), 0b0001);
     }
 
     #[test]
@@ -10121,18 +11066,36 @@ mod tests {
             map.terrain[w + x] = cnc_red_alert::Terrain::Beach;
             map.terrain[2 * w + x] = cnc_red_alert::Terrain::Grass;
         }
-        // Water against the beach row below picks the south shore edge.
+        // Water against the beach row below picks the north-water shore art
+        // (land south -> shore_north), and the grass east corner turns the
+        // same cell into a north-west corner case.
         assert_eq!(
             ra_terrain_tile(&map, 1, 0),
-            ("water_edges", "shore_south", 4)
+            ("water_edges", "shore_north", 2, None)
         );
-        // Beach renders the transitions sand_shore row.
+        // Beach renders the transitions sand_shore row; the only water
+        // neighbour is to the north, so the edge-mask column is 0b0001.
         assert_eq!(
             ra_terrain_tile(&map, 1, 1),
-            ("transitions", "sand_shore", 10)
+            ("transitions", "sand_shore", 10, Some(0b0001))
         );
-        // Grass keeps the base terrain family.
-        assert_eq!(ra_terrain_tile(&map, 1, 2), ("terrain", "grass", 0));
+        // Grass keeps the base terrain family with the variant-hash column.
+        assert_eq!(ra_terrain_tile(&map, 1, 2), ("terrain", "grass", 0, None));
+    }
+
+    #[test]
+    fn ra_terrain_tile_beach_column_is_water_edge_mask() {
+        let mut map = cnc_red_alert::Map::new(4, 4);
+        let w = map.width as usize;
+        // Beach at (1, 1); water to the north (1, 0) and west (0, 1).
+        map.terrain[w + 1] = cnc_red_alert::Terrain::Beach;
+        map.terrain[1] = cnc_red_alert::Terrain::Water;
+        map.terrain[w] = cnc_red_alert::Terrain::Water;
+        // N and W sides carry water: edge mask 0b1001.
+        assert_eq!(
+            ra_terrain_tile(&map, 1, 1),
+            ("transitions", "sand_shore", 10, Some(0b1001))
+        );
     }
 
     #[test]
@@ -10142,27 +11105,28 @@ mod tests {
         for y in 0..4usize {
             terrain[y * 4 + 3] = 1;
         }
-        // Water at (3, 0): west neighbour (2, 0) is grass land.
+        // Water at (3, 0): west neighbour (2, 0) is grass land; the art names
+        // its water half, so land west selects shore_east.
         assert_eq!(
             campaign_terrain_tile(&terrain, 4, 4, 3, 0),
-            ("water_edges", "shore_west", 5)
+            ("water_edges", "shore_east", 3, None)
         );
         // All-water grid away from any land stays deep_water.
         let all_water = vec![1u8; 25];
         assert_eq!(
             campaign_terrain_tile(&all_water, 5, 5, 2, 2),
-            ("water_edges", "deep_water", 0)
+            ("water_edges", "deep_water", 0, None)
         );
         // Non-water codes keep the base campaign families.
         assert_eq!(
             campaign_terrain_tile(&terrain, 4, 4, 0, 0),
-            ("terrain", "grass", 0)
+            ("terrain", "grass", 0, None)
         );
         let mut sandy = vec![0u8; 16];
         sandy[0] = 2;
         assert_eq!(
             campaign_terrain_tile(&sandy, 4, 4, 0, 0),
-            ("terrain", "sand", 2)
+            ("terrain", "sand", 2, None)
         );
     }
 
@@ -10174,5 +11138,342 @@ mod tests {
         assert_eq!(tiberium_fx_family(170), ("tiberium_cluster", 1));
         assert_eq!(tiberium_fx_family(171), ("tiberium_bloom", 14));
         assert_eq!(tiberium_fx_family(u8::MAX), ("tiberium_bloom", 14));
+    }
+
+    #[test]
+    fn ready_receive_guard_marks_tracker_in_poll() {
+        let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        app.enable_network(&NetworkSetup {
+            role: "host".to_string(),
+            join: None,
+            port: 0,
+            peers: Vec::new(),
+            bind: "127.0.0.1".to_string(),
+            advertised: None,
+        })
+        .unwrap();
+        let target = app.network.as_ref().unwrap().socket.local_addr().unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender.send_to(b"CNCREADY 1 Player1 1\n", target).unwrap();
+        app.poll_network();
+        assert!(
+            app.ready_tracker.is_ready("Player1"),
+            "a ready datagram marks the roster before the lockstep handler"
+        );
+        assert_eq!(
+            app.ready_tracker.roster(),
+            vec![("Player1".to_string(), true)]
+        );
+        assert_eq!(
+            app.network.as_ref().unwrap().applied,
+            0,
+            "ready lines are out-of-band: no lockstep frame is applied"
+        );
+    }
+
+    #[test]
+    fn ready_send_marks_local_player_like_chat() {
+        let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        app.enable_network(&NetworkSetup {
+            role: "host".to_string(),
+            join: None,
+            port: 0,
+            peers: Vec::new(),
+            bind: "127.0.0.1".to_string(),
+            advertised: None,
+        })
+        .unwrap();
+        app.send_ready(true);
+        assert!(
+            app.ready_tracker.is_ready("Player0"),
+            "send_ready records the local player like send_chat logs chat"
+        );
+        assert_eq!(
+            app.ready_tracker.roster(),
+            vec![("Player0".to_string(), true)]
+        );
+    }
+
+    #[test]
+    fn net_lobby_roster_rows_show_ready_state() {
+        let roster = vec![
+            ("Player0".to_string(), true),
+            ("Player1".to_string(), false),
+            ("Player2".to_string(), true),
+        ];
+        assert_eq!(
+            net_lobby_roster_rows(&roster),
+            vec![
+                "Player0: READY".to_string(),
+                "Player1: waiting".to_string(),
+                "Player2: READY".to_string(),
+            ],
+            "roster rows carry each player's ready state in name-sorted order"
+        );
+        assert!(net_lobby_roster_rows(&[]).is_empty());
+    }
+
+    #[test]
+    fn ra_untouched_host_lobby_starts_and_arms_expected() {
+        let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        app.open_lobby();
+        app.lobby.peer_address = String::new();
+        app.lobby.host_port = 0;
+        assert_eq!(app.ready_tracker.expected_count(), 0);
+        let _ = app.start_lobby();
+        assert_eq!(
+            app.mode,
+            RaMode::Playing,
+            "a lobby expecting nobody is not gated even with no readies"
+        );
+        let expected = app.network.as_ref().unwrap().session.players as usize;
+        assert_eq!(
+            app.ready_tracker.expected_count(),
+            expected,
+            "starting arms the gate to the session player count"
+        );
+        assert!(expected > 0);
+    }
+
+    #[test]
+    fn ra_host_start_gate_blocks_until_all_ready() {
+        let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        app.open_lobby();
+        app.lobby.peer_address = String::new();
+        app.lobby.host_port = 0;
+        app.ready_tracker.set_expected(2);
+        let _ = app.start_lobby();
+        assert_eq!(app.mode, RaMode::NetworkLobby, "an unready host is gated");
+        assert!(app.lobby_error.is_some());
+        assert!(app.network.is_none());
+        app.ready_tracker.mark_ready("Player0", true).unwrap();
+        let _ = app.start_lobby();
+        assert_eq!(
+            app.mode,
+            RaMode::NetworkLobby,
+            "one of two ready is still gated"
+        );
+        app.ready_tracker.mark_ready("Player1", true).unwrap();
+        let _ = app.start_lobby();
+        assert_eq!(app.mode, RaMode::Playing, "all ready lets the host start");
+    }
+
+    #[test]
+    fn td_host_start_gate_blocks_unready() {
+        let mut app = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+            LauncherOptions::default(),
+        )
+        .unwrap();
+        app.td_lobby_open = true;
+        app.td_lobby.role = NetRole::Host;
+        app.ready_tracker.set_expected(2);
+        let _ = app.start_td_lobby();
+        assert!(app.td_lobby_open, "a gated TD lobby stays open");
+        assert!(app.td_lobby_error.is_some());
+        assert!(app.network.is_none(), "a gated host never binds a socket");
+    }
+
+    // ---- Briefing VQA video path (plan box 212) ----
+
+    /// Little-endian u16 IFF field, mirroring `cnc_asset::video`'s test helper.
+    fn vqa_le16(value: u16) -> [u8; 2] {
+        value.to_le_bytes()
+    }
+
+    /// One IFF chunk: 4-byte tag, u32le size, data, padded to even length.
+    fn vqa_chunk(tag: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut out = tag.to_vec();
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(data);
+        if data.len() % 2 == 1 {
+            out.push(0);
+        }
+        out
+    }
+
+    /// A VQHD chunk: version 1, flags 0, 1 frame, rate 15, `w x h` blocks.
+    fn vqa_vqhd(width_blocks: u16, height_blocks: u16) -> Vec<u8> {
+        vqa_chunk(b"VQHD", &{
+            let mut header = Vec::new();
+            header.extend_from_slice(&vqa_le16(1)); // version
+            header.extend_from_slice(&vqa_le16(0)); // flags
+            header.extend_from_slice(&vqa_le16(1)); // num_frames
+            header.extend_from_slice(&vqa_le16(15)); // frame_rate
+            header.extend_from_slice(&vqa_le16(width_blocks));
+            header.extend_from_slice(&vqa_le16(height_blocks));
+            header
+        })
+    }
+
+    /// Minimal v1 WVQA container: `VQHD + CBF0 + VQFL + SND`. The codebook's
+    /// entry 0 is four copies of `block_index`, and every block in the frame
+    /// points at entry 0, so `decode_frame` paints every pixel that one index
+    /// and the decoded colour asserts crisply.
+    fn synthetic_briefing_vqa(block_index: u8) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"FORM");
+        bytes.extend_from_slice(&[0, 0, 0, 0]); // FORM size, patched below
+        bytes.extend_from_slice(b"WVQA");
+        bytes.extend_from_slice(&vqa_vqhd(2, 3)); // 2x3 blocks -> 4x6 px
+
+        let mut codebook = vec![0u8; 1024]; // 256 entries x 4 indices
+        for byte in codebook.iter_mut().take(4) {
+            *byte = block_index;
+        }
+        bytes.extend_from_slice(&vqa_chunk(b"CBF0", &codebook));
+
+        bytes.extend_from_slice(&vqa_chunk(b"VQFL", &[0u8; 6])); // 6 blocks, all entry 0
+        bytes.extend_from_slice(&vqa_chunk(b"SND0", &[0x34, 0x12, 0x78, 0x56])); // raw PCM
+
+        let total = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&total.to_be_bytes());
+        bytes
+    }
+
+    /// Pack an `[r, g, b, a]` colour the way `SoftwareRenderer` presents it
+    /// (0xFF_RRGGBB in the pixel buffer).
+    fn vqa_packed(color: [u8; 4]) -> u32 {
+        (u32::from(color[3]) << 24)
+            | (u32::from(color[0]) << 16)
+            | (u32::from(color[1]) << 8)
+            | u32::from(color[2])
+    }
+
+    #[test]
+    fn briefing_video_first_frame_decodes_codebook_colours() {
+        let bytes = synthetic_briefing_vqa(200);
+        let (rgba, width, height) =
+            briefing_video_first_frame(&bytes).expect("a valid v1 blob decodes");
+        assert_eq!((width, height), (4, 6), "2x3 blocks decode to 4x6 px");
+        assert_eq!(rgba.len(), 4 * 6 * 4, "one RGBA pixel per decoded index");
+        let expected = vqa_index_to_rgba(200);
+        assert_eq!(
+            rgba[..4],
+            expected,
+            "block index 0 paints its codebook colour"
+        );
+        assert!(
+            rgba.chunks_exact(4).all(|px| px == &expected),
+            "a uniform codebook entry paints every pixel the same colour"
+        );
+    }
+
+    #[test]
+    fn draw_video_frame_uploads_and_draws_headlessly() {
+        let bytes = synthetic_briefing_vqa(200);
+        let (rgba, width, height) = briefing_video_first_frame(&bytes).expect("decode");
+        let mut renderer = SoftwareRenderer::new(64, 64);
+        assert!(
+            draw_video_frame(&mut renderer, &rgba, width, height, 64, 64),
+            "the frame uploads to the borrowed slot and draws"
+        );
+        let expected = vqa_packed(vqa_index_to_rgba(200));
+        assert_eq!(
+            renderer.buffer()[32 * 64 + 32],
+            expected,
+            "the centre pixel is the codebook colour"
+        );
+        let painted = renderer.buffer().iter().filter(|p| **p == expected).count();
+        assert!(
+            painted > 100,
+            "the frame rasterises a large region: {painted} px"
+        );
+    }
+
+    #[test]
+    fn draw_briefing_video_renders_a_real_asset_end_to_end() {
+        // Scratch lives under RUST/target/, never /tmp (see shell_scratch).
+        let dir = shell_scratch("briefing-vqfl");
+        let path = dir.join("preware.vqa");
+        std::fs::write(&path, synthetic_briefing_vqa(170)).unwrap();
+        let key = path.to_str().unwrap().to_string();
+
+        let mut renderer = SoftwareRenderer::new(64, 64);
+        assert!(
+            draw_briefing_video(&mut renderer, Some(&key), 64, 64),
+            "a readable v1 asset renders its first frame headlessly"
+        );
+        assert_eq!(
+            renderer.buffer()[32 * 64 + 32],
+            vqa_packed(vqa_index_to_rgba(170)),
+            "the briefing surface shows the decoded frame at centre"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn draw_briefing_video_falls_back_on_missing_asset() {
+        let mut renderer = SoftwareRenderer::new(64, 64);
+        // No key at all.
+        assert!(!draw_briefing_video(&mut renderer, None, 64, 64));
+        // Key set but no such file.
+        assert!(!draw_briefing_video(
+            &mut renderer,
+            Some("no/such/briefing.vqa"),
+            64,
+            64
+        ));
+        assert!(
+            renderer.buffer().iter().all(|p| *p == 0),
+            "a fallback draws nothing into the surface"
+        );
+    }
+
+    #[test]
+    fn draw_briefing_video_falls_back_on_unsupported_variant() {
+        // A v1 container whose only content chunk is a CBP0 partial codebook,
+        // which demux reports as UnsupportedVariant.
+        let mut bytes = synthetic_briefing_vqa(170);
+        // Swap the CBF0 codebook chunk (1024 bytes) for a tiny CBP0 chunk.
+        // synthetic_briefing_vqa seeds codebook entry 0 with the block index
+        // (170 = 0xAA), so the expected payload mirrors that, not all zeros.
+        let mut codebook = vec![0u8; 1024];
+        codebook[..4].copy_from_slice(&[170; 4]);
+        let cbf0 = vqa_chunk(b"CBF0", &codebook);
+        let start = 12 + vqa_vqhd(2, 3).len();
+        assert_eq!(
+            &bytes[start..start + cbf0.len()],
+            &cbf0[..],
+            "CBF0 sits after VQHD"
+        );
+        bytes.splice(start..start + cbf0.len(), vqa_chunk(b"CBP0", &[1, 2, 3, 4]));
+
+        assert!(
+            briefing_video_first_frame(&bytes).is_none(),
+            "an unsupported variant yields no frame"
+        );
+
+        let dir = shell_scratch("briefing-cbp0");
+        let path = dir.join("partial.vqa");
+        std::fs::write(&path, &bytes).unwrap();
+        let key = path.to_str().unwrap().to_string();
+
+        let mut renderer = SoftwareRenderer::new(64, 64);
+        assert!(
+            !draw_briefing_video(&mut renderer, Some(&key), 64, 64),
+            "an unsupported-variant asset falls back without drawing"
+        );
+        assert!(
+            renderer.buffer().iter().all(|p| *p == 0),
+            "the unsupported variant draws nothing"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn draw_td_briefing_uses_text_panel_without_video() {
+        let mut renderer = SoftwareRenderer::new(320, 200);
+        let mut mission = Mission::new("GDI 01".to_string());
+        mission.briefing_image = Some("briefings/gdi_01.vqa".to_string());
+        // No tileset pack -> the video never borrows the slot; text panel path.
+        assert!(!draw_td_briefing(&mut renderer, &mission, None, 320, 200));
+        assert!(
+            renderer.buffer().iter().any(|p| *p != 0),
+            "the text panel draws pixels"
+        );
     }
 }
