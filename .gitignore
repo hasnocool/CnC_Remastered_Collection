@@ -7,3 +7,30 @@
 [Dd]ebug/
 [Rr]elease/
 [Bb]in/
+
+# Rust build artifacts
+RUST/target/
+
+# Agent tooling scratch / caches (never source)
+.playwright-mcp/
+.graphflow-cache/
+graphflow-out/
+.slim/
+.omo/evidence/
+omo/sessions/
+
+# Editor swap files
+*.kate-swp
+*~
+
+# Local backups and release tarballs (large binaries, not redistributable)
+backup/
+*.tar.gz
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# SQLite sidecar journals
+*.sqlite-shm
+*.sqlite-wal
