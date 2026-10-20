@@ -1575,9 +1575,41 @@ Action1=Win
         assert!(triggers[0].once, "persistent=0 means fire once");
         assert_eq!(triggers[1].actions, vec![Action::Lose]);
 
-        // "All Destr." is a real event but the engine has no matching Condition,
-        // so it must be reported rather than silently treated as a win.
-        assert!(unmapped.iter().any(|note| note.contains("All Destr.")));
+        // EVENT_ALL_DESTROYED (record code 9 = `EventText[9]` in TRIGGER.CPP;
+        // TRIGGER.H:63 "all house's units & buildings destroyed") is detected in
+        // HOUSE.CPP:1519 only when that house has no buildings, units, infantry
+        // or aircraft left -- i.e. house elimination. `Condition::HouseEliminated
+        // { what: Both }` (mission.rs) means exactly units == 0 && buildings == 0,
+        // so this mapping is faithful, not a gap: "All Destr." must NOT be
+        // reported as unmapped.
+        match &triggers[1].condition {
+            Condition::HouseEliminated {
+                what: crate::mission::Eliminated::Both,
+                ..
+            } => {}
+            ref other => {
+                panic!("ALL_DESTROYED must map to HouseEliminated{{Both}}, got {other:?}")
+            }
+        }
+        assert!(
+            !unmapped.iter().any(|note| note.contains("All Destr.")),
+            "ALL_DESTROYED has a real Condition and must not be unmapped: {unmapped:?}"
+        );
+    }
+
+    #[test]
+    fn genuinely_unmapped_event_is_reported() {
+        // EVENT_ATTACKED (record code 3 = `EventText[3]`) is a real TD event that
+        // has no Condition in the engine vocabulary, so it must still be surfaced
+        // in `unmapped` rather than silently dropped.
+        let records = vec![parse_trigger_record("Odd", "Attacked, Win, 0, BadGuy, , 0")];
+        let (triggers, unmapped) = trigger_records_to_triggers(&records);
+        assert_eq!(triggers.len(), 1);
+        assert_eq!(triggers[0].condition, Condition::Never);
+        assert!(
+            unmapped.iter().any(|note| note == "event: Attacked"),
+            "an unmapped event must be reported: {unmapped:?}"
+        );
     }
 
     #[test]
