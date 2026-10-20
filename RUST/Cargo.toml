@@ -16,6 +16,8 @@ members = [
     "cnc-classic",
     "cnc-music",
     "cnc-bench",
+    "cnc-events",
+    "cnc-logs",
 ]
 
 [workspace.package]
@@ -80,3 +82,7 @@ chrono = "0.4"
 uuid = { version = "1.7", features = ["v4", "serde"] }
 serde-big-array = "0.4"
 criterion = "0.5.1"
+crossbeam-channel = "0.5"
+dashmap = "5.5"
+smallvec = "1.10"
+tracing-appender = "0.6"
