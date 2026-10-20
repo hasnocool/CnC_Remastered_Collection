@@ -85,6 +85,10 @@ impl LogEntry {
     }
 
     /// Create a log entry with full metadata
+    // Unused inside the workspace: kept because it is public API of the
+    // log-entry type (external callers build entries from tracing metadata);
+    // the nine plain options are the tracing field set, not a refactor target.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_metadata(
         level: LogLevel,
         target: &str,
@@ -136,7 +140,11 @@ impl LogBuffer {
         }
     }
 
-    /// Create a new log buffer with default capacity (10000 entries)
+    /// Create a new log buffer with default capacity (10000 entries).
+    ///
+    /// Deliberately an inherent method, not a `Default` impl: the public
+    /// signature returns `Self` (infallible), so it cannot be the trait method.
+    #[allow(clippy::should_implement_trait)]
     pub fn default() -> Self {
         Self::new(10000)
     }

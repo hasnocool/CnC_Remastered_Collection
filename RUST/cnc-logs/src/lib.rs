@@ -70,7 +70,6 @@ pub fn init_logging_with_buffer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[test]
     fn test_log_buffer_basic() {

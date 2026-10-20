@@ -1,10 +1,10 @@
 //! Logging initialization and management
 
-use crate::{CncLogLayer, LogBuffer, LogConfig, LogFilter, LogOutput};
+use crate::{CncLogLayer, LogBuffer, LogConfig, LogFilter};
 use anyhow::Result;
 use std::sync::Arc;
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{prelude::*, util::SubscriberInitExt, EnvFilter, Registry};
+use tracing_subscriber::{prelude::*, util::SubscriberInitExt, Registry};
 
 /// Guard that keeps the logging system alive
 pub struct LoggingGuard {

@@ -89,6 +89,11 @@ impl ReadyTracker {
     }
 
     /// Drop a player that left the lobby (its slot went away).
+    // Not wired yet: the peer-departure path in the poll loops still ignores
+    // leaves, so production never calls these two lobby-lifecycle helpers.
+    // The tests below are their only caller; drop this allow when the lobby
+    // lane starts handling `Peer::Left`.
+    #[allow(dead_code)]
     pub fn unregister(&mut self, player: &str) {
         if let Some(id) = self.ids.remove(player) {
             self.roster.remove_peer(id);
@@ -96,6 +101,7 @@ impl ReadyTracker {
     }
 
     /// Forget every player and reset the expected count.
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.roster = LobbyState::new(0);
         self.ids.clear();

@@ -11357,7 +11357,7 @@ mod tests {
             "block index 0 paints its codebook colour"
         );
         assert!(
-            rgba.chunks_exact(4).all(|px| px == &expected),
+            rgba.as_chunks::<4>().0.iter().all(|px| px == &expected),
             "a uniform codebook entry paints every pixel the same colour"
         );
     }

@@ -133,7 +133,7 @@ impl StructuredLogBuilder {
             timestamp: now,
             level: self.level.unwrap_or(LogLevel::Info),
             target: self.target.unwrap_or_else(|| "unknown".to_string()),
-            message: self.message.unwrap_or_else(|| "".to_string()),
+            message: self.message.unwrap_or_default(),
             fields: self.fields,
             span_name: self.span_name,
             span_id: self.span_id,

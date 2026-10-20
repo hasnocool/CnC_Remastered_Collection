@@ -26,21 +26,16 @@ pub struct LogFilter {
 }
 
 /// Log level configuration for filters
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevelConfig {
     Trace,
     Debug,
+    #[default]
     Info,
     Warn,
     Error,
     Off,
-}
-
-impl Default for LogLevelConfig {
-    fn default() -> Self {
-        LogLevelConfig::Info
-    }
 }
 
 impl From<LogLevelConfig> for LevelFilter {

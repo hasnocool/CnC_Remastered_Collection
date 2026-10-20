@@ -1817,6 +1817,11 @@ mod tests {
             );
         }
         // Wider than one glyph advance, so the padding stays visible.
-        assert!(CONTROLS_KEY_GUTTER > 9.0 * 1.25);
+        // Compile-time invariant (clippy flags a literal test assertion; this
+        // is a property of a constant, not of runtime behaviour).
+        const _: () = assert!(
+            CONTROLS_KEY_GUTTER > 9.0 * 1.25,
+            "the key gutter must exceed one glyph advance so the padding shows"
+        );
     }
 }
