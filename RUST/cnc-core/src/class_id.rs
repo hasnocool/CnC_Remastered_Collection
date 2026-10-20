@@ -52,6 +52,7 @@ pub enum ClassId {
     GapGenerator = 318,
     IronCurtain = 319,
     Chronosphere = 320,
+    GrandCannon = 321,
 
     // Infantry types
     InfantryE1 = 400,  // Rifleman
@@ -180,6 +181,7 @@ impl ClassId {
             318 => ClassId::GapGenerator,
             319 => ClassId::IronCurtain,
             320 => ClassId::Chronosphere,
+            321 => ClassId::GrandCannon,
             400..=410 => unsafe { std::mem::transmute::<u32, ClassId>(id) },
             500..=514 => unsafe { std::mem::transmute::<u32, ClassId>(id) },
             600..=607 => unsafe { std::mem::transmute::<u32, ClassId>(id) },
@@ -275,6 +277,7 @@ impl ClassId {
                 | ClassId::GapGenerator
                 | ClassId::IronCurtain
                 | ClassId::Chronosphere
+                | ClassId::GrandCannon
         )
     }
 

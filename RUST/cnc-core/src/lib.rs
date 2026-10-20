@@ -12,6 +12,7 @@ pub mod palette;
 pub mod pointers;
 pub mod rules;
 pub mod serialization;
+pub mod shroud;
 pub mod smart_ptr;
 
 // Re-exports
@@ -34,4 +35,5 @@ pub use rules::{
     WeaponRule,
 };
 pub use serialization::{BinaryReader, BinaryWriter, Serializable};
+pub use shroud::{Shroud, MAX_HOUSES};
 pub use smart_ptr::CCPtr;

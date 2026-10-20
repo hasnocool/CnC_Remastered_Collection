@@ -188,7 +188,18 @@ impl DecodePointers {
         unsafe { &mut *ptr }
     }
 
-    pub fn decode_const_ref<T>(&self, id: ObjectId) -> &T {
+    /// Resolve an object id to a shared reference.
+    ///
+    /// # Safety
+    ///
+    /// The registry stores raw pointers with no lifetime tying them to the
+    /// objects, so this is exactly as unsafe as [`DecodePointers::decode_ref`]:
+    /// the id must have been registered with a pointer to a live, initialised
+    /// object of type `T`, that object must not have been moved or dropped
+    /// since, and no `&mut T` to it may be alive for the duration of the
+    /// returned reference. This function was previously safe, which allowed a
+    /// dangling `&T` to be produced without `unsafe` at the call site.
+    pub unsafe fn decode_const_ref<T>(&self, id: ObjectId) -> &T {
         let ptr: *mut T = self.decode_ptr(id);
         assert!(!ptr.is_null(), "Invalid object ID: {:?}", id);
         unsafe { &*ptr }
@@ -339,7 +350,10 @@ mod tests {
         assert_eq!(decoder.registered_count(), 100);
         assert!(decoder.verify_complete(100).is_ok());
         for (i, id) in ids.iter().enumerate() {
-            assert_eq!(*decoder.decode_const_ref::<u32>(*id), (i + 1) as u32);
+            assert_eq!(
+                *unsafe { decoder.decode_const_ref::<u32>(*id) },
+                (i + 1) as u32
+            );
         }
     }
 

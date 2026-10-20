@@ -351,17 +351,22 @@ pub struct WarheadRule {
 
 impl WarheadRule {
     pub fn from_section(name: &str, section: &IniSection) -> Self {
-        let verses = match section.get_ci("Verses") {
-            Some(IniValue::Array(values)) => values
-                .iter()
-                .filter_map(|value| value.as_i64().ok())
-                .map(|value| value.clamp(0, 255) as u8)
-                .collect(),
-            Some(value) => value
-                .as_i64()
+        // Rules.ini writes percentages ("50%"). A bare `as_i64()` rejects
+        // those, which silently dropped the column and shifted every later
+        // armor class, so strip the percent sign first.
+        fn verse_value(value: &IniValue) -> Option<u8> {
+            if let Ok(number) = value.as_i64() {
+                return Some(number.clamp(0, 255) as u8);
+            }
+            let text = value.as_string()?.trim().trim_end_matches('%').trim();
+            text.parse::<i64>()
                 .ok()
-                .map(|value| vec![value.clamp(0, 255) as u8])
-                .unwrap_or_default(),
+                .map(|number| number.clamp(0, 255) as u8)
+        }
+
+        let verses = match section.get_ci("Verses") {
+            Some(IniValue::Array(values)) => values.iter().filter_map(verse_value).collect(),
+            Some(value) => verse_value(value).map(|v| vec![v]).unwrap_or_default(),
             None => Vec::new(),
         };
         Self {
