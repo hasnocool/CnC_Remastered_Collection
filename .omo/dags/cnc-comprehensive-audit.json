@@ -1,0 +1,66 @@
+{
+  "key": "cnc-comprehensive-audit",
+  "name": "C&C Remastered Comprehensive Code Audit",
+  "nodes": [
+    {
+      "id": "cpp-memory-safety",
+      "category": "unspecified-low",
+      "prompt": "Analyze C++ engine code in TIBERIANDAWN/ and REDALERT/ for memory safety issues. Focus on: ALLOC.CPP custom allocator patterns, CCPtr<T> smart pointer usage, NoInitClass placement-new, manual operator new/delete overrides, object pools, potential leaks in destructors, double-free risks, use-after-free in pointer fixup (Code_Pointers/Decode_Pointers). Output findings with file:line to /tmp/cnc-audit-{{key}}-memory.md"
+    },
+    {
+      "id": "cpp-determinism",
+      "category": "unspecified-low",
+      "prompt": "Check deterministic lockstep simulation correctness in both engines. Verify: fixed-point arithmetic (RA uses 16.16 'fixed' type, TD uses float bias), command queue broadcast ordering, frame synchronization, save/load pointer fixup consistency, RNG synchronization across clients, network desync prevention. Output to /tmp/cnc-audit-{{key}}-determinism.md"
+    },
+    {
+      "id": "cpp-westwood-patterns",
+      "category": "unspecified-low",
+      "prompt": "Document Westwood-era C++ patterns that may be unsafe or non-portable: custom RTTI via enum + member, CCPtr<T> vs std::shared_ptr, NoInitClass placement-new, manual allocators, ALL-CAPS filenames, flat directory structure, .H/.CPP extensions, DWORD/WORD/BYTE typedefs, Hungarian notation. Assess modernization risks for GlyphX client ABI compatibility. Output to /tmp/cnc-audit-{{key}}-westwood.md"
+    },
+    {
+      "id": "csharp-editor-analysis",
+      "category": "unspecified-low",
+      "prompt": "Analyze CnCTDRAMapEditor/ C# code for: WinForms UI thread blocking (long operations on UI thread), Steamworks.NET integration (callbacks, Workshop publishing, auth), memory pressure from large map rendering (CellGrid, texture handling), game data structure mapping correctness (INI-driven type registries), Command pattern undo/redo via UndoRedoList, IGamePlugin implementations for TD/RA. Output to /tmp/cnc-audit-{{key}}-csharp.md"
+    },
+    {
+      "id": "build-verification",
+      "category": "quick",
+      "prompt": "Verify both solutions build: CnCRemastered.sln (C++ engines, VS2017/v141/Win8.1SDK/MFC) and CnCTDRAMapEditor.sln (C# editor, .NET 4.6.2 x64). Check: SDK version mismatches, packing alignment errors, missing MFC/Windows 8.1 SDK dependencies, x86/x64 configuration issues, precompiled headers, resource compilation (.rc files). Output to /tmp/cnc-audit-{{key}}-build.md",
+      "dependsOn": [
+        "cpp-memory-safety",
+        "cpp-determinism",
+        "cpp-westwood-patterns",
+        "csharp-editor-analysis"
+      ]
+    },
+    {
+      "id": "cross-engine-consistency",
+      "category": "unspecified-low",
+      "prompt": "Compare TIBERIANDAWN/ and REDALERT/ architectures for divergences: shared base classes (AbstractClass, BuildingClass, AircraftClass, UnitClass, InfantryClass), manager singletons (AudioClass, AnimationClass, NetworkClass, ResourceManagerClass), file format handlers (MIX, SHP, VOC, AUD, INI), mission scripting (SCRIPT.CPP variations), AI/house logic (HOUSE.CPP), network code (COMQUEUE.CPP). Output to /tmp/cnc-audit-{{key}}-consistency.md",
+      "dependsOn": [
+        "cpp-memory-safety",
+        "cpp-determinism",
+        "cpp-westwood-patterns"
+      ]
+    },
+    {
+      "id": "editor-engine-contracts",
+      "category": "unspecified-low",
+      "prompt": "Verify editor-engine plugin contracts: IGamePlugin implementations in CnCTDRAMapEditor/TiberianDawn/ and RedAlert/, INI-driven type registries matching engine expectations, map format compatibility (CellGrid, terrain, buildings, units, triggers), save/load round-trip fidelity, Steam Workshop metadata. Output to /tmp/cnc-audit-{{key}}-contracts.md",
+      "dependsOn": [
+        "csharp-editor-analysis",
+        "cross-engine-consistency"
+      ]
+    },
+    {
+      "id": "summary-report",
+      "category": "quick",
+      "prompt": "Synthesize all findings from /tmp/cnc-audit-{{key}}-*.md into a final prioritized report at /tmp/cnc-audit-{{key}}-FINAL.md with sections: CRITICAL (build blockers, memory safety, determinism risks), HIGH (Steam integration, editor-engine contracts, network desync), MEDIUM (maintainability, cross-engine consistency, Westwood pattern risks), LOW (style, docs, naming). Include file:line references, risk scores, and recommended fixes.",
+      "dependsOn": [
+        "build-verification",
+        "cross-engine-consistency",
+        "editor-engine-contracts"
+      ]
+    }
+  ]
+}

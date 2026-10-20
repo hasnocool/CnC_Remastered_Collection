@@ -1,0 +1,42 @@
+{
+  "key": "cnc-code-audit",
+  "name": "C&C Remastered Code Health Audit",
+  "nodes": [
+    {
+      "id": "cpp-static-analysis",
+      "category": "unspecified-low",
+      "prompt": "Run static analysis on C++ engine code in TIBERIANDAWN/ and REDALERT/. Check for: memory leaks (manual allocators), buffer overflows, uninitialized variables, deterministic simulation issues, and Westwood-era patterns that may be unsafe. Output findings to /tmp/cnc-audit-{{key}}-cpp.md"
+    },
+    {
+      "id": "csharp-editor-analysis",
+      "category": "unspecified-low",
+      "prompt": "Analyze CnCTDRAMapEditor/ C# code for: WinForms UI thread blocking, Steamworks.NET integration issues, memory pressure from map rendering, game data structure mapping correctness, and Steam Workshop publishing reliability. Output to /tmp/cnc-audit-{{key}}-csharp.md"
+    },
+    {
+      "id": "build-verification",
+      "category": "quick",
+      "prompt": "Verify both solutions build: CnCRemastered.sln (C++ engines) and CnCTDRAMapEditor.sln (C# editor). Check for: SDK version mismatches, packing alignment errors, missing MFC/Windows 8.1 SDK dependencies, and x86/x64 configuration issues. Output to /tmp/cnc-audit-{{key}}-build.md",
+      "dependsOn": [
+        "cpp-static-analysis",
+        "csharp-editor-analysis"
+      ]
+    },
+    {
+      "id": "cross-engine-consistency",
+      "category": "unspecified-low",
+      "prompt": "Compare TIBERIANDAWN/ and REDALERT/ architectures for: shared base class divergences (AbstractClass, BuildingClass, AircraftClass), manager singleton inconsistencies (Audio, Animation, Network, Resource), file format handler differences, and mission scripting variations. Output to /tmp/cnc-audit-{{key}}-consistency.md",
+      "dependsOn": [
+        "cpp-static-analysis"
+      ]
+    },
+    {
+      "id": "summary-report",
+      "category": "quick",
+      "prompt": "Synthesize all findings from /tmp/cnc-audit-{{key}}-*.md into a final prioritized report at /tmp/cnc-audit-{{key}}-FINAL.md with: CRITICAL (build blockers, memory safety), HIGH (determinism risks, Steam integration), MEDIUM (maintainability, consistency), LOW (style, docs). Include file:line references.",
+      "dependsOn": [
+        "build-verification",
+        "cross-engine-consistency"
+      ]
+    }
+  ]
+}

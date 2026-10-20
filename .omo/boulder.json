@@ -1,0 +1,26 @@
+{
+  "schema_version": 2,
+  "active_work_id": "parity-100-001",
+  "works": {
+    "parity-100-001": {
+      "work_id": "parity-100-001",
+      "active_plan": ".omo/plans/parity-100.md",
+      "plan_name": "parity-100",
+      "session_ids": [
+        "codex:main"
+      ],
+      "status": "active",
+      "worktree_path": null
+    },
+    "cnc-rust-clone-001": {
+      "work_id": "cnc-rust-clone-001",
+      "active_plan": ".omo/plans/cnc-rust-clone.md",
+      "plan_name": "cnc-rust-clone",
+      "session_ids": [
+        "codex:main"
+      ],
+      "status": "completed",
+      "worktree_path": null
+    }
+  }
+}

@@ -1,0 +1,18 @@
+# CnCTDRAMapEditor/Dialogs/
+
+## Responsibility
+Hosts all modal `Form` dialogs of the map editor (namespace `MobiusEditor.Dialogs`). Each dialog collects or presents editor state — new-map setup, map/house settings, trigger and team-type editing, Workshop publishing, and message boxes — and either returns data to `MainForm` or drives the mutation itself.
+
+## Design
+- **Clone-edit-commit (prepare a working copy):** `TriggersDialog` and `TeamTypesDialog` copy the live lists at construction (`plugin.Map.Triggers.Select(t => t.Clone())` / same for `TeamTypes`), bind controls to the clones via `DataBindings`, and only on `DialogResult.OK` does `MainForm` splice the results back into `plugin.Map`. The dialog never mutates the real model directly; `MainForm` performs the commit (diff-merge by trigger name via LINQ joins; full clear+replace for team types) and sets `plugin.Dirty = true`. This keeps the model from being mutated while an edit dialog is open and prevents binding writes from corrupting live state.
+- **Game-type branching:** dialogs query `plugin.GameType` (TD vs RA) to show/hide or relabel controls (e.g. `TriggersDialog` hides the second event/action pair and relabels "Loop" for TD; `TeamTypesDialog` hides trigger/waypoint selectors for TD and Learning/Mercenary for RA), and pick caps from `TiberianDawn.Constants` / `RedAlert.Constants` (`MaxTeams`, `MaxTriggers`).
+- **Settings editing via `PropertyTracker`:** `MapSettingsDialog(IGamePlugin plugin, PropertyTracker<BasicSection>, PropertyTracker<BriefingSection>, IDictionary<House, PropertyTracker<House>>)` builds a tree (BASIC / BRIEFING / Players) and lazily hosts the `BasicSettings`, `BriefingSettings`, `PlayerSettings` controls on node selection. Per-player checkboxes in the tree use raw Win32 interop (`user32.dll` `SendMessage` with `TVM_SETITEM` / `TVIF_STATE` to hide checkboxes on non-player nodes).
+
+## Flow
+- `Program.cs` shows `InviteMessageBox` at startup (with "Don't show again" persistence via `DontShowAgain`).
+- `MainForm.cs`: `NewMapDialog` (File > New) exposes `GameType` + `TheaterName` and relabels the theater radios (TD: Desert/Temperate/Winter, RA: Temperate/Snow/Interior); `MapSettingsDialog` from Map > Settings; `TeamTypesDialog` / `TriggersDialog` from Settings menu, committing on OK; `SteamDialog` from `SteamDialog(plugin)` for publishing.
+- `SteamDialog` reads `plugin.Map.SteamSection` (Title/Description/PreviewFile/Visibility/PublishedFileId), writes its own generated Workshop preview (`Map.GenerateWorkshopPreview()` — minimap PNG into `%TEMP%\CnCRCMapEditor`, plus a solo-mission banner from `Properties.Resources`), and publishes through `Utility/SteamworksUGC.cs`. It polls `SteamworksUGC.CurrentOperation?.Status` on a 500 ms `Timer` (not a Steam callback) to update the status label, and enables/disables controls until an operation succeeds/fails.
+- `ErrorMessageBox` accepts a `Message` string plus an `IEnumerable<string>` `Errors` (join into the textbox) with a copy-to-clipboard button; `MainForm` shows it when a map fails validation.
+
+## Integration
+Depends on `Interface/IGamePlugin` (map access + `GameType`), `Model/` (`Trigger`, `TeamType`, `BasicSection`, etc.), `Utility/` (`PropertyTracker`, `SteamworksUGC`, `UndoRedoList` indirectly — dialog commits bypass the undo list and are written straight to the map), and `Steamworks` (handles, `ERemoteStoragePublishedFileVisibility`). `Controls/` supplies the hosted settings panels (`BasicSettings`, `PlayerSettings`, …). Remarks: dialog-comack edits (Triggers/TeamTypes) are committed outside `UndoRedoList` commands, so those menu operations lose their changes in the undo history — an accepted limitation of the current code path.
