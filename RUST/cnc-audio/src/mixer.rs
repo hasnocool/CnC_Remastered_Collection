@@ -433,6 +433,9 @@ pub struct RecordedMusic {
     pub faded_out_previous: bool,
     /// Whether this entry is a `stop_music` tear-down.
     pub stop_requested: bool,
+    /// Audibility product `master * music bus * music channel` the track
+    /// would play at (see [`AudioMixer::set_music_volume`]).
+    pub effective_volume: f32,
 }
 
 #[derive(Default)]
@@ -468,6 +471,13 @@ enum Backend {
 pub struct AudioMixer {
     /// Master volume applied on top of per-channel volumes.
     master_volume: Mutex<f32>,
+    /// Music bus gain (0..=1) multiplied at the music call sites
+    /// ([`AudioMixer::crossfade_music`]); 1.0 keeps the default behavior.
+    music_volume: Mutex<f32>,
+    /// Effects bus gain (0..=1) shared by every SFX and voice channel,
+    /// multiplied at the [`AudioMixer::play`] call sites; 1.0 keeps the
+    /// default behavior.
+    effects_volume: Mutex<f32>,
     /// Per-slot channel state.
     channels: Mutex<Vec<ChannelState>>,
     /// Active-voice registry: handle -> channel the voice plays on.
@@ -490,6 +500,8 @@ impl AudioMixer {
         let music_sinks = [Sink::try_new(&handle)?, Sink::try_new(&handle)?];
         Ok(Self {
             master_volume: Mutex::new(1.0),
+            music_volume: Mutex::new(1.0),
+            effects_volume: Mutex::new(1.0),
             channels: Mutex::new(vec![ChannelState::new(); Channel::slot_count()]),
             voices: Mutex::new(HashMap::new()),
             next_handle: AtomicU32::new(1),
@@ -511,6 +523,8 @@ impl AudioMixer {
     pub fn headless() -> Self {
         Self {
             master_volume: Mutex::new(1.0),
+            music_volume: Mutex::new(1.0),
+            effects_volume: Mutex::new(1.0),
             channels: Mutex::new(vec![ChannelState::new(); Channel::slot_count()]),
             voices: Mutex::new(HashMap::new()),
             next_handle: AtomicU32::new(1),
@@ -593,11 +607,12 @@ impl AudioMixer {
             };
             state.voice = Some(ActiveVoice { handle, priority });
             let master = *self.master_volume.lock();
+            let effects = *self.effects_volume.lock();
             (
                 evicted,
                 state.pitch,
-                master * state.volume * volume,
-                master * state.volume,
+                master * effects * state.volume * volume,
+                master * effects * state.volume,
             )
         };
         if let Some(old) = evicted {
@@ -752,19 +767,74 @@ impl AudioMixer {
         } = &self.backend
         {
             let channels = self.channels.lock();
+            let effects = *self.effects_volume.lock();
+            let music = *self.music_volume.lock();
             for (slot, sink) in sinks.iter().enumerate() {
-                sink.set_volume(volume * channels[slot].volume);
+                sink.set_volume(volume * effects * channels[slot].volume);
             }
             let music_volume = volumes_of(&channels);
             music_sinks
                 .iter()
-                .for_each(|sink| sink.set_volume(volume * music_volume));
+                .for_each(|sink| sink.set_volume(volume * music * music_volume));
         }
     }
 
     /// Current master volume (0..1).
     pub fn master_volume(&self) -> f32 {
         *self.master_volume.lock()
+    }
+
+    /// Set the music bus volume (0..1, clamped). Applies immediately in
+    /// real mode by adjusting the music sinks; tracks started later play
+    /// at `master * music bus * music channel` audibility (plan line 206,
+    /// launcher options data layer).
+    pub fn set_music_volume(&self, volume: f32) {
+        let volume = clamp_unit(volume, 0.0, 1.0, 0.0);
+        *self.music_volume.lock() = volume;
+        if let Backend::Real { music_sinks, .. } = &self.backend {
+            let channels = self.channels.lock();
+            let master = *self.master_volume.lock();
+            let music_volume = volumes_of(&channels);
+            music_sinks
+                .iter()
+                .for_each(|sink| sink.set_volume(master * volume * music_volume));
+        }
+    }
+
+    /// Current music bus volume (0..1).
+    pub fn music_volume(&self) -> f32 {
+        *self.music_volume.lock()
+    }
+
+    /// Set the effects bus volume (0..1, clamped) shared by every SFX and
+    /// voice channel. Applies immediately in real mode by adjusting those
+    /// sinks; later plays are `master * effects bus * channel * voice`
+    /// (plan line 206, launcher options data layer).
+    pub fn set_effects_volume(&self, volume: f32) {
+        let volume = clamp_unit(volume, 0.0, 1.0, 0.0);
+        *self.effects_volume.lock() = volume;
+        if let Backend::Real { sinks, .. } = &self.backend {
+            let channels = self.channels.lock();
+            let master = *self.master_volume.lock();
+            for (slot, sink) in sinks.iter().enumerate() {
+                sink.set_volume(master * volume * channels[slot].volume);
+            }
+        }
+    }
+
+    /// Current effects bus volume (0..1).
+    pub fn effects_volume(&self) -> f32 {
+        *self.effects_volume.lock()
+    }
+
+    /// Audibility product `master * music bus * music channel` a track
+    /// started now plays at. Shared by the headless recorder and the real
+    /// music sinks so both modes report identical gains.
+    fn music_effective_volume(&self) -> f32 {
+        let channels = self.channels.lock();
+        let master = *self.master_volume.lock();
+        let music = *self.music_volume.lock();
+        master * music * channels[Channel::Music.slot().expect("music slot always valid")].volume
     }
 
     /// Set a channel's volume (0..1, clamped). Applies to currently playing
@@ -780,12 +850,14 @@ impl AudioMixer {
         } = &self.backend
         {
             let master = *self.master_volume.lock();
+            let music = *self.music_volume.lock();
+            let effects = *self.effects_volume.lock();
             if channel == Channel::Music {
                 music_sinks
                     .iter()
-                    .for_each(|sink| sink.set_volume(master * volume));
+                    .for_each(|sink| sink.set_volume(master * music * volume));
             } else {
-                sinks[slot].set_volume(master * volume);
+                sinks[slot].set_volume(master * effects * volume);
             }
         }
         Ok(())
@@ -842,24 +914,21 @@ impl AudioMixer {
     {
         match &self.backend {
             Backend::Headless { music, .. } => {
+                let effective_volume = self.music_effective_volume();
                 let mut log = music.lock();
                 let faded_out_previous = log.active;
                 log.entries.push(RecordedMusic {
                     crossfade: sanitize_crossfade(crossfade),
                     faded_out_previous,
                     stop_requested: false,
+                    effective_volume,
                 });
                 log.active = true;
             }
             Backend::Real {
                 music_sinks, music, ..
             } => {
-                let volume = {
-                    let master = *self.master_volume.lock();
-                    let channels = self.channels.lock();
-                    master
-                        * channels[Channel::Music.slot().expect("music slot always valid")].volume
-                };
+                let volume = self.music_effective_volume();
                 let mut state = music.lock();
                 let slot = 1 - state.active;
                 if let Some(previous) = state.states[state.active].as_ref() {
@@ -884,12 +953,14 @@ impl AudioMixer {
     pub fn stop_music(&self) {
         match &self.backend {
             Backend::Headless { music, .. } => {
+                let effective_volume = self.music_effective_volume();
                 let mut log = music.lock();
                 if log.active {
                     log.entries.push(RecordedMusic {
                         crossfade: 0.0,
                         faded_out_previous: true,
                         stop_requested: true,
+                        effective_volume,
                     });
                     log.active = false;
                 }
@@ -1073,6 +1144,87 @@ mod tests {
             .expect("plays");
         let entry = &mixer.played()[0];
         assert!(near(entry.effective_volume, 0.5 * 0.8 * 0.7));
+    }
+
+    // --- Music / effects volume buses (plan line 206, launcher options) ---
+
+    #[test]
+    fn music_and_effects_volume_knobs_default_full_and_clamp() {
+        let mixer = AudioMixer::headless();
+        // Defaults preserve the current behavior bit-for-bit.
+        assert_eq!(mixer.music_volume(), 1.0);
+        assert_eq!(mixer.effects_volume(), 1.0);
+        mixer.set_music_volume(0.5);
+        mixer.set_effects_volume(0.25);
+        assert!(near(mixer.music_volume(), 0.5));
+        assert!(near(mixer.effects_volume(), 0.25));
+        // Out-of-range values clamp into 0..=1; NaN/infinite collapse to
+        // silence exactly like every other mixer gain (clamp_unit).
+        mixer.set_music_volume(2.0);
+        assert_eq!(mixer.music_volume(), 1.0);
+        mixer.set_effects_volume(-1.0);
+        assert_eq!(mixer.effects_volume(), 0.0);
+        mixer.set_music_volume(f32::NAN);
+        assert_eq!(mixer.music_volume(), 0.0);
+        mixer.set_effects_volume(f32::INFINITY);
+        assert_eq!(mixer.effects_volume(), 0.0);
+    }
+
+    #[test]
+    fn default_volume_knobs_keep_headless_recordings_identical() {
+        // With both knobs at their 1.0 default the recorded audibility must
+        // stay exactly `master * channel * voice` (bit-identical behavior).
+        let mixer = AudioMixer::headless();
+        mixer.set_master_volume(0.5);
+        mixer
+            .set_channel_volume(Channel::Sfx(3), 0.8)
+            .expect("valid channel");
+        mixer
+            .play(Channel::Sfx(3), decoder_for(330.0), 10, 0.7, 0.0)
+            .expect("plays");
+        let entry = &mixer.played()[0];
+        assert_eq!(entry.effective_volume, 0.5 * 0.8 * 0.7);
+        // The music bus records the same product.
+        mixer
+            .set_channel_volume(Channel::Music, 0.8)
+            .expect("valid channel");
+        mixer
+            .crossfade_music(decoder_for(440.0), Duration::from_secs_f32(1.0))
+            .expect("headless ok");
+        assert_eq!(mixer.music_log()[0].effective_volume, 0.5 * 0.8);
+    }
+
+    #[test]
+    fn effects_and_music_volumes_scale_headless_recordings() {
+        let mixer = AudioMixer::headless();
+        mixer.set_effects_volume(0.5);
+        mixer.set_music_volume(0.25);
+        mixer
+            .play(Channel::Sfx(0), decoder_for(220.0), 10, 0.8, 0.0)
+            .expect("plays");
+        let entry = &mixer.played()[0];
+        // master(1) * effects(0.5) * channel(1) * voice(0.8)
+        assert!(near(entry.effective_volume, 0.5 * 0.8));
+        mixer
+            .crossfade_music(decoder_for(440.0), Duration::from_secs_f32(1.0))
+            .expect("headless ok");
+        // master(1) * music(0.25) * channel(1)
+        assert!(near(mixer.music_log()[0].effective_volume, 0.25));
+    }
+
+    #[test]
+    fn volume_buses_compose_with_master_and_channel() {
+        let mixer = AudioMixer::headless();
+        mixer.set_master_volume(0.5);
+        mixer.set_effects_volume(0.5);
+        mixer
+            .set_channel_volume(Channel::Sfx(1), 0.5)
+            .expect("valid channel");
+        mixer
+            .play(Channel::Sfx(1), decoder_for(440.0), 10, 0.5, 0.0)
+            .expect("plays");
+        // 0.5^4 is exact in binary floating point.
+        assert_eq!(mixer.played()[0].effective_volume, 0.0625);
     }
 
     #[test]

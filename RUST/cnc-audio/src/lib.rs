@@ -23,6 +23,17 @@
 //! original games did not have — callers may use it to derive a pitch
 //! multiplier, but playback never applies it automatically.
 //!
+//! ## Volume buses
+//!
+//! [`AudioMixer`] layers two named buses on top of the per-channel volumes:
+//! [`AudioMixer::music_volume`] (music bus, applied at
+//! [`AudioMixer::crossfade_music`]) and [`AudioMixer::effects_volume`]
+//! (SFX + voice bus, applied at [`AudioMixer::play`]). All three knobs
+//! default to 1.0, so the default audibility product
+//! `master * bus * channel * voice` is bit-identical to the plain
+//! `master * channel * voice` formula above — raising or lowering a bus
+//! scales every later play request without touching per-channel state.
+//!
 //! ## Headless mode
 //!
 //! CI hosts have no audio device, so [`mixer::AudioMixer::headless`] builds a
@@ -52,11 +63,15 @@
 //! # }
 //! ```
 
+pub mod eva;
+pub mod eva_ra;
 pub mod mixer;
 pub mod music;
 pub mod reader;
 pub mod sfx;
 
+pub use eva::{EvaLine, EvaPlayer, EvaQueue};
+pub use eva_ra::{RaEvaLine, RaEvaQueue};
 pub use mixer::{
     attenuate, doppler_factor, pan_gains, AudioError, AudioMixer, Channel, ChannelId, FadeSource,
     RecordedMusic, RecordedPlay, SfxHandle, SharedFade, SFX_CHANNEL_COUNT,
