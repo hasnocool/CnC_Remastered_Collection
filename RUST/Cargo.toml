@@ -16,7 +16,6 @@ members = [
     "cnc-classic",
     "cnc-music",
     "cnc-bench",
-    "cnc-events",
     "cnc-logs",
 ]
 
