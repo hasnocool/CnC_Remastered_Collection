@@ -1008,6 +1008,7 @@ dependencies = [
  "cnc-asset",
  "cnc-audio",
  "cnc-core",
+ "cnc-events",
  "cnc-net-directory",
  "cnc-red-alert",
  "cnc-renderer",

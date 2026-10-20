@@ -1,5 +1,6 @@
 //! C&C Launcher library
 
+pub mod events_subscriber;
 pub mod lobby;
 pub mod lobby_screen;
 pub mod menu;
