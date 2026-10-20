@@ -5,10 +5,12 @@
 //! tool's command through [`crate::history::History`], so the model is only
 //! ever changed by undoable commands.
 
+use std::sync::Arc;
+
 use crate::history::History;
 use crate::map::{MapModel, TILE_SIZE};
+use crate::pack_tileset::PackTileset;
 use crate::tools::Tool;
-use cnc_asset::tileset_pack::TilesetPack;
 use cnc_core::{Fixed16_16, Vec2, Vec2i};
 use cnc_renderer::{Renderer, Sprite, TILESET_TEXTURE_ID};
 
@@ -31,18 +33,6 @@ pub fn object_color(model: &MapModel, id: u32) -> [f32; 4] {
         Some(object) if object.class_id.is_building() => [0.95, 0.65, 0.25, 1.0],
         _ => [0.35, 0.80, 1.00, 1.0],
     }
-}
-
-/// Atlas pixel rect for a tiles.rs pick, honouring manifest family rows.
-fn ui_tile_rect(pack: &TilesetPack, draw: &crate::tiles::TileDraw) -> Option<cnc_core::Rect> {
-    use cnc_asset::tileset_pack::GRID;
-    let row = pack
-        .family_row(draw.category, draw.family)
-        .unwrap_or(draw.row)
-        .min((GRID - 1) as u8);
-    let col = draw.col % (GRID as u8);
-    pack.tile_px_rect(draw.category, row, col)
-        .map(|(px, py, pw, ph)| cnc_core::Rect::new(px as i32, py as i32, pw as i32, ph as i32))
 }
 
 /// One unit-sized textured quad sampled from the tileset atlas.
@@ -68,10 +58,10 @@ pub struct EditorUI {
     /// the first entry so single-object tools keep working unchanged.
     pub selected_objects: Vec<u32>,
     pub status: String,
-    /// Optional RTS tileset pack: when set, cells draw the same tile layers
-    /// as the main editor (shores, cliffs, resource sprites); when absent,
-    /// this view keeps its flat-coloured fallback quads.
-    pub tileset: Option<TilesetPack>,
+    /// Optional cnc32 pack tileset: when set, cells draw the same tile layers
+    /// as the main editor (shores, blob transitions, resource sprites); when
+    /// absent, this view keeps its flat-coloured fallback quads.
+    pub tileset: Option<Arc<PackTileset>>,
 }
 
 impl Default for EditorUI {
@@ -202,18 +192,21 @@ impl EditorUI {
                 let mut drew_overlay_sprite = false;
                 if tiled {
                     if let Some(pack) = self.tileset.as_ref() {
-                        if let Some(draw) = crate::tiles::base_draw(model, x as i32, y as i32) {
-                            if let Some(rect) = ui_tile_rect(pack, &draw) {
-                                draw_uv_sprite(renderer, sx, sy, tile, rect);
+                        // `pack` is an Arc<PackTileset>; deref for the borrow.
+                        let pack = pack.as_ref();
+                        if let Some(cell) = pack.cell_draw(model, x as i32, y as i32) {
+                            if let Some(id) =
+                                cell.base.as_deref().and_then(|id| pack.sprite_rect(id))
+                            {
+                                draw_uv_sprite(renderer, sx, sy, tile, id);
                                 drew_sprite = true;
                             }
-                        }
-                        for draw in crate::tiles::sprite_draws(model, x as i32, y as i32) {
-                            if let Some(rect) = ui_tile_rect(pack, &draw) {
-                                draw_uv_sprite(renderer, sx, sy, tile, rect);
-                                drew_sprite = true;
-                                drew_overlay_sprite |= draw.category == crate::tiles::DECORATIONS
-                                    || draw.category == crate::tiles::RESOURCES_FX;
+                            for layer in &cell.layers {
+                                if let Some(rect) = pack.sprite_rect(layer) {
+                                    draw_uv_sprite(renderer, sx, sy, tile, rect);
+                                    drew_sprite = true;
+                                    drew_overlay_sprite = true;
+                                }
                             }
                         }
                     }

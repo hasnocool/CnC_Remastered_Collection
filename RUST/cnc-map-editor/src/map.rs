@@ -53,6 +53,12 @@ pub struct MapModel {
     pub theater: String,
     pub terrain: Vec<u8>,
     pub overlay: Vec<u8>,
+    /// [Houses] entries retained from an original import.
+    pub houses: Vec<HouseEntry>,
+    /// Per-cell template icon index (TD binary TIcon): the sub-tile offset
+    /// within the terrain template. Zero everywhere when a scenario carries
+    /// no icon data.
+    pub icon: Vec<u8>,
     /// Normalised elevation per cell (0-255). Zero everywhere means "flat /
     /// unpainted"; the renderer draws cliffs from adjacent differences.
     pub elevation: Vec<u8>,
@@ -63,6 +69,18 @@ pub struct MapModel {
     pub player_starts: Vec<Vec2i>,
     next_object_id: u32,
     next_agent_id: u32,
+}
+
+/// Decode one numbered-line base64 pack section into cell entries.
+fn decode_pack_section(
+    section: &cnc_core::IniSection,
+) -> anyhow::Result<Vec<cnc_asset::ra_pack::PackedCell>> {
+    let entries: Vec<(String, String)> = section
+        .values
+        .iter()
+        .map(|(key, value)| (key.clone(), value.as_string().unwrap_or("").to_string()))
+        .collect();
+    cnc_asset::ra_pack::decode_pack(&entries)
 }
 
 impl MapModel {
@@ -77,6 +95,8 @@ impl MapModel {
             theater: "Temperate".to_string(),
             terrain: vec![0; (width * height) as usize],
             overlay: vec![0; (width * height) as usize],
+            icon: vec![0; (width * height) as usize],
+            houses: Vec::new(),
             elevation: vec![0; (width * height) as usize],
             objects: HashMap::new(),
             triggers: Vec::new(),
@@ -344,6 +364,242 @@ impl MapModel {
             out.push_str(&format!("Script={}\n", encode_ini_text(&agent.script)));
         }
         out
+    }
+
+    /// Import any supported scenario text, picking the reader by dialect.
+    ///
+    /// Tries the original RA dialect (`[Basic]` + `[MapPack]`), then the
+    /// editor dialect (`[Map]`), so an `open` command can accept either
+    /// without the user choosing. Returns the model and which reader ran.
+    pub fn import_text_with(input: &str, bin: Option<&[u8]>) -> anyhow::Result<(Self, ImportKind)> {
+        if looks_like_original_ra(input) {
+            return Ok((Self::from_original_ra(input)?, ImportKind::OriginalRa));
+        }
+        if looks_like_original_td(input) {
+            // A TD scenario is useless without its cell image; fail with a
+            // clear message rather than a confusing dialect error.
+            return Self::import_td(input, bin);
+        }
+        Ok((Self::from_ini(input)?, ImportKind::EditorDialect))
+    }
+
+    /// Import text with no sibling map image.
+    pub fn import_text(input: &str) -> anyhow::Result<(Self, ImportKind)> {
+        Self::import_text_with(input, None)
+    }
+
+    /// Import an original TD scenario, reading the sibling `.bin` if given.
+    pub fn import_td(ini: &str, bin: Option<&[u8]>) -> anyhow::Result<(Self, ImportKind)> {
+        let Some(bin) = bin else {
+            anyhow::bail!("an original TD scenario needs its .bin map image");
+        };
+        Ok((Self::from_original_td(ini, bin)?, ImportKind::OriginalTd))
+    }
+
+    /// Import an **original-format** RA scenario (`.mpr`/`.ini`) into the model.
+    ///
+    /// Original files store the cell grid in base64 `MapPack`/`OverlayPack`
+    /// blocks rather than the editor dialect's `[Terrain]`/`[Overlay]` text
+    /// rows (`REDALERT/DISPLAY.CPP`, `OVERLAY.CPP`). Each decoded entry is
+    /// `(u16 little-endian cell index, u8 id)`; the id becomes that cell's
+    /// terrain template or overlay id.
+    ///
+    /// Returns an error when the text is not original-format, so callers can
+    /// fall back to [`Self::from_ini`].
+    pub fn from_original_ra(input: &str) -> anyhow::Result<Self> {
+        let ini = IniFile::parse(input)?;
+        let basic = ini
+            .section("Basic")
+            .ok_or_else(|| anyhow::anyhow!("original RA scenario needs a [Basic] section"))?;
+        let map_pack = ini
+            .section("MapPack")
+            .ok_or_else(|| anyhow::anyhow!("original RA scenario needs a [MapPack] section"))?;
+
+        let map_cells = decode_pack_section(map_pack)?;
+        let overlay_cells = match ini.section("OverlayPack") {
+            Some(section) => decode_pack_section(section)?,
+            None => Vec::new(),
+        };
+
+        // The original format carries no dimensions; infer the smallest square
+        // that contains every referenced cell index.
+        let highest = map_cells
+            .iter()
+            .map(|cell| u32::from(cell.index))
+            .chain(overlay_cells.iter().map(|cell| u32::from(cell.index)))
+            .max()
+            .unwrap_or(0);
+        let side = ((highest + 1) as f64).sqrt().ceil().max(1.0) as u32;
+
+        let mut model = Self::new(side, side);
+        model.name = basic
+            .get_string("Name")
+            .unwrap_or("Imported Scenario")
+            .to_string();
+        // SCENARIO.CPP:2392 defaults the player house to Greece.
+        model.player = basic.get_string("Player").unwrap_or("Greece").to_string();
+        model.briefing = basic.get_string("Briefing").unwrap_or("").to_string();
+        model.theater = "Temperate".to_string();
+
+        for cell in &map_cells {
+            if let Some(slot) = model.terrain.get_mut(cell.index as usize) {
+                *slot = cell.id;
+            }
+        }
+        for cell in &overlay_cells {
+            if let Some(slot) = model.overlay.get_mut(cell.index as usize) {
+                *slot = cell.id;
+            }
+        }
+        // Object sections: Units/Infantry/Structures, record layout per
+        // REDALERT/UNIT.CPP and INFANTRY.CPP:
+        //   House,Type,Strength,Cell[,extra...]
+        let mut object_id = 0u32;
+        for section_name in ["Units", "Infantry", "Structures"] {
+            let Some(section) = ini.section(section_name) else {
+                continue;
+            };
+            for value in section.values.values() {
+                let text = ini_value_text(value);
+                let fields: Vec<&str> = text.split(',').map(str::trim).collect();
+                if fields.len() < 4 {
+                    continue;
+                }
+                // RA rules codes (HTNK, E1, POWR) resolve through the same
+                // shared vocabulary the engines use.
+                let class_id =
+                    cnc_core::class_id_from_token(fields[1]).unwrap_or(cnc_core::ClassId::Unknown);
+                let Ok(cell) = fields[3].parse::<u32>() else {
+                    continue;
+                };
+                if cell >= side * side {
+                    continue;
+                }
+                let (x, y) = ((cell % side) as i32, (cell / side) as i32);
+                object_id += 1;
+                model.insert_object(MapObject {
+                    id: object_id,
+                    class_id,
+                    position: Vec2i::new(x, y),
+                    owner: cnc_core::house_class_from_token(fields[0]).ok(),
+                });
+            }
+        }
+        model.houses = parse_house_entries(&ini);
+        Ok(model)
+    }
+    /// Import an **original-format** TD scenario (`.ini` + `.bin`).
+    ///
+    /// The original TD map image is one 2-byte record per cell
+    /// (`TemplateType`, `TIcon`) - raw, or LCW-compressed when the payload is
+    /// shorter than `side * side * 2` (`TIBERIANDAWN/DISPLAY.CPP`). The
+    /// template byte becomes the cell terrain id.
+    ///
+    /// Returns an error when the text is not original-format, so callers can
+    /// fall back to [`Self::from_ini`].
+    pub fn from_original_td(input: &str, bin: &[u8]) -> anyhow::Result<Self> {
+        let ini = IniFile::parse(input)?;
+        ini.section("Basic")
+            .ok_or_else(|| anyhow::anyhow!("original TD scenario needs a [Basic] section"))?;
+
+        let (cells, icons, side) = decode_td_bin(bin)?;
+        let mut model = Self::new(side, side);
+        let basic = ini.section("Basic").expect("checked above");
+        model.name = basic
+            .get_string("Name")
+            .unwrap_or("Imported Scenario")
+            .to_string();
+        model.player = basic.get_string("Player").unwrap_or("GDI").to_string();
+        model.briefing = basic.get_string("Briefing").unwrap_or("").to_string();
+        model.theater = basic
+            .get_string("Theater")
+            .unwrap_or("Temperate")
+            .to_string();
+
+        for (slot, template) in model.terrain.iter_mut().zip(&cells) {
+            *slot = *template;
+        }
+        for (slot, icon) in model.icon.iter_mut().zip(icons) {
+            *slot = icon;
+        }
+        // Object sections: [Wunits] (units) and [Structures]. Record layout
+        // per TIBERIANDAWN/UNIT.CPP and BUILDING.CPP:
+        //   House,Type,Strength,Cell,Facing,Mission,Trigger
+        // The cell is a row-major index; houses and types resolve through
+        // cnc_core so the editor shares one vocabulary with the engines.
+        let mut object_id = 0u32;
+        for section_name in ["Wunits", "Structures"] {
+            let Some(section) = ini.section(section_name) else {
+                continue;
+            };
+            for value in section.values.values() {
+                let text = ini_value_text(value);
+                let fields: Vec<&str> = text.split(',').map(str::trim).collect();
+                if fields.len() < 4 {
+                    continue;
+                }
+                // Building codes (FACT/PROC/POWR) live in the TD crate and
+                // cnc_core's shared table has none, so an unresolved type is
+                // kept as Unknown rather than silently dropping the object —
+                // the cell and house still matter to the editor.
+                let class_id =
+                    cnc_core::class_id_from_token(fields[1]).unwrap_or(cnc_core::ClassId::Unknown);
+                let Ok(cell) = fields[3].parse::<u32>() else {
+                    continue;
+                };
+                let (x, y) = ((cell % side) as i32, (cell / side) as i32);
+                object_id += 1;
+                model.insert_object(MapObject {
+                    id: object_id,
+                    class_id,
+                    position: Vec2i::new(x, y),
+                    owner: cnc_core::house_class_from_token(fields[0]).ok(),
+                });
+            }
+        }
+        // [Trigs] lists `<ordinal>=<section>`; each section carries
+        // `ConditionN=`/`ActionN=` slots (SCENARIO.CPP trigger dialect).
+        // The editor keeps the first condition/action verbatim so an
+        // imported scenario is inspectable even though the dialects differ.
+        if let Some(list) = ini.section("Trigs") {
+            let mut trigger_id = 0u32;
+            // The list is keyed by bare ordinal ("1=TRIGA"), not "Trigger1".
+            for index in 1..=9999 {
+                let Some(section_name) = list.get_string(&index.to_string()) else {
+                    break;
+                };
+                let Some(section) = ini.section(&section_name) else {
+                    continue;
+                };
+                let join = |prefix: &str| -> String {
+                    let mut parts = Vec::new();
+                    for slot in 1..=20 {
+                        if let Some(text) = get_raw_text(section, &format!("{prefix}{slot}")) {
+                            if !text.is_empty() {
+                                parts.push(text);
+                            }
+                        }
+                    }
+                    parts.join("; ")
+                };
+                let condition = join("Condition");
+                let action = join("Action");
+                if condition.is_empty() && action.is_empty() {
+                    continue;
+                }
+                trigger_id += 1;
+                model.add_trigger(Trigger {
+                    id: trigger_id,
+                    name: section_name.to_string(),
+                    condition,
+                    action,
+                    group: "Imported".to_string(),
+                });
+            }
+        }
+        // [Houses]: see parse_house_entries.
+        model.houses = parse_house_entries(&ini);
+        Ok(model)
     }
 
     /// Parse a scenario produced by [`Self::to_ini`].
@@ -631,6 +887,154 @@ pub(crate) fn parse_class_id(text: &str) -> Option<ClassId> {
     Some(canonical)
 }
 
+/// One `[Houses]` entry retained from an original import.
+///
+/// TD (`HOUSE.CPP`) and RA both name houses by section and read per-house
+/// economy settings; RA additionally carries TechLevel/IQ/MaxInfantry/
+/// MaxVessel. Fields a game does not define stay at their defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HouseEntry {
+    pub name: String,
+    pub credits: i64,
+    pub max_units: i64,
+    pub max_buildings: i64,
+    pub edge: String,
+    /// RA `TechLevel=` (0 when absent).
+    pub tech_level: i64,
+    /// RA `MaxInfantry=`.
+    pub max_infantry: i64,
+    /// RA `MaxVessel=`.
+    pub max_vessel: i64,
+}
+
+/// Which reader produced a model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportKind {
+    /// The editor's own `[Map]` dialect.
+    EditorDialect,
+    /// Original RA: `[Basic]` + base64 `MapPack`/`OverlayPack`.
+    OriginalRa,
+    /// Original TD: `[Basic]` + binary `.bin` map image.
+    OriginalTd,
+}
+
+impl ImportKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::EditorDialect => "editor dialect",
+            Self::OriginalRa => "original RA",
+            Self::OriginalTd => "original TD",
+        }
+    }
+}
+
+/// Read every `[Houses]` entry: an ordinal list of house section names plus
+/// each house section's economy settings (HOUSE.CPP, both games).
+fn parse_house_entries(ini: &IniFile) -> Vec<HouseEntry> {
+    let Some(list) = ini.section("Houses") else {
+        return Vec::new();
+    };
+    let mut entries = Vec::new();
+    for value in list.values.values() {
+        let name = ini_value_text(value).trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let section = ini.section(&name);
+        let int =
+            |key: &str, default: i64| section.and_then(|s| s.get_i64(key).ok()).unwrap_or(default);
+        entries.push(HouseEntry {
+            name,
+            // Both engines store Credits * 100.
+            credits: int("Credits", 0).saturating_mul(100),
+            max_units: int("MaxUnit", 150),
+            max_buildings: int("MaxBuilding", 150),
+            edge: section
+                .and_then(|s| s.get_string("Edge"))
+                .unwrap_or("")
+                .to_string(),
+            tech_level: int("TechLevel", 0),
+            max_infantry: int("MaxInfantry", 0),
+            max_vessel: int("MaxVessel", 0),
+        });
+    }
+    entries
+}
+/// Read a section value as plain text (arrays rejoined with commas).
+fn get_raw_text(section: &cnc_core::IniSection, key: &str) -> Option<String> {
+    section.values.get(key).map(ini_value_text)
+}
+/// Render an IniValue back to the text form the record parsers split on.
+fn ini_value_text(value: &cnc_core::IniValue) -> String {
+    match value {
+        cnc_core::IniValue::String(s) => s.clone(),
+        cnc_core::IniValue::Integer(i) => i.to_string(),
+        cnc_core::IniValue::Float(f) => f.to_string(),
+        cnc_core::IniValue::Boolean(b) => if *b { "1" } else { "0" }.to_string(),
+        cnc_core::IniValue::Array(parts) => parts
+            .iter()
+            .map(ini_value_text)
+            .collect::<Vec<_>>()
+            .join(","),
+    }
+}
+/// True when the text looks like an original-format TD scenario
+/// (TIBERIANDAWN/SCENARIO.CPP: [Basic] plus object sections).
+fn looks_like_original_td(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("[basic]")
+        && (lower.contains("[wunits]")
+            || lower.contains("[structures]")
+            || lower.contains("[trigs]"))
+}
+
+/// True when the text looks like an original-format RA scenario.
+fn looks_like_original_ra(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("[basic]") && lower.contains("[mappack]")
+}
+/// Decode a TD binary map image into (terrain template per cell, side length).
+///
+/// Uncompressed images are exactly `side * side * 2` bytes; anything else is
+/// treated as LCW-compressed (`cnc_asset::format80`) and inflated to the next
+/// square size that fits (`TIBERIANDAWN/DISPLAY.CPP`).
+fn decode_td_bin(raw: &[u8]) -> anyhow::Result<(Vec<u8>, Vec<u8>, u32)> {
+    if raw.is_empty() {
+        anyhow::bail!("TD map image is empty");
+    }
+    const RECORD: usize = 2;
+    // Exact square: plain uncompressed image.
+    if raw.len() % RECORD == 0 {
+        let total = raw.len() / RECORD;
+        let root = (total as f64).sqrt() as u32;
+        if root > 0 && (root as usize) * (root as usize) == total {
+            return Ok((td_byte(raw, root, 0), td_byte(raw, root, 1), root));
+        }
+    }
+    // Otherwise LCW: find the smallest square that inflates exactly.
+    for side in 8..=512u32 {
+        let want = (side as usize) * (side as usize) * RECORD;
+        if let Ok(inflated) = cnc_asset::format80::decompress(raw, want) {
+            if inflated.len() == want {
+                return Ok((
+                    td_byte(&inflated, side, 0),
+                    td_byte(&inflated, side, 1),
+                    side,
+                ));
+            }
+        }
+    }
+    anyhow::bail!("TD map image is neither a square payload nor decodable LCW")
+}
+
+/// Take the first byte of every 2-byte cell record (the template id).
+fn td_byte(cells: &[u8], side: u32, index: usize) -> Vec<u8> {
+    cells
+        .chunks_exact(2)
+        .take((side * side) as usize)
+        .map(|record| record[index])
+        .collect()
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -852,5 +1256,390 @@ mod tests {
         assert!(model.index(Vec2i::new(-1, 0)).is_none());
         assert!(model.index(Vec2i::new(i32::MIN, i32::MIN)).is_none());
         assert!(model.terrain_at(Vec2i::new(-99, -99)).is_none());
+    }
+
+    fn original_ra_text(
+        map: &[cnc_asset::ra_pack::PackedCell],
+        overlay: &[cnc_asset::ra_pack::PackedCell],
+    ) -> String {
+        let mut text = String::from("[Basic]\nName=Imported\nPlayer=Greece\nBriefing=Go.\n");
+        for (section, cells) in [("MapPack", map), ("OverlayPack", overlay)] {
+            text.push_str(&format!("[{section}]\n"));
+            for (key, value) in cnc_asset::ra_pack::encode_pack(cells) {
+                text.push_str(&format!("{key}={value}\n"));
+            }
+        }
+        text
+    }
+
+    #[test]
+    fn import_text_routes_td_when_a_bin_is_supplied() {
+        // [Basic] + [Wunits] is the original TD shape.
+        let text = "[Basic]\nName=TD\n[Wunits]\n1=E1\n";
+        let bin = [1u8, 0, 2, 1, 3, 2, 4, 3];
+        let (model, kind) = MapModel::import_text_with(text, Some(&bin)).expect("td");
+        assert_eq!(kind, ImportKind::OriginalTd);
+        assert_eq!(model.terrain, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn import_text_fails_clearly_for_td_without_a_bin() {
+        let text = "[Basic]\nName=TD\n[Wunits]\n1=E1\n";
+        let error = MapModel::import_text(text).unwrap_err().to_string();
+        assert!(
+            error.contains("bin"),
+            "the message should name the missing .bin, got: {error}"
+        );
+    }
+
+    #[test]
+    fn td_shaped_text_does_not_masquerade_as_the_editor_dialect() {
+        // Without TD detection this falls through to from_ini and fails with
+        // a confusing dialect error; the dispatch must catch it first.
+        let text = "[Basic]\nName=TD\n[Structures]\n1=PROC\n";
+        assert!(MapModel::import_text(text).is_err());
+        assert!(looks_like_original_td(text));
+    }
+    #[test]
+    fn import_text_dispatches_by_dialect() {
+        let dialect = "[Map]\nWidth=8\nHeight=8\nTheater=Temperate\nName=Ed\n";
+        let (model, kind) = MapModel::import_text(dialect).expect("editor dialect");
+        assert_eq!(kind, ImportKind::EditorDialect);
+        assert_eq!(model.name, "Ed");
+    }
+
+    #[test]
+    fn import_text_routes_original_ra_before_the_editor_dialect() {
+        use cnc_asset::ra_pack::PackedCell;
+        let map = vec![PackedCell { index: 0, id: 11 }];
+        let text = original_ra_text(&map, &[]);
+        let (_, kind) = MapModel::import_text(&text).expect("original RA");
+        assert_eq!(kind, ImportKind::OriginalRa);
+    }
+
+    #[test]
+    fn import_td_requires_a_bin() {
+        let text = "[Basic]\nName=TD\n";
+        assert!(MapModel::import_td(text, None).is_err());
+        let (_, kind) =
+            MapModel::import_td(text, Some(&[1u8, 0, 2, 1, 3, 2, 4, 3])).expect("td import");
+        assert_eq!(kind, ImportKind::OriginalTd);
+    }
+
+    #[test]
+    fn imports_the_byte_exact_ra_fixture() {
+        use crate::fixtures;
+        let text = fixtures::ra_scenario_text();
+        let (model, kind) = MapModel::import_text(&text).expect("import fixture");
+        assert_eq!(kind, ImportKind::OriginalRa, "routed to the RA reader");
+        assert_eq!((model.width, model.height), (16, 16));
+        assert_eq!(model.name, "Fixture One");
+        // Diagonal cells carry template 11; the four corners carry 22.
+        assert_eq!(model.terrain[0], 11, "cell 0 is on the diagonal");
+        assert_eq!(model.terrain[15], 22, "top-right corner");
+        assert_eq!(model.overlay[0], 3, "overlay decoded");
+        assert_eq!(model.overlay[255], 3);
+        // Objects from all three sections.
+        assert_eq!(model.objects.len(), 5, "2 units, 1 infantry, 2 structures");
+        // Houses with RA-only fields.
+        assert_eq!(model.houses.len(), 2);
+        assert_eq!(model.houses[0].credits, 4000);
+        assert_eq!(model.houses[0].tech_level, 7);
+    }
+
+    #[test]
+    fn imports_a_byte_exact_lcw_compressed_td_bin() {
+        use crate::fixtures;
+        let text = fixtures::td_scenario_text();
+        let raw = fixtures::td_bin_bytes();
+        let compressed = fixtures::td_bin_bytes_lcw();
+        assert!(
+            compressed.len() < raw.len(),
+            "the fixture must actually be compressed"
+        );
+
+        let (packed_model, _) =
+            MapModel::import_text_with(&text, Some(&compressed)).expect("lcw import");
+        let (raw_model, _) = MapModel::import_text_with(&text, Some(&raw)).expect("raw import");
+
+        // The whole point: compressed and raw decode to the same map.
+        assert_eq!(packed_model.terrain, raw_model.terrain);
+        assert_eq!(packed_model.icon, raw_model.icon);
+        assert_eq!((packed_model.width, packed_model.height), (16, 16));
+    }
+    #[test]
+    fn imports_the_byte_exact_td_fixture() {
+        use crate::fixtures;
+        let text = fixtures::td_scenario_text();
+        let bin = fixtures::td_bin_bytes();
+        let (model, kind) = MapModel::import_text_with(&text, Some(&bin)).expect("import");
+        assert_eq!(kind, ImportKind::OriginalTd);
+        assert_eq!((model.width, model.height), (16, 16));
+        assert_eq!(model.name, "Fixture TD");
+        // Diagonal is template 12, elsewhere 7.
+        assert_eq!(model.terrain[0], 12);
+        assert_eq!(model.terrain[1], 7);
+        // Icon byte is the low nibble of the index — this is the assertion
+        // that would fail if TIcon were dropped.
+        assert_eq!(model.icon[0], 0);
+        assert_eq!(model.icon[3], 3);
+        assert_eq!(model.icon[240], 0, "240 % 16 == 0");
+        assert_eq!(model.objects.len(), 3, "2 units + 1 structure");
+        assert_eq!(model.triggers.len(), 1);
+        assert_eq!(model.triggers[0].action, "Win");
+        assert_eq!(model.houses.len(), 2);
+        assert_eq!(model.houses[0].edge, "West");
+    }
+    #[test]
+    fn ra_import_reads_houses_and_their_ra_only_fields() {
+        use cnc_asset::ra_pack::PackedCell;
+        let map = vec![PackedCell { index: 0, id: 11 }];
+        let mut text = original_ra_text(&map, &[]);
+        // Unique ordinals: INI keys must not repeat within a section.
+        text.push_str("[Houses]\n0=Greece\n1=Soviet\n");
+        text.push_str("[Greece]\nCredits=40\nTechLevel=7\nMaxInfantry=60\nMaxVessel=3\n");
+        text.push_str("[Soviet]\nCredits=20\n");
+        let model = MapModel::from_original_ra(&text).expect("import");
+        assert_eq!(model.houses.len(), 2);
+        let greece = &model.houses[0];
+        assert_eq!(greece.credits, 4000, "scaled by 100");
+        assert_eq!(greece.tech_level, 7, "RA-only field");
+        assert_eq!(greece.max_infantry, 60);
+        assert_eq!(greece.max_vessel, 3);
+        assert_eq!(model.houses[1].tech_level, 0, "absent in that section");
+    }
+    #[test]
+    fn td_import_reads_houses_with_scaled_credits() {
+        let bin = vec![0u8; 8];
+        let text = "[Basic]\nName=TD\n\
+[Houses]\n0=GDI\n1=Nod\n\
+[GDI]\nCredits=50\nMaxUnit=120\nMaxBuilding=90\nEdge=West\n\
+[Nod]\nCredits=25\n";
+        let model = MapModel::from_original_td(text, &bin).expect("import");
+        assert_eq!(model.houses.len(), 2);
+        assert_eq!(model.houses[0].name, "GDI");
+        assert_eq!(model.houses[0].credits, 5000, "HOUSE.CPP scales by 100");
+        assert_eq!(model.houses[0].edge, "West");
+        assert_eq!(model.houses[1].max_units, 150, "default when absent");
+    }
+
+    #[test]
+    fn a_model_without_houses_starts_empty() {
+        let model = MapModel::new(4, 4);
+        assert!(model.houses.is_empty());
+    }
+    #[test]
+    fn td_import_carries_the_icon_byte() {
+        // 2x2: records (template, icon).
+        let bin = vec![7u8, 0, 7, 1, 7, 2, 7, 3];
+        let text = "[Basic]\nName=TD\n";
+        let model = MapModel::from_original_td(text, &bin).expect("import");
+        assert_eq!(model.terrain, vec![7, 7, 7, 7], "template byte");
+        assert_eq!(
+            model.icon,
+            vec![0, 1, 2, 3],
+            "icon byte, previously dropped"
+        );
+    }
+
+    #[test]
+    fn a_model_without_icon_data_defaults_to_zero() {
+        let model = MapModel::new(4, 4);
+        assert_eq!(model.icon.len(), 16);
+        assert!(model.icon.iter().all(|i| *i == 0));
+    }
+    #[test]
+    fn td_import_reads_trigs() {
+        let bin = vec![0u8; 8];
+        let text = "[Basic]\nName=TD\n\
+[Trigs]\n1=TRIGA\n\
+[TRIGA]\nName=First\nCondition1=Player Enters\nAction1=Win\n";
+        let model = MapModel::from_original_td(text, &bin).expect("import");
+        assert_eq!(model.triggers.len(), 1);
+        let trigger = &model.triggers[0];
+        assert_eq!(trigger.name, "TRIGA");
+        assert_eq!(trigger.condition, "Player Enters");
+        assert_eq!(trigger.action, "Win");
+    }
+
+    #[test]
+    fn td_import_joins_multiple_trigger_slots() {
+        let bin = vec![0u8; 8];
+        let text = "[Basic]\nName=TD\n\
+[Trigs]\n1=TRIGA\n\
+[TRIGA]\nCondition1=Time\nCondition2=Credits\nAction1=Win\n";
+        let model = MapModel::from_original_td(text, &bin).expect("import");
+        assert_eq!(model.triggers[0].condition, "Time; Credits");
+    }
+
+    #[test]
+    fn td_import_skips_empty_trigger_sections() {
+        let bin = vec![0u8; 8];
+        let text = "[Basic]\nName=TD\n[Trigs]\n1=EMPTY\n[EMPTY]\nName=None\n";
+        let model = MapModel::from_original_td(text, &bin).expect("import");
+        assert!(
+            model.triggers.is_empty(),
+            "no condition or action = no trigger"
+        );
+    }
+    #[test]
+    fn td_import_reads_units_and_structures() {
+        let bin = vec![0u8; 8]; // 2x2
+        let text = "[Basic]\nName=TD\n\
+[Wunits]\n1=GDI,E1,256,1,2,Guard,\n\
+[Structures]\n1=GDI,PROC,256,3,0,\n";
+        let model = MapModel::from_original_td(text, &bin).expect("import");
+        assert_eq!(model.objects.len(), 2, "both sections contribute");
+        let cells: std::collections::BTreeSet<(i32, i32)> = model
+            .objects
+            .values()
+            .map(|o| (o.position.x, o.position.y))
+            .collect();
+        assert!(cells.contains(&(1, 0)), "cell 1 on a 2-wide grid");
+        assert!(cells.contains(&(1, 1)), "cell 3 on a 2-wide grid");
+        assert!(
+            model
+                .objects
+                .values()
+                .all(|o| o.owner == Some(ClassId::HouseGDI)),
+            "settler house parsed"
+        );
+    }
+
+    #[test]
+    fn td_import_keeps_unknown_types_as_unknown() {
+        let bin = vec![1u8, 0, 2, 1, 3, 2, 4, 3];
+        let text = "[Basic]\nName=TD\n[Wunits]\n1=GDI,NOT_A_REAL_UNIT,256,1,2,Guard,\n";
+        let model = MapModel::from_original_td(text, &bin).expect("import");
+        // The type is unresolvable but the placement is still real, so the
+        // object is kept as Unknown rather than dropped.
+        assert_eq!(model.objects.len(), 1);
+        assert_eq!(
+            model.objects.values().next().unwrap().class_id,
+            ClassId::Unknown
+        );
+        assert_eq!(model.terrain, vec![1, 2, 3, 4], "terrain still imported");
+    }
+
+    #[test]
+    fn td_import_resolves_shared_unit_codes() {
+        let bin = vec![0u8; 8];
+        let text = "[Basic]\nName=TD\n[Wunits]\n1=GDI,E1,256,1,2,Guard,\n";
+        let model = MapModel::from_original_td(text, &bin).expect("import");
+        let object = model.objects.values().next().expect("an object");
+        assert_eq!(object.class_id, ClassId::InfantryE1, "E1 resolves");
+    }
+
+    #[test]
+    fn td_import_ignores_truncated_object_records() {
+        let bin = vec![0u8; 8];
+        let text = "[Basic]\nName=TD\n[Wunits]\n1=GDI\n2=GDI,E1\n";
+        let model = MapModel::from_original_td(text, &bin).expect("import");
+        assert!(model.objects.is_empty(), "short records are skipped");
+    }
+    #[test]
+    fn ra_import_reads_units_and_structures() {
+        use cnc_asset::ra_pack::PackedCell;
+        let map = vec![PackedCell { index: 0, id: 11 }];
+        let mut text = original_ra_text(&map, &[]);
+        text.push_str("[Units]\n1=Greece,HTNK,256,0,0,Guard,\n");
+        text.push_str("[Structures]\n1=Greece,POWR,256,0,0,\n");
+        let model = MapModel::from_original_ra(&text).expect("import");
+        assert_eq!(model.objects.len(), 2, "both sections contribute");
+        assert!(
+            model
+                .objects
+                .values()
+                .all(|o| o.owner == Some(ClassId::HouseAllies)),
+            "Greece is an Allied house"
+        );
+    }
+
+    #[test]
+    fn ra_import_keeps_unknown_types_as_unknown() {
+        use cnc_asset::ra_pack::PackedCell;
+        let map = vec![PackedCell { index: 0, id: 11 }];
+        let mut text = original_ra_text(&map, &[]);
+        text.push_str("[Units]\n1=Greece,NOPE,256,0\n");
+        let model = MapModel::from_original_ra(&text).expect("import");
+        assert_eq!(model.objects.len(), 1);
+        assert_eq!(
+            model.objects.values().next().unwrap().class_id,
+            ClassId::Unknown
+        );
+    }
+
+    #[test]
+    fn ra_import_skips_out_of_bounds_cells() {
+        use cnc_asset::ra_pack::PackedCell;
+        let map = vec![PackedCell { index: 0, id: 11 }];
+        let mut text = original_ra_text(&map, &[]);
+        // A 1x1 map (index 0 only), so cell 99 is out of bounds.
+        text.push_str("[Units]\n1=Greece,HTNK,256,99\n");
+        let model = MapModel::from_original_ra(&text).expect("import");
+        assert!(model.objects.is_empty(), "cell 99 is off-map");
+    }
+    #[test]
+    fn imports_an_uncompressed_td_bin() {
+        // 2x2 grid, one 2-byte record per cell: template + icon.
+        let bin = vec![1u8, 0, 2, 1, 3, 2, 4, 3];
+        let text = "[Basic]\nName=TD Map\nPlayer=GDI\nTheater=Temperate\n";
+        let model = MapModel::from_original_td(text, &bin).expect("import");
+        assert_eq!((model.width, model.height), (2, 2));
+        assert_eq!(model.terrain, vec![1, 2, 3, 4]);
+        assert_eq!(model.name, "TD Map");
+        assert_eq!(model.player, "GDI");
+    }
+
+    #[test]
+    fn td_import_rejects_empty_and_garbage_bins() {
+        let text = "[Basic]\nName=X\n";
+        assert!(MapModel::from_original_td(text, &[]).is_err());
+        assert!(MapModel::from_original_td(text, &[9u8; 7]).is_err());
+    }
+
+    #[test]
+    fn td_import_requires_a_basic_section() {
+        let bin = vec![0u8; 8];
+        assert!(MapModel::from_original_td("[Map]\nWidth=2\n", &bin).is_err());
+    }
+
+    #[test]
+    fn imports_original_ra_terrain_and_overlay() {
+        use cnc_asset::ra_pack::PackedCell;
+        let map = vec![
+            PackedCell { index: 0, id: 11 },
+            PackedCell { index: 5, id: 22 },
+        ];
+        let overlay = vec![PackedCell { index: 5, id: 3 }];
+        let model = MapModel::from_original_ra(&original_ra_text(&map, &overlay)).unwrap();
+
+        assert_eq!(model.name, "Imported");
+        assert_eq!(model.player, "Greece");
+        assert_eq!(model.briefing, "Go.");
+        assert_eq!(model.terrain[0], 11);
+        assert_eq!(model.terrain[5], 22);
+        assert_eq!(model.overlay[5], 3);
+    }
+
+    #[test]
+    fn original_import_infers_a_square_side() {
+        use cnc_asset::ra_pack::PackedCell;
+        // Highest index 8 needs a 3x3 grid.
+        let map = vec![PackedCell { index: 8, id: 1 }];
+        let model = MapModel::from_original_ra(&original_ra_text(&map, &[])).unwrap();
+        assert_eq!((model.width, model.height), (3, 3));
+        assert_eq!(model.terrain.len(), 9);
+    }
+
+    #[test]
+    fn original_import_rejects_editor_dialect() {
+        let dialect = "[Map]\nWidth=8\nHeight=8\n[Terrain]\n0=0 0 0\n";
+        assert!(MapModel::from_original_ra(dialect).is_err());
+    }
+
+    #[test]
+    fn original_import_requires_map_pack() {
+        assert!(MapModel::from_original_ra("[Basic]\nName=X\n").is_err());
     }
 }

@@ -5,9 +5,12 @@
 //! [`history::History`]; tools only build commands.
 
 pub mod app;
+/// Byte-exact original-format scenario fixtures for the importers.
+pub mod fixtures;
 pub mod generator;
 pub mod history;
 pub mod map;
+pub mod pack_tileset;
 pub mod plugin;
 pub mod presenter;
 pub mod tiles;
