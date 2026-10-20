@@ -364,10 +364,17 @@ pub struct ParsedScenario {
     pub triggers: Vec<ParsedTrigger>,
     /// `[Waypoints]` ids that were present.
     pub waypoint_ids: Vec<u32>,
+    /// `[Waypoints]` id -> cell mappings, in id order.
+    pub waypoints: Vec<Waypoint>,
     /// Original-format trigger records decoded from the TRIGGER table.
     pub trigger_records: Vec<TriggerRecord>,
     /// `[TeamTypes]` parsed via `cnc_core::entity` (empty when absent).
     pub team_types: Vec<cnc_core::entity::TeamType>,
+    /// Recoverable problems found while parsing (missing sub-sections,
+    /// non-numeric cells, unknown trigger vocabulary, ...). The loader never
+    /// fails on a malformed optional section; it reports it here instead so
+    /// callers can log the damage and keep playing what did parse.
+    pub warnings: Vec<String>,
 }
 
 /// `true` when `text` looks like an original-format TD scenario.
@@ -460,11 +467,13 @@ pub fn parse_scenario(ini: &IniFile) -> Result<ParsedScenario> {
         structures: parse_structures(ini),
         triggers: parse_triggers(ini),
         waypoint_ids: parse_waypoint_ids(ini),
+        waypoints: parse_waypoints(ini),
         houses: parse_houses(ini),
         trigger_records: parse_trigger_records(ini),
         // Team types are optional: a scenario without [TeamTypes] yields an
         // empty roster and the game falls back to the built-in expert AI.
         team_types: cnc_core::entity::team_types_from_ini(&ini).unwrap_or_default(),
+        warnings: scenario_warnings(ini),
     })
 }
 
@@ -626,6 +635,103 @@ fn parse_waypoint_ids(ini: &IniFile) -> Vec<u32> {
         .into_iter()
         .map(|waypoint| waypoint.id)
         .collect()
+}
+
+/// Collect recoverable problems from an original scenario INI.
+///
+/// Original campaign files in the wild carry truncated tables, stale
+/// references and non-numeric values; `SCENARIO.CPP` tolerates all of these
+/// and so does this loader. Every problem that had to be skipped is listed
+/// here instead of panicking or aborting the whole file.
+pub fn scenario_warnings(ini: &IniFile) -> Vec<String> {
+    let mut warnings = Vec::new();
+    collect_object_warnings(ini, "Wunits", "Unit", true, &mut warnings);
+    collect_object_warnings(ini, "Structures", "Structure", true, &mut warnings);
+    collect_object_warnings(ini, "Trigs", "Trigger", false, &mut warnings);
+    collect_waypoint_warnings(ini, &mut warnings);
+    collect_trigger_record_warnings(ini, &mut warnings);
+    warnings
+}
+
+/// Warn about `[<table>]` entries whose object section is missing (or has no
+/// `Type=` when `needs_type` is set).
+fn collect_object_warnings(
+    ini: &IniFile,
+    table: &str,
+    key_prefix: &str,
+    needs_type: bool,
+    warnings: &mut Vec<String>,
+) {
+    let Some(section) = ini.section(table) else {
+        return;
+    };
+    for index in 1..=9999 {
+        let Some(object_name) = section.get_string(&format!("{key_prefix}{index}")) else {
+            break;
+        };
+        let Some(object) = ini.section(object_name) else {
+            warnings.push(format!(
+                "[{table}]: {object_name} has no matching [{object_name}] section"
+            ));
+            continue;
+        };
+        if needs_type
+            && object
+                .get_string("Type")
+                .is_none_or(|value| value.trim().is_empty())
+        {
+            warnings.push(format!("[{table}]: [{object_name}] has no Type="));
+        }
+    }
+}
+
+/// Warn about waypoint keys/values that cannot be read (`DISPLAY.CPP` reads
+/// each as an integer with `-1` meaning unset).
+fn collect_waypoint_warnings(ini: &IniFile, warnings: &mut Vec<String>) {
+    let Some(section) = ini.section("Waypoints") else {
+        return;
+    };
+    for (key, value) in &section.values {
+        if key.trim().parse::<u32>().is_err() {
+            warnings.push(format!(
+                "[Waypoints]: key '{key}' is not a numeric waypoint id"
+            ));
+            continue;
+        }
+        let raw = scalar_text(value);
+        match raw.trim().parse::<i64>() {
+            Ok(cell) if cell < 0 => {
+                warnings.push(format!("[Waypoints]: {key}={cell} is unset"));
+            }
+            Ok(_) => {}
+            Err(_) => {
+                warnings.push(format!("[Waypoints]: {key}={raw} is not a cell number"));
+            }
+        }
+    }
+}
+
+/// Warn about `[TRIGGER]` records whose event/action name is outside the
+/// decoded vocabulary (they still parse to a default record).
+fn collect_trigger_record_warnings(ini: &IniFile, warnings: &mut Vec<String>) {
+    let Some(section) = ini.section("TRIGGER") else {
+        return;
+    };
+    for (name, value) in &section.values {
+        let raw = scalar_text(value);
+        if !raw.contains(',') {
+            continue;
+        }
+        let record = parse_trigger_record(name, &raw);
+        if record.event.is_none() {
+            let event = raw.split(',').next().unwrap_or("").trim();
+            warnings.push(format!("[TRIGGER]: {name} has unknown event '{event}'"));
+        }
+        if record.action.is_none() {
+            let action = raw.split(',').nth(1).unwrap_or("").trim();
+            warnings.push(format!("[TRIGGER]: {name} has unknown action '{action}'"));
+        }
+    }
 }
 
 /// One `[Houses]` entry.
@@ -814,16 +920,28 @@ pub fn unit_type_from_ini_name(name: &str) -> Option<UnitType> {
 pub struct ConversionReport {
     pub units_placed: usize,
     pub structures_placed: usize,
+    /// Executable triggers installed on `game.mission`.
+    pub triggers_installed: usize,
+    /// `[Waypoints]` mappings carried over for action spawn points.
+    pub waypoints: Vec<Waypoint>,
     /// INI type names the engine has no `UnitType` for.
     pub unknown_units: Vec<String>,
     /// INI type names the engine has no `StructureType` for.
     pub unknown_structures: Vec<String>,
+    /// Trigger conditions/actions the engine vocabulary could not express.
+    pub unmapped_triggers: Vec<String>,
+    /// Recoverable parse problems from the source INI (see
+    /// [`scenario_warnings`]); this never aborts the conversion.
+    pub warnings: Vec<String>,
 }
 
 impl ConversionReport {
-    /// `true` when at least one object was skipped for lack of a mapping.
+    /// `true` when at least one object or trigger was skipped for lack of a
+    /// mapping.
     pub fn has_gaps(&self) -> bool {
-        !self.unknown_units.is_empty() || !self.unknown_structures.is_empty()
+        !self.unknown_units.is_empty()
+            || !self.unknown_structures.is_empty()
+            || !self.unmapped_triggers.is_empty()
     }
 }
 
@@ -919,6 +1037,9 @@ pub fn scenario_to_game(
         let max_health = Fixed16_16::from_int(structure.stats().strength);
         let position = cell_center(placed.x, placed.y);
         let mut building = Building::new(structure.class_id(), position, max_health, placed.house);
+        // Defences share ClassIds (OBLI/ATWR collapse onto TeslaCoil/AA_Gun),
+        // so `Building::new` cannot recover the authored type on its own.
+        building.structure = structure;
         apply_health_fraction(&mut building.health, &max_health, placed.health);
         game.buildings.push(building);
         report.structures_placed += 1;
@@ -927,6 +1048,26 @@ pub fn scenario_to_game(
     if let Some(image) = map {
         apply_bin_terrain(&mut game, &image);
     }
+
+    // Executable triggers come from the original `[TRIGGER]` table. The
+    // name-keyed `[Trigs]` sections only carry human-readable condition text
+    // ("Player Enters", "Time", ...), which the engine cannot execute, so
+    // records are the source of truth. Records the vocabulary cannot express
+    // are reported, never guessed.
+    let (triggers, unmapped) = trigger_records_to_triggers(&scenario.trigger_records);
+    report.triggers_installed = triggers.len();
+    report.unmapped_triggers = unmapped;
+    report.waypoints = scenario.waypoints.clone();
+    report.warnings = scenario.warnings.clone();
+
+    let mut mission = crate::mission::Mission::new(scenario.name.clone());
+    mission.briefing = scenario.briefing.join("\n");
+    mission.player = scenario.player;
+    mission.triggers = triggers;
+    for (index, text) in scenario.objectives.iter().enumerate() {
+        mission.add_objective(index as u32 + 1, text.clone());
+    }
+    game.start_mission(mission);
 
     (game, report)
 }

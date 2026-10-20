@@ -8905,6 +8905,12 @@ fn main() -> Result<()> {
         "cnc-launcher structured logging initialized"
     );
 
+    // Original-format TD campaign data is optional. When CNC_ORIGINAL_DATA_DIR
+    // points at a retail install the launcher discovers and validates its
+    // SC-*.INI/.BIN scenarios at boot; when the variable is unset this logs a
+    // warning and the bundled `maps/td_campaign` missions stay in use.
+    cnc_launcher::original_campaign::load_from_env();
+
     let options = LauncherOptions::load(args.options.as_deref());
     // Renderer precedence (plan line 206): explicit --renderer flag, then
     // the persisted options.renderer, then the wgpu default.
