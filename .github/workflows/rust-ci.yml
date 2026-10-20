@@ -1,0 +1,94 @@
+name: Rust CI — Forgejo + Semantic Versioning + Documentation
+# Enforced via ~/APIKEYS.md (FORGEJO_API_TOKEN, FORGEJO_URL=https://local.lan)
+# All crates must use SemVer and include README.md + CHANGELOG.md.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        working-directory: RUST
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Forgejo credentials (from ~/APIKEYS.md)
+        env:
+          FORGEJO_API_TOKEN: ${{ secrets.FORGEJO_API_TOKEN }}
+          FORGEJO_URL: ${{ vars.FORGEJO_URL }}
+        run: |
+          echo "Forgejo URL: $FORGEJO_URL"
+          [ -n "$FORGEJO_API_TOKEN" ] || { echo "Missing FORGEJO_API_TOKEN (check ~/APIKEYS.md)"; exit 1; }
+          echo "Forgejo credentials verified."
+
+      - name: Enforce semantic versioning (all crates)
+        run: |
+          for f in */Cargo.toml; do
+            ver_line=$(grep '^version' "$f" | head -1)
+            # Accept both explicit SemVer (version = "x.y.z") and workspace inheritance (version = { workspace = true })
+            echo "$ver_line" | grep -Eq 'version\s*="[0-9]+\.[0-9]+\.[0-9]+"' || \
+            echo "$ver_line" | grep -Eq 'version\s*=\s*\{[^}]*workspace\s*=\s*true' || \
+            { echo "FAIL: $f missing valid version (SemVer or workspace)"; exit 1; }
+            echo "OK: $f ($ver_line)"
+          done
+
+      - name: Enforce README.md and CHANGELOG.md per crate
+        run: |
+          for d in cnc-*/; do
+            [ -f "$d/README.md" ] || { echo "FAIL: $d/README.md missing"; exit 1; }
+            [ -f "$d/CHANGELOG.md" ] || { echo "FAIL: $d/CHANGELOG.md missing"; exit 1; }
+            echo "OK docs: $d"
+          done
+
+      - name: Install Linux native deps (defensive)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev libasound2-dev pkg-config
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: RUST
+
+      - name: cargo fmt --check
+        id: fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        id: clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: fmt/clippy failure note
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "### Rust CI — a hard gate tripped"
+            echo ""
+            echo "- `cargo fmt --check` -> ${{ steps.fmt.outcome }}"
+            echo "- `cargo clippy` -> ${{ steps.clippy.outcome }}"
+            echo "- SemVer and docs enforcement are hard gates."
+          } > "$GITHUB_STEP_SUMMARY"
+
+      - name: cargo test
+        run: cargo test --workspace
