@@ -1,24 +1,44 @@
 //! Westwood format80 (LCW) decompression — Rust port of the original
-//! `LCWUNCMP.CPP` / `LCW.CPP` opcode table.
+//! `LCWUNCMP.CPP` / `LCW.CPP` opcode table, verified against the C#
+//! reference in `CnCTDRAMapEditor/Utility/WWCompression.cs:249-477`
+//! (`LcwDecompress`).
 //!
-//! Opcodes (n = control byte read from the stream):
+//! Opcodes (n = control byte read from the stream, operands little-endian):
 //!
 //! | n                     | operation                                            |
 //! |-----------------------|------------------------------------------------------|
-//! | `0xxxxxxx`            | short copy from dest: count = `(n >> 4) + 3`, relative back-offset = `next + ((n & 0x0F) << 8)` |
+//! | `0xxxxxxx`            | short copy from dest: count = `(n >> 4) + 3`, back-offset = `next + ((n & 0x0F) << 8)` |
 //! | `10000000`            | end of stream                                        |
 //! | `10xxxxxx` (≠ 0x80)   | literal run: copy `n & 0x3F` bytes from the source   |
-//! | `11xxxxxx` (≠ FE, FF) | copy `(n & 0x3F) + 3` bytes from **absolute** dest offset (LE u16) |
+//! | `11xxxxxx` (≠ FE, FF) | copy `(n & 0x3F) + 3` bytes from dest offset (LE u16) |
 //! | `11111110` (FE)       | RLE fill: `w1` (LE u16) bytes of `b1`                |
-//! | `11111111` (FF)       | long copy: `w1` (LE u16) bytes from **absolute** dest offset `w2` (LE u16) |
+//! | `11111111` (FF)       | long copy: `w1` (LE u16) bytes from dest offset `w2` (LE u16) |
 //!
 //! Copies are byte-by-byte forward, so overlapping references repeat the
-//! pattern (same semantics as the original pointer walk). Absolute offsets
-//! index the output buffer from its start.
+//! pattern (same semantics as the original pointer walk). Offsets index the
+//! output buffer from its start, unless the stream opens with a single nul
+//! byte (`0x00`): that prefix selects the "relative LCW" variant used by
+//! hi-colour VQA32 data, in which the 0xC0..0xFD and 0xFF offsets are a
+//! distance *back* from the current write position. The prefix is not
+//! decodable as an opcode (a short copy at an empty output cannot resolve its
+//! back-reference), so auto-detecting it cannot shadow a valid absolute
+//! stream — the same rule the C# reference applies.
 //!
-//! Hardening over the original (which "does not check for corrupt source
-//! data"): every read is bounds-checked, output is capped at the expected
-//! length, and the terminating marker must produce exactly that length.
+//! Intentional hardening over both the C# reference and the original C code
+//! ("does not check for corrupt source data"):
+//!
+//! * every read is bounds-checked and every reference is range-checked; the
+//!   reference silently truncates copies at the output cap or reads zeroed
+//!   buffer bytes past the written prefix;
+//! * output may never exceed `expected_len`, so hostile streams cannot
+//!   balloon memory;
+//! * the terminating `0x80` is required and must land on exactly
+//!   `expected_len` — the reference treats a full output buffer as success
+//!   and merely skips a following `0x80`.
+//!
+//! These stricter rules only turn streams the reference would decode to a
+//! *short* (or silently corrupt) buffer into errors; every well-formed
+//! MapPack/VQA stream decodes identically.
 
 use thiserror::Error;
 
@@ -35,6 +55,14 @@ pub enum Format80Error {
         len: usize,
         at: usize,
     },
+    #[error(
+        "relative reference {offset} does not reach written output ({len}) at stream offset {at}"
+    )]
+    BadRelativeReference {
+        offset: usize,
+        len: usize,
+        at: usize,
+    },
     #[error("decompressed {actual} bytes; expected {expected}")]
     LengthMismatch { actual: usize, expected: usize },
 }
@@ -46,6 +74,14 @@ pub enum Format80Error {
 pub fn decompress(input: &[u8], expected_len: usize) -> Result<Vec<u8>, Format80Error> {
     let mut out: Vec<u8> = Vec::with_capacity(expected_len);
     let mut i = 0usize;
+
+    // A leading nul selects relative LCW (VQA32 hi-colour). Such a byte can
+    // never be a valid short-copy opcode at an empty output, so this mirrors
+    // the C# reference without shadowing an absolute stream.
+    let relative = input.first() == Some(&0x00);
+    if relative {
+        i = 1;
+    }
 
     // Byte-by-byte forward copy preserving overlap semantics; `from` may
     // reference bytes this very opcode is producing.
@@ -154,21 +190,34 @@ pub fn decompress(input: &[u8], expected_len: usize) -> Result<Vec<u8>, Format80
             unreachable!("0xFE handled above");
         }
 
-        // Medium/long copies use ABSOLUTE offsets into the output.
-        if offset >= out.len() && count > 0 {
-            return Err(Format80Error::BadAbsoluteReference {
-                offset,
-                len: out.len(),
-                at: i,
-            });
-        }
+        // Medium/long copies use absolute offsets into the output, or a
+        // distance back from the write head when the relative prefix was seen.
+        let from = if relative {
+            if count > 0 && (offset == 0 || offset > out.len()) {
+                return Err(Format80Error::BadRelativeReference {
+                    offset,
+                    len: out.len(),
+                    at: i,
+                });
+            }
+            out.len().saturating_sub(offset)
+        } else {
+            if offset >= out.len() && count > 0 {
+                return Err(Format80Error::BadAbsoluteReference {
+                    offset,
+                    len: out.len(),
+                    at: i,
+                });
+            }
+            offset
+        };
         if out.len() + count > expected_len {
             return Err(Format80Error::LengthMismatch {
                 actual: out.len() + count,
                 expected: expected_len,
             });
         }
-        copy_forward(&mut out, offset, count);
+        copy_forward(&mut out, from, count);
     }
 
     Err(Format80Error::UnexpectedEnd(input.len()))
@@ -302,6 +351,10 @@ pub fn compress(input: &[u8], expected_len: usize) -> Result<Vec<u8>, Format80Er
         let mut best_off = 0usize;
         let window = i.saturating_sub(4095);
         for candidate in window..i {
+            // Absolute LCW offsets are 16-bit; never emit a truncated one.
+            if candidate > u16::MAX as usize {
+                continue;
+            }
             let mut n = 0usize;
             while i + n < input.len() && candidate + n < i && input[candidate + n] == input[i + n] {
                 n += 1;
@@ -314,8 +367,11 @@ pub fn compress(input: &[u8], expected_len: usize) -> Result<Vec<u8>, Format80Er
 
         if best_len >= 3 {
             let count = best_len.min(u16::MAX as usize);
-            if count <= 0x3F + 3 {
-                out.push(0xC0 | ((count - 3) as u8 & 0x3F));
+            // The medium-copy family is 0xC0..=0xFD (count 3..=64); 0xFE and
+            // 0xFF are the fill and long-copy opcodes, so a 65/66-byte match
+            // must not be encoded as a medium copy.
+            if count <= 64 {
+                out.push(0xC0 | ((count - 3) as u8));
                 out.extend_from_slice(&(best_off as u16).to_le_bytes());
             } else {
                 out.push(0xFF);
