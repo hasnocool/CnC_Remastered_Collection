@@ -4069,6 +4069,471 @@ fn terrain_from_code(code: u8) -> Terrain {
     }
 }
 
+/// Trigger-record execution arms for the Red Alert engine.
+///
+/// `cnc_core::trigger_apply` dispatches one parsed `TACTION` record per
+/// family; this impl binds them to RA state. Families the skirmish simulation
+/// does not model (production scheduling, timers, globals, preferred targets)
+/// keep the trait default, which logs and returns `false` so a scripted action
+/// never silently disappears.
+///
+/// The superweapon actions map the `SPC_*` payload to the same scripted
+/// strikes the scenario dialect already fires in `update_triggers`, aimed at
+/// the opposing base.
+impl cnc_core::trigger_apply::TriggerHost for Game {
+    fn note(&mut self, message: String) {
+        eprintln!("[ra trigger] {message}");
+        self.messages.push(message);
+        if self.messages.len() > 8 {
+            self.messages.remove(0);
+        }
+    }
+
+    fn map_size(&self) -> (u32, u32) {
+        (self.map.width, self.map.height)
+    }
+
+    fn default_house(&self) -> u8 {
+        self.player_owner as u8
+    }
+
+    fn house_count(&self) -> usize {
+        self.houses.len()
+    }
+
+    fn win(&mut self, _house: u8) -> bool {
+        self.eva.speak(cnc_audio::EvaLine::MissionAccomplished);
+        self.outcome = Some(if self.player_owner == 0 {
+            ScenarioOutcome::AlliesWin
+        } else {
+            ScenarioOutcome::SovietsWin
+        });
+        true
+    }
+
+    fn lose(&mut self, _house: u8) -> bool {
+        self.eva.speak(cnc_audio::EvaLine::MissionFailed);
+        self.outcome = Some(if self.player_owner == 0 {
+            ScenarioOutcome::SovietsWin
+        } else {
+            ScenarioOutcome::AlliesWin
+        });
+        true
+    }
+
+    fn create_team(&mut self, _house: u8, team: Option<u16>) -> bool {
+        let Some(team_id) = team else {
+            return self.reject("Create Team");
+        };
+        let Some(team_type) = self
+            .team_manager
+            .types
+            .iter()
+            .find(|candidate| candidate.id == u32::from(team_id))
+            .cloned()
+        else {
+            return self.reject("Create Team");
+        };
+        let already_running = self
+            .team_manager
+            .teams
+            .iter()
+            .any(|existing| existing.team_type == team_type.id && existing.active);
+        if already_running {
+            return true;
+        }
+        let instance_id = self.team_manager.next_team_id;
+        self.team_manager.next_team_id = instance_id.wrapping_add(1);
+        let mut instance = cnc_core::entity::Team::from_type(instance_id, &team_type);
+        instance.active = true;
+        instance.suspended = false;
+        self.team_manager.teams.push(instance);
+        true
+    }
+
+    fn destroy_team(&mut self, _house: u8, team: Option<u16>) -> bool {
+        let Some(team_id) = team else {
+            return self.reject("Destroy All Teams");
+        };
+        let target = u32::from(team_id);
+        let mut disbanded = false;
+        for instance in &mut self.team_manager.teams {
+            if instance.team_type == target && instance.active {
+                instance.active = false;
+                instance.suspended = true;
+                disbanded = true;
+            }
+        }
+        disbanded
+    }
+
+    fn all_hunt(&mut self, house: u8) -> bool {
+        let owner = usize::from(house);
+        let mut hunted = false;
+        for unit in &mut self.units {
+            if unit.owner == owner && unit.is_alive() {
+                unit.target = None;
+                unit.path.clear();
+                hunted = true;
+            }
+        }
+        hunted
+    }
+
+    fn drop_zone(&mut self, house: u8, cell: Vec2i) -> bool {
+        let owner = usize::from(house);
+        if self.houses.get(owner).is_none() {
+            return self.reject("Drop Zone Flare (waypoint)");
+        }
+        for index in 0..4 {
+            let x = cell.x + index % 2;
+            let y = cell.y + index / 2;
+            self.spawn_unit(owner, ClassId::InfantryE1, Vec2i::new(x, y));
+        }
+        self.eva.speak(cnc_audio::EvaLine::ReinforcementsArrived);
+        true
+    }
+
+    fn fire_sale(&mut self, house: u8) -> bool {
+        let owner = usize::from(house);
+        let ids: Vec<u32> = self
+            .structures
+            .iter()
+            .filter(|structure| structure.owner == owner && structure.is_alive())
+            .map(|structure| structure.id)
+            .collect();
+        for id in ids {
+            self.sell_structure(owner, id);
+        }
+        true
+    }
+
+    fn text_trigger(&mut self, text: i64) -> bool {
+        self.messages.push(format!("text trigger {text}"));
+        if self.messages.len() > 8 {
+            self.messages.remove(0);
+        }
+        true
+    }
+
+    fn destroy_trigger(&mut self, trigger: Option<u16>) -> bool {
+        let Some(id) = trigger.map(u32::from) else {
+            return self.reject("Destroy Trigger");
+        };
+        let Some(entry) = self.triggers.iter_mut().find(|entry| entry.id == id) else {
+            return self.reject("Destroy Trigger");
+        };
+        entry.fired = true;
+        true
+    }
+
+    fn reveal_map(&mut self, house: u8) -> bool {
+        if self.houses.get(usize::from(house)).is_none() {
+            return self.reject("Reveal all map");
+        }
+        for y in 0..self.map.height as i32 {
+            for x in 0..self.map.width as i32 {
+                self.shroud.reveal(usize::from(house), Vec2i::new(x, y), 0);
+            }
+        }
+        true
+    }
+
+    fn reveal_area(&mut self, house: u8, cell: Vec2i) -> bool {
+        if self.houses.get(usize::from(house)).is_none() {
+            return self.reject("Reveal around waypoint");
+        }
+        self.shroud.reveal(usize::from(house), cell, 4);
+        true
+    }
+
+    fn reveal_zone(&mut self, house: u8, cell: Vec2i) -> bool {
+        // RA keeps zones as map data, not as trigger-addressable shapes; the
+        // waypoint neighbourhood is the honest fallback.
+        self.reveal_area(house, cell)
+    }
+
+    fn special_weapon(&mut self, house: u8, weapon: i64, _one_shot: bool) -> bool {
+        use cnc_core::trigger_apply::special_weapon as spc;
+        if self.houses.get(usize::from(house)).is_none() {
+            return self.reject("Add special weapon");
+        }
+        let centre = ra_strike_centre(self, house);
+        match weapon {
+            spc::NUCLEAR_BOMB => {
+                self.eva.speak(cnc_audio::EvaLine::NuclearWeaponLaunched);
+                self.apply_radius_damage(centre, TILE_SIZE * 4.0, 333, Some("FIRE"));
+            }
+            spc::PARA_BOMB => {
+                self.eva.speak(cnc_audio::EvaLine::AirstrikeReady);
+                self.apply_radius_damage(centre, TILE_SIZE * 2.0, 200, Some("AP"));
+            }
+            spc::PARA_INFANTRY => {
+                let cell = Vec2i::new(
+                    (centre.x.to_f32() / TILE_SIZE) as i32,
+                    (centre.y.to_f32() / TILE_SIZE) as i32,
+                );
+                return self.drop_zone(house, cell);
+            }
+            spc::GPS => return self.reveal_map(house),
+            _ => return self.reject("Add special weapon"),
+        }
+        self.push_strike_tracer(centre);
+        true
+    }
+
+    fn launch_nukes(&mut self, house: u8) -> bool {
+        let missile_silos = self.structures.iter().any(|structure| {
+            structure.owner == usize::from(house)
+                && structure.is_alive()
+                && structure.class_id == ClassId::MissileSilo
+        });
+        if !missile_silos {
+            return self.reject("Launch Nukes");
+        }
+        let centre = ra_strike_centre(self, house);
+        self.eva.speak(cnc_audio::EvaLine::NuclearWeaponLaunched);
+        self.apply_radius_damage(centre, TILE_SIZE * 4.0, 333, Some("FIRE"));
+        self.push_strike_tracer(centre);
+        true
+    }
+
+    fn evaluate_event(
+        &mut self,
+        kind: cnc_core::trigger_records::EventKind,
+        value: i64,
+    ) -> Option<bool> {
+        use cnc_core::trigger_apply::resolve_house;
+        use cnc_core::trigger_records::EventKind;
+        match kind {
+            EventKind::ElapsedTime => Some(self.elapsed.to_f32() >= value as f32),
+            EventKind::Credits => {
+                let house = resolve_house(self, value);
+                Some(
+                    self.houses
+                        .get(usize::from(house))
+                        .is_some_and(|entry| i64::from(entry.credits) >= value),
+                )
+            }
+            EventKind::UnitsDestroyed => {
+                let house = resolve_house(self, value);
+                let owner = usize::from(house);
+                Some(
+                    !self
+                        .units
+                        .iter()
+                        .any(|unit| unit.owner == owner && unit.is_alive()),
+                )
+            }
+            EventKind::BuildingsDestroyed => {
+                let house = resolve_house(self, value);
+                let owner = usize::from(house);
+                Some(
+                    !self
+                        .structures
+                        .iter()
+                        .any(|structure| structure.owner == owner && structure.is_alive()),
+                )
+            }
+            EventKind::AllDestroyed => {
+                let house = resolve_house(self, value);
+                let owner = usize::from(house);
+                Some(
+                    !self
+                        .units
+                        .iter()
+                        .any(|unit| unit.owner == owner && unit.is_alive())
+                        && !self
+                            .structures
+                            .iter()
+                            .any(|structure| structure.owner == owner && structure.is_alive()),
+                )
+            }
+            EventKind::LowPower => {
+                let house = resolve_house(self, value);
+                Some(
+                    self.houses
+                        .get(usize::from(house))
+                        .is_some_and(|entry| entry.low_power()),
+                )
+            }
+            _ => None,
+        }
+    }
+}
+
+impl Game {
+    /// Visible tracer plus launch flash for a scripted strike; keeps the
+    /// applied action observable in the renderer and in telemetry.
+    fn push_strike_tracer(&mut self, centre: Vec2) {
+        self.shots.push(Shot {
+            from: Vec2::new(
+                centre.x - Fixed16_16::from_int(48),
+                centre.y - Fixed16_16::from_int(48),
+            ),
+            to: centre,
+            damage: Fixed16_16::ZERO,
+            owner: self.player_owner,
+            ttl: Fixed16_16::from_f32(0.4),
+        });
+    }
+}
+
+/// Aiming point for a scripted strike: the opposing base centre.
+fn ra_strike_centre(game: &Game, house: u8) -> Vec2 {
+    let opponent = (usize::from(house) + 1) % game.houses.len().max(1);
+    let target = game
+        .structures
+        .iter()
+        .find(|structure| structure.owner == opponent && structure.is_alive())
+        .or_else(|| {
+            game.structures
+                .iter()
+                .find(|structure| structure.owner == usize::from(house) && structure.is_alive())
+        });
+    target.map_or_else(
+        || {
+            cell_center(Vec2i::new(
+                game.map.width as i32 / 2,
+                game.map.height as i32 / 2,
+            ))
+        },
+        |structure| structure.position,
+    )
+}
+
+#[cfg(test)]
+mod trigger_apply_tests {
+    use super::*;
+    use cnc_core::trigger_apply::{apply_action_record, fire_trigger};
+    use cnc_core::trigger_records::{ActionRecord, EventRecord};
+
+    fn action(record: &str) -> ActionRecord {
+        ActionRecord::parse(record).expect("action record parses")
+    }
+
+    fn event(record: &str) -> EventRecord {
+        EventRecord::parse(record).expect("event record parses")
+    }
+
+    fn fresh() -> Game {
+        Game::new(40, 40)
+    }
+
+    #[test]
+    fn ra_trigger_airstrike_fires() {
+        // TACTION_1_SPECIAL with SPC_PARA_BOMB: scripted airstrike at the
+        // opposing base, with a visible tracer.
+        let mut game = fresh();
+        let shots = game.shots.len();
+        let report = apply_action_record(&mut game, action("33,-1,-1,3"));
+        assert!(report.applied);
+        assert_eq!(game.shots.len(), shots + 1, "one strike tracer");
+        assert_eq!(game.eva.pending(), Some(cnc_audio::EvaLine::AirstrikeReady));
+    }
+
+    #[test]
+    fn ra_trigger_nuke_damages_the_struck_cell() {
+        let mut game = fresh();
+        game.structures.clear();
+        let id = game.spawn_unit(1, ClassId::VehicleE2, Vec2i::new(20, 20));
+        let before = game
+            .units
+            .iter()
+            .find(|unit| unit.id == id)
+            .expect("unit")
+            .health;
+        assert!(apply_action_record(&mut game, action("33,-1,-1,1")).applied);
+        let after = game
+            .units
+            .iter()
+            .find(|unit| unit.id == id)
+            .expect("unit")
+            .health;
+        assert!(after < before, "the scripted nuke dealt damage");
+        assert_eq!(
+            game.eva.pending(),
+            Some(cnc_audio::EvaLine::NuclearWeaponLaunched)
+        );
+    }
+
+    #[test]
+    fn ra_trigger_win_and_lose_set_the_outcome() {
+        let mut game = fresh();
+        assert!(apply_action_record(&mut game, action("1,-1,-1,0")).applied);
+        assert_eq!(game.outcome, Some(ScenarioOutcome::AlliesWin));
+
+        let mut game = fresh();
+        game.player_owner = 1;
+        assert!(apply_action_record(&mut game, action("2,-1,-1,1")).applied);
+        assert_eq!(game.outcome, Some(ScenarioOutcome::AlliesWin));
+    }
+
+    #[test]
+    fn ra_trigger_drop_zone_and_reveal_mutate_state() {
+        // TACTION_DZ spawns a reinforcement squad at the waypoint cell.
+        let mut game = fresh();
+        let units = game.units.len();
+        assert!(apply_action_record(&mut game, action("8,0,-1,18")).applied);
+        assert_eq!(game.units.len(), units + 4, "four reinforcements");
+
+        // TACTION_REVEAL_ALL lights the house's fog.
+        let mut game = fresh();
+        game.enable_shroud();
+        game.shroud.clear_visible();
+        let before = game.shroud.mapped_count(0);
+        assert!(apply_action_record(&mut game, action("16,-1,-1,0")).applied);
+        assert!(
+            game.shroud.mapped_count(0) > before,
+            "reveal all mapped more cells"
+        );
+    }
+
+    #[test]
+    fn ra_trigger_unknown_code_is_a_logged_no_op() {
+        let mut game = fresh();
+        let units = game.units.len();
+        let outcome = game.outcome;
+        let report = apply_action_record(&mut game, action("99,-1,-1,0"));
+        assert!(!report.applied);
+        assert_eq!(game.units.len(), units);
+        assert_eq!(game.outcome, outcome, "the mission keeps running");
+        assert!(
+            game.messages.iter().any(|line| line.contains("99")),
+            "the ignored code is logged: {:?}",
+            game.messages
+        );
+    }
+
+    #[test]
+    fn ra_trigger_apply_is_deterministic() {
+        let records = ["33,-1,-1,3", "8,0,-1,18", "1,-1,-1,0", "99,-1,-1,0"];
+        let mut first = fresh();
+        let mut second = fresh();
+        for record in records {
+            apply_action_record(&mut first, action(record));
+            apply_action_record(&mut second, action(record));
+        }
+        assert_eq!(first.units.len(), second.units.len());
+        assert_eq!(first.shots.len(), second.shots.len());
+        assert_eq!(first.outcome, second.outcome);
+        assert_eq!(first.messages, second.messages);
+    }
+
+    #[test]
+    fn ra_trigger_events_gate_their_actions() {
+        let actions = [action("1,-1,-1,0")];
+
+        let mut game = fresh();
+        assert!(fire_trigger(&mut game, &[event("13,-1,0")], &actions).is_some());
+        assert_eq!(game.outcome, Some(ScenarioOutcome::AlliesWin));
+
+        let mut game = fresh();
+        assert!(fire_trigger(&mut game, &[event("13,-1,99999")], &actions).is_none());
+        assert_eq!(game.outcome, None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

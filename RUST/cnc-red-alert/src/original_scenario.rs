@@ -10,11 +10,13 @@
 //! - `REDALERT/OVERLAY.CPP` - `OverlayPack`
 //! - `REDALERT/INI.CPP` / `BASE64.CPP` - the numbered-line base64 container
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::path::Path;
 
+use cnc_asset::base64;
+use cnc_asset::format80::{self, Format80Error};
 use cnc_asset::ra_pack::{self, PackedCell};
-use cnc_core::IniFile;
+use cnc_core::{IniFile, IniSection, IniValue};
 
 /// Original-format RA scenario recovered from an `.ini`/`.mpr` file.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,6 +35,86 @@ pub struct OriginalScenario {
     pub objects: Vec<ScenarioObject>,
     /// `[TeamTypes]` parsed via `cnc_core::entity` (empty when absent).
     pub team_types: Vec<cnc_core::entity::TeamType>,
+    /// `[Houses]`: house index -> name, in index order.
+    pub houses: Vec<OriginalHouse>,
+    /// `[Waypoints]`: waypoint index -> row-major cell index.
+    pub waypoints: Vec<Waypoint>,
+    /// `[Trigs]` and the per-trigger sections they name.
+    pub triggers: Vec<OriginalTrigger>,
+    /// `[Base] Player` house name, when the scenario authored a base list.
+    pub base_player: Option<String>,
+    /// `[Base]` build-order nodes (`000=Type,Cell`).
+    pub base_nodes: Vec<BaseNode>,
+    /// `[SMUDGE]` craters and scorch marks.
+    pub smudges: Vec<SmudgeEntry>,
+    /// `[TERRAIN]` trees and other terrain objects.
+    pub terrain_objects: Vec<TerrainObject>,
+}
+
+/// One `[Houses]` entry plus the matching per-house section (`[Greece]`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OriginalHouse {
+    /// House index as written in `[Houses]` (`0`, `1`, ...).
+    pub index: u32,
+    /// House name, e.g. `Greece` / `USSR`.
+    pub name: String,
+    /// Starting credits. `HOUSE.CPP` scales the INI value by 100.
+    pub credits: i32,
+    pub tech_level: Option<u32>,
+    pub max_infantry: Option<u32>,
+    pub max_unit: Option<u32>,
+    pub max_building: Option<u32>,
+    pub max_vessel: Option<u32>,
+}
+
+/// One `[Waypoints]` entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Waypoint {
+    /// Waypoint number (`0`..=N).
+    pub index: u32,
+    /// Target cell as a row-major index (`y * width + x`).
+    pub cell: u32,
+}
+
+/// One `[Trigs]` entry, resolved through its per-trigger section.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OriginalTrigger {
+    /// Index/id as written in `[Trigs]` (or the discovery order).
+    pub id: u32,
+    /// Reference name `[CellTriggers]` / objects use (`TRIGA`).
+    pub name: String,
+    /// Display name from the trigger section (`Name=Alpha`).
+    pub display_name: String,
+    /// Raw event token (`Time`, `All Destr.`, or a numeric record).
+    pub event: String,
+    /// Raw action token (`Win`, `Lose`, ...).
+    pub action: String,
+    /// `Data=` payload.
+    pub data: i64,
+}
+
+/// One `[Base]` build-order node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BaseNode {
+    /// Rules building type name, e.g. `POWR`.
+    pub type_name: String,
+    /// Row-major cell index.
+    pub cell: u32,
+}
+
+/// One `[SMUDGE]` entry (`SMUDGE.CPP`: `Type,Cell,Data` under a cell key).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SmudgeEntry {
+    pub cell: u32,
+    pub type_name: String,
+    pub data: Option<u32>,
+}
+
+/// One `[TERRAIN]` entry (`TERRAIN.CPP`: cell key, terrain type value).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerrainObject {
+    pub cell: u32,
+    pub type_name: String,
 }
 
 /// One placeable object recovered from an original scenario.
@@ -66,6 +148,10 @@ pub enum ObjectKind {
     Unit,
     Infantry,
     Structure,
+    /// `AIRCRAFT`: `House,Type,Strength,Cell,Facing,Mission`.
+    Aircraft,
+    /// `SHIPS`: same record shape as `UNITS`.
+    Ship,
 }
 
 impl ObjectKind {
@@ -75,6 +161,8 @@ impl ObjectKind {
             ObjectKind::Unit => "Units",
             ObjectKind::Infantry => "Infantry",
             ObjectKind::Structure => "Structures",
+            ObjectKind::Aircraft => "Aircraft",
+            ObjectKind::Ship => "Ships",
         }
     }
 }
@@ -121,6 +209,12 @@ impl OriginalScenario {
         // Team types are optional; a scenario without [TeamTypes] yields an
         // empty roster and the cadence AI keeps full control.
         let team_types = cnc_core::entity::team_types_from_ini(&ini).unwrap_or_default();
+        let houses = parse_houses(&ini);
+        let waypoints = parse_waypoints(&ini);
+        let triggers = parse_triggers(&ini);
+        let (base_player, base_nodes) = parse_base(&ini);
+        let smudges = parse_smudges(&ini);
+        let terrain_objects = parse_terrain_objects(&ini);
 
         Ok(Self {
             name,
@@ -131,6 +225,13 @@ impl OriginalScenario {
             cell_triggers,
             objects,
             team_types,
+            houses,
+            waypoints,
+            triggers,
+            base_player,
+            base_nodes,
+            smudges,
+            terrain_objects,
         })
     }
 
@@ -165,8 +266,10 @@ fn parse_objects(ini: &IniFile) -> Vec<ScenarioObject> {
         ObjectKind::Unit,
         ObjectKind::Infantry,
         ObjectKind::Structure,
+        ObjectKind::Aircraft,
+        ObjectKind::Ship,
     ] {
-        let Some(section) = ini.section(kind.section()) else {
+        let Some(section) = section_ci(ini, kind.section()) else {
             continue;
         };
         for value in section.values.values() {
@@ -235,12 +338,24 @@ fn parse_object(kind: ObjectKind, text: &str) -> Option<ScenarioObject> {
             fields.get(4).and_then(|s| s.parse().ok()).unwrap_or(0),
             None,
         ),
+        // House,Type,Strength,Cell,Facing,Mission (AIRCRAFT.CPP:561):
+        // aircraft carry no trigger field.
+        ObjectKind::Aircraft => (
+            fields.get(4).and_then(|s| s.parse().ok()).unwrap_or(0),
+            fields.get(5).copied(),
+        ),
+        // House,Type,Strength,Cell,Facing,Mission,Trigger (VESSEL.CPP:2073)
+        ObjectKind::Ship => (
+            fields.get(4).and_then(|s| s.parse().ok()).unwrap_or(0),
+            fields.get(5).copied(),
+        ),
     };
 
     let trigger_index = match kind {
-        ObjectKind::Unit => 6,
+        ObjectKind::Unit | ObjectKind::Ship => 6,
         ObjectKind::Infantry => 7,
         ObjectKind::Structure => 5,
+        ObjectKind::Aircraft => usize::MAX,
     };
 
     Some(ScenarioObject {
@@ -258,17 +373,299 @@ fn parse_object(kind: ObjectKind, text: &str) -> Option<ScenarioObject> {
     })
 }
 
-/// Decode one numbered-line block into packed cells, if present.
+/// Case-insensitive section lookup.
+///
+/// The retail engine writes the object sections in upper case (`UNITS`,
+/// `TERRAIN`, `SMUDGE`) while editors and hand-authored files use title
+/// case, so matching is folded rather than exact.
+fn section_ci<'a>(ini: &'a IniFile, name: &str) -> Option<&'a IniSection> {
+    ini.sections
+        .iter()
+        .find(|(section, _)| section.eq_ignore_ascii_case(name))
+        .map(|(_, section)| section)
+}
+
+/// Render one INI value as scenario text (arrays are re-joined with commas).
+fn value_text(value: &IniValue) -> Option<String> {
+    match value {
+        IniValue::String(text) => Some(text.clone()),
+        IniValue::Integer(number) => Some(number.to_string()),
+        IniValue::Float(number) => Some(number.to_string()),
+        IniValue::Boolean(flag) => Some(if *flag { "1" } else { "0" }.to_string()),
+        IniValue::Array(values) => Some(
+            values
+                .iter()
+                .map(ini_value_text)
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+    }
+}
+
+/// Decode one numbered-line `MapPack`/`OverlayPack` block into packed cells.
+///
+/// `INIClass::Put_UUBlock` writes numbered base64 lines; both retail packs are
+/// LCW-compressed before base64 (`MapClass::Write_Binary`,
+/// `OverlayClass::Write_INI`), and the decompressed stream is a run of 3-byte
+/// records ([`ra_pack`]). Every failure names the section it came from.
 fn decode_block(ini: &IniFile, section: &str) -> Result<Vec<PackedCell>> {
-    let Some(section_data) = ini.section(section) else {
+    let Some(section_data) = section_ci(ini, section) else {
         return Ok(Vec::new());
     };
     let entries: Vec<(String, String)> = section_data
         .values
         .iter()
-        .map(|(key, value)| (key.clone(), value.as_string().unwrap_or("").to_string()))
+        .map(|(key, value)| (key.clone(), value_text(value).unwrap_or_default()))
         .collect();
-    ra_pack::decode_pack(&entries)
+    let stream = ra_pack::gather_lines(&entries);
+    if stream.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let bytes = base64::decode(&stream).with_context(|| format!("[{section}] base64 payload"))?;
+    let plain = decompress_lcw(&bytes).with_context(|| format!("[{section}] LCW payload"))?;
+    ra_pack::decode_pack_bytes(&plain).with_context(|| format!("[{section}] packed cells"))
+}
+
+/// Decompress an LCW stream whose output length the file does not state.
+///
+/// `format80::decompress` needs the exact output length. The stream's `0x80`
+/// terminator reports the real length through `LengthMismatch`, so the block
+/// is probed with a generous cap and then decoded once more at the reported
+/// size. Only the shared codec runs; there is no local LCW implementation.
+/// An opcode that would overrun the cap (a genuinely long stream) doubles the
+/// cap instead of being mistaken for the terminator.
+fn decompress_lcw(input: &[u8]) -> Result<Vec<u8>> {
+    /// Upper bound for one decompressed pack (retail maps are far smaller).
+    const MAX_OUTPUT: usize = 64 * 1024 * 1024;
+    let mut cap = input.len().saturating_mul(64).clamp(1024, MAX_OUTPUT);
+    loop {
+        match format80::decompress(input, cap) {
+            Ok(plain) => return Ok(plain),
+            // The terminator landed short of the cap: `actual` is the real
+            // decompressed length.
+            Err(Format80Error::LengthMismatch { actual, expected }) if actual <= expected => {
+                return format80::decompress(input, actual)
+                    .map_err(|err| anyhow::anyhow!("LCW decode failed: {err}"));
+            }
+            Err(Format80Error::LengthMismatch { .. }) => {
+                if cap >= MAX_OUTPUT {
+                    bail!("LCW stream expands past {MAX_OUTPUT} bytes");
+                }
+                cap = cap.saturating_mul(2).min(MAX_OUTPUT);
+            }
+            Err(err) => return Err(anyhow::anyhow!("LCW decode failed: {err}")),
+        }
+    }
+}
+
+/// Parse `[Houses]` plus the per-house sections it names (`[Greece]`).
+///
+/// `HOUSE.CPP` keys its state by the house *name*; the index list is what
+/// ties `[Houses]` to the object `House` field. `Credits` is scaled by 100
+/// exactly as `HouseClass::Read_INI` does (`InitialCredits = Credits * 100`).
+fn parse_houses(ini: &IniFile) -> Vec<OriginalHouse> {
+    let Some(section) = section_ci(ini, "Houses") else {
+        return Vec::new();
+    };
+    let mut entries: Vec<(u32, String)> = section
+        .values
+        .iter()
+        .filter_map(|(key, value)| {
+            let index = key.trim().parse::<u32>().ok()?;
+            let name = value_text(value)?.trim().to_string();
+            (!name.is_empty()).then_some((index, name))
+        })
+        .collect();
+    entries.sort_by_key(|(index, _)| *index);
+    entries
+        .into_iter()
+        .map(|(index, name)| {
+            let details = section_ci(ini, &name);
+            let int = |key: &str| {
+                details
+                    .and_then(|section| section.get_ci(key))
+                    .and_then(|value| value.as_i64().ok())
+            };
+            OriginalHouse {
+                index,
+                name,
+                credits: int("Credits")
+                    .and_then(|credits| i32::try_from(credits).ok())
+                    .unwrap_or(0)
+                    .saturating_mul(100),
+                tech_level: int("TechLevel").and_then(|value| u32::try_from(value).ok()),
+                max_infantry: int("MaxInfantry").and_then(|value| u32::try_from(value).ok()),
+                max_unit: int("MaxUnit").and_then(|value| u32::try_from(value).ok()),
+                max_building: int("MaxBuilding").and_then(|value| u32::try_from(value).ok()),
+                max_vessel: int("MaxVessel").and_then(|value| u32::try_from(value).ok()),
+            }
+        })
+        .collect()
+}
+
+/// Parse `[Waypoints]` (waypoint number -> row-major cell index).
+fn parse_waypoints(ini: &IniFile) -> Vec<Waypoint> {
+    let Some(section) = section_ci(ini, "Waypoints") else {
+        return Vec::new();
+    };
+    let mut waypoints: Vec<Waypoint> = section
+        .values
+        .iter()
+        .filter_map(|(key, value)| {
+            let index = key.trim().parse::<u32>().ok()?;
+            let cell = value_text(value)?.trim().parse::<u32>().ok()?;
+            Some(Waypoint { index, cell })
+        })
+        .collect();
+    waypoints.sort_by_key(|waypoint| waypoint.index);
+    waypoints
+}
+
+/// Parse `[Trigs]` and the trigger sections its entries name.
+///
+/// Two shapes are accepted: the modern numbered list (`1=TRIGA` plus a
+/// `[TRIGA]` section with `Name`/`Event`/`Data`/`Action`) and the classic
+/// single-line `TRIGA=Event,Action,Data,House,Team,Persistant` record
+/// (`TRIGTYPE.CPP` `Fill_In`). Unknown events/actions are preserved verbatim.
+fn parse_triggers(ini: &IniFile) -> Vec<OriginalTrigger> {
+    let Some(section) = section_ci(ini, "Trigs") else {
+        return Vec::new();
+    };
+    let mut triggers: Vec<OriginalTrigger> = Vec::new();
+    for (key, value) in &section.values {
+        let record = value_text(value).unwrap_or_default();
+        let record = record.trim();
+        if record.is_empty() {
+            continue;
+        }
+        let numeric_key = key.trim().parse::<u32>().ok();
+        let id = numeric_key.unwrap_or(triggers.len() as u32 + 1);
+        if record.contains(',') {
+            // `<event>,<action>,<data>,<house>,<team>,<persistant>`.
+            let fields: Vec<&str> = record.split(',').map(str::trim).collect();
+            let name = key.trim().to_string();
+            triggers.push(OriginalTrigger {
+                id,
+                display_name: name.clone(),
+                name,
+                event: fields.first().copied().unwrap_or_default().to_string(),
+                action: fields.get(1).copied().unwrap_or_default().to_string(),
+                data: fields
+                    .get(2)
+                    .and_then(|data| data.parse::<i64>().ok())
+                    .unwrap_or(0),
+            });
+            continue;
+        }
+        let name = record.to_string();
+        let details = section_ci(ini, &name);
+        let field = |key: &str| {
+            details
+                .and_then(|section| section.get_ci(key))
+                .and_then(value_text)
+        };
+        triggers.push(OriginalTrigger {
+            id,
+            display_name: field("Name").unwrap_or_else(|| name.clone()),
+            name,
+            event: field("Event").unwrap_or_default(),
+            action: field("Action").unwrap_or_default(),
+            data: field("Data")
+                .and_then(|data| data.trim().parse::<i64>().ok())
+                .unwrap_or(0),
+        });
+    }
+    triggers.sort_by_key(|trigger| trigger.id);
+    triggers
+}
+
+/// Parse `[Base]` (`BASE.CPP`): `Player=<house>`, `Count=<n>`, `000=Type,Cell`.
+fn parse_base(ini: &IniFile) -> (Option<String>, Vec<BaseNode>) {
+    let Some(section) = section_ci(ini, "Base") else {
+        return (None, Vec::new());
+    };
+    let player = section
+        .get_ci("Player")
+        .and_then(value_text)
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty());
+    let declared = section
+        .get_ci("Count")
+        .and_then(|value| value.as_i64().ok())
+        .and_then(|count| usize::try_from(count).ok())
+        .unwrap_or(0);
+    let mut entries: Vec<(u32, String)> = section
+        .values
+        .iter()
+        .filter_map(|(key, value)| {
+            let index = key.trim().parse::<u32>().ok()?;
+            let record = value_text(value)?;
+            (!record.trim().is_empty()).then_some((index, record))
+        })
+        .collect();
+    entries.sort_by_key(|(index, _)| *index);
+    if declared > 0 && declared < entries.len() {
+        entries.truncate(declared);
+    }
+    let nodes = entries
+        .into_iter()
+        .filter_map(|(_, record)| {
+            let mut fields = record.split(',').map(str::trim);
+            let type_name = fields.next()?.to_string();
+            let cell = fields.next()?.parse::<u32>().ok()?;
+            (!type_name.is_empty()).then_some(BaseNode { type_name, cell })
+        })
+        .collect();
+    (player, nodes)
+}
+
+/// Parse `[SMUDGE]` (cell key, value `Type[,Cell[,Data]]`).
+fn parse_smudges(ini: &IniFile) -> Vec<SmudgeEntry> {
+    let Some(section) = section_ci(ini, "SMUDGE") else {
+        return Vec::new();
+    };
+    let mut smudges: Vec<SmudgeEntry> = section
+        .values
+        .iter()
+        .filter_map(|(key, value)| {
+            let record = value_text(value)?;
+            let mut fields = record.split(',').map(str::trim);
+            let type_name = fields.next()?.to_string();
+            if type_name.is_empty() {
+                return None;
+            }
+            let cell = fields
+                .next()
+                .and_then(|cell| cell.parse::<u32>().ok())
+                .or_else(|| key.trim().parse::<u32>().ok())?;
+            let data = fields.next().and_then(|data| data.parse::<u32>().ok());
+            Some(SmudgeEntry {
+                cell,
+                type_name,
+                data,
+            })
+        })
+        .collect();
+    smudges.sort_by_key(|smudge| smudge.cell);
+    smudges
+}
+
+/// Parse `[TERRAIN]` (cell key -> terrain object type, e.g. `TREE01`).
+fn parse_terrain_objects(ini: &IniFile) -> Vec<TerrainObject> {
+    let Some(section) = section_ci(ini, "TERRAIN") else {
+        return Vec::new();
+    };
+    let mut objects: Vec<TerrainObject> = section
+        .values
+        .iter()
+        .filter_map(|(key, value)| {
+            let cell = key.trim().parse::<u32>().ok()?;
+            let type_name = value_text(value)?.trim().to_string();
+            (!type_name.is_empty()).then_some(TerrainObject { cell, type_name })
+        })
+        .collect();
+    objects.sort_by_key(|object| object.cell);
+    objects
 }
 
 #[cfg(test)]
@@ -375,11 +772,27 @@ mod tests {
     use super::{ObjectKind, OriginalScenario};
 
     /// Build original-format scenario text from packed cell lists.
+    /// Encode packed cells the way `MapClass::Write_Binary` does: 3-byte
+    /// records, LCW-compressed, then base64 into numbered `1=`, `2=`, ... lines.
+    fn encode_block(cells: &[PackedCell]) -> Vec<(String, String)> {
+        let mut plain = Vec::with_capacity(cells.len() * ra_pack::PACK_ENTRY_BYTES);
+        for cell in cells {
+            plain.extend_from_slice(&cell.index.to_le_bytes());
+            plain.push(cell.id);
+        }
+        let packed = format80::compress(&plain, plain.len()).expect("LCW compress");
+        base64::uu_lines(&packed)
+            .into_iter()
+            .enumerate()
+            .map(|(index, line)| ((index + 1).to_string(), line))
+            .collect()
+    }
+
     fn scenario_text(map: &[PackedCell], overlay: &[PackedCell]) -> String {
         let mut text = String::from("[Basic]\nName=RA 01\nPlayer=Greece\nBriefing=Hold.\n");
         for (section, cells) in [("MapPack", map), ("OverlayPack", overlay)] {
             text.push_str(&format!("[{section}]\n"));
-            for (key, value) in ra_pack::encode_pack(cells) {
+            for (key, value) in encode_block(cells) {
                 text.push_str(&format!("{key}={value}\n"));
             }
         }
@@ -399,7 +812,7 @@ mod tests {
     #[test]
     fn missing_player_falls_back_to_greece() {
         // SCENARIO.CPP:2392 uses HOUSE_GREECE as the default player house.
-        let text = "[Basic]\nName=X\n[MapPack]\n1=AAEC\n";
+        let text = "[Basic]\nName=X\n";
         let scenario = OriginalScenario::from_ini(text).unwrap();
         assert_eq!(scenario.player, "Greece");
     }
@@ -467,6 +880,122 @@ mod tests {
         assert!(scenario.has_terrain());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const SECTIONS: &str = "[Basic]\nName=Sections\nPlayer=Greece\n\
+        [Houses]\n0=Greece\n1=USSR\n\
+        [Greece]\nCredits=40\nTechLevel=7\nMaxInfantry=60\nMaxVessel=3\n\
+        [USSR]\nCredits=20\n\
+        [Waypoints]\n0=17\n1=240\n2=100\n\
+        [Trigs]\n1=TRIGA\n2=TRIGB\n\
+        [TRIGA]\nName=Alpha\nEvent=Time\nData=300\nAction=Win\n\
+        [TRIGB]\nName=Beta\nEvent=All Destr.\nData=0\nAction=Lose\n\
+        [Base]\nPlayer=Greece\nCount=2\n000=POWR,16\n001=BARR,17\n\
+        [SMUDGE]\n16=CRATER1,16,3\n\
+        [TERRAIN]\n20=TREE01\n21=TREE02\n\
+        [AIRCRAFT]\n1=USSR,MIG,256,120,64,Hunt\n\
+        [SHIPS]\n1=Greece,DD,256,121,32,Guard,SHIPTRIG\n";
+
+    #[test]
+    fn houses_waypoints_triggers_base_smudge_and_terrain_parse() {
+        let scenario = OriginalScenario::from_ini(SECTIONS).expect("valid scenario");
+
+        assert_eq!(scenario.houses.len(), 2);
+        assert_eq!(scenario.houses[0].name, "Greece");
+        // HOUSE.CPP scales Credits by 100.
+        assert_eq!(scenario.houses[0].credits, 4000);
+        assert_eq!(scenario.houses[0].tech_level, Some(7));
+        assert_eq!(scenario.houses[0].max_infantry, Some(60));
+        assert_eq!(scenario.houses[0].max_vessel, Some(3));
+        assert_eq!(scenario.houses[1].name, "USSR");
+        assert_eq!(scenario.houses[1].credits, 2000);
+
+        assert_eq!(
+            scenario.waypoints,
+            vec![
+                Waypoint { index: 0, cell: 17 },
+                Waypoint {
+                    index: 1,
+                    cell: 240
+                },
+                Waypoint {
+                    index: 2,
+                    cell: 100
+                },
+            ]
+        );
+
+        assert_eq!(scenario.triggers.len(), 2);
+        assert_eq!(scenario.triggers[0].name, "TRIGA");
+        assert_eq!(scenario.triggers[0].display_name, "Alpha");
+        assert_eq!(scenario.triggers[0].event, "Time");
+        assert_eq!(scenario.triggers[0].data, 300);
+        assert_eq!(scenario.triggers[0].action, "Win");
+        assert_eq!(scenario.triggers[1].name, "TRIGB");
+
+        assert_eq!(scenario.base_player.as_deref(), Some("Greece"));
+        assert_eq!(
+            scenario.base_nodes,
+            vec![
+                BaseNode {
+                    type_name: "POWR".to_string(),
+                    cell: 16
+                },
+                BaseNode {
+                    type_name: "BARR".to_string(),
+                    cell: 17
+                },
+            ]
+        );
+
+        assert_eq!(
+            scenario.smudges,
+            vec![SmudgeEntry {
+                cell: 16,
+                type_name: "CRATER1".to_string(),
+                data: Some(3)
+            }]
+        );
+        assert_eq!(scenario.terrain_objects.len(), 2);
+        assert_eq!(scenario.terrain_objects[1].type_name, "TREE02");
+
+        assert_eq!(scenario.objects_of(ObjectKind::Aircraft).count(), 1);
+        assert_eq!(scenario.objects_of(ObjectKind::Ship).count(), 1);
+        let mig = scenario.objects_of(ObjectKind::Aircraft).next().unwrap();
+        assert_eq!(mig.type_name, "MIG");
+        assert_eq!(mig.mission.as_deref(), Some("Hunt"));
+        assert_eq!(mig.trigger, None, "aircraft carry no trigger field");
+        let destroyer = scenario.objects_of(ObjectKind::Ship).next().unwrap();
+        assert_eq!(destroyer.trigger.as_deref(), Some("SHIPTRIG"));
+    }
+
+    #[test]
+    fn classic_single_line_trigger_record_parses() {
+        let text = "[Basic]\nName=Classic\n\
+            [Trigs]\nTRIGX=Time,Win,600,Greece,,0\n";
+        let scenario = OriginalScenario::from_ini(text).expect("valid scenario");
+        assert_eq!(scenario.triggers.len(), 1);
+        assert_eq!(scenario.triggers[0].name, "TRIGX");
+        assert_eq!(scenario.triggers[0].event, "Time");
+        assert_eq!(scenario.triggers[0].action, "Win");
+        assert_eq!(scenario.triggers[0].data, 600);
+    }
+
+    #[test]
+    fn bad_mappack_is_an_error_naming_the_section() {
+        // Valid base64, but the bytes are not an LCW stream.
+        let text = "[Basic]\nName=Bad\n[MapPack]\n1=AAECAwQFBgc=\n";
+        let error = OriginalScenario::from_ini(text).expect_err("must not decode");
+        let message = format!("{error:#}");
+        assert!(message.contains("MapPack"), "section missing: {message}");
+        assert!(!message.contains("panic"), "{message}");
+    }
+
+    #[test]
+    fn bad_base64_is_an_error_naming_the_section() {
+        let text = "[Basic]\nName=Bad\n[OverlayPack]\n1=!!!!\n";
+        let error = OriginalScenario::from_ini(text).expect_err("must not decode");
+        assert!(format!("{error:#}").contains("OverlayPack"));
     }
 }
 
