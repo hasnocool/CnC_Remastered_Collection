@@ -3,6 +3,7 @@
 pub mod ai;
 pub mod building;
 pub mod carryover;
+pub mod events;
 pub mod game;
 pub mod house;
 pub mod map;
@@ -19,6 +20,7 @@ pub mod weapon;
 pub use ai::{AIDifficulty, ProductionWeight, AI};
 pub use building::{Building, Factory, PowerPlant, Refinery};
 pub use carryover::Carryover;
+pub use events::{names as event_names, OutcomeKind, SuperweaponKind};
 pub use game::{Buildable, Game, GameStatus, SidebarOption};
 pub use house::House;
 pub use map::{CellGrid, Map};

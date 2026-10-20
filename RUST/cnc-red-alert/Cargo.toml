@@ -10,12 +10,14 @@ cnc-core = { path = "../cnc-core" }
 cnc-renderer = { path = "../cnc-renderer" }
 cnc-audio = { path = "../cnc-audio" }
 cnc-asset = { path = "../cnc-asset" }
+cnc-events = { path = "../cnc-events" }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
 parking_lot = { workspace = true }
 once_cell = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"

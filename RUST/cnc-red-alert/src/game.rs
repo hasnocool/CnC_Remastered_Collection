@@ -932,6 +932,10 @@ pub struct Game {
     pub briefing: String,
     pub objectives: Vec<ObjectiveState>,
     next_id: u32,
+    /// Observational event sink; `None` unless a host attached a bus.
+    pub(crate) event_source: Option<cnc_events::EventSource>,
+    /// Latch so the scenario outcome is published exactly once.
+    pub(crate) scenario_outcome_emitted: bool,
 }
 
 impl Game {
@@ -967,6 +971,9 @@ impl Game {
             briefing: String::new(),
             objectives: Vec::new(),
             next_id: 1,
+            // Observational only: no bus until a host calls set_event_bus.
+            event_source: None,
+            scenario_outcome_emitted: false,
         }
     }
 
@@ -1749,6 +1756,10 @@ impl Game {
         }
         self.shots.retain(|shot| shot.ttl > Fixed16_16::ZERO);
         self.remove_dead();
+
+        // Post-step observation: nothing below this line reads simulation
+        // state back, so publishing cannot change the tick's outcome.
+        self.emit_scenario_outcome();
     }
 
     /// Fire the owner's Chronosphere, teleporting selected units to a cell.
@@ -1776,6 +1787,14 @@ impl Game {
                 count += 1;
             }
         }
+        if let Some(source) = self.event_source.as_ref() {
+            crate::events::superweapon_fired(
+                source,
+                owner,
+                crate::events::SuperweaponKind::Chronosphere,
+                count,
+            );
+        }
         Ok(count)
     }
 
@@ -1800,6 +1819,14 @@ impl Game {
             .map(|unit| unit.position)
             .collect();
         let revealed = self.gps[index].scan(&enemies)?;
+        if let Some(source) = self.event_source.as_ref() {
+            crate::events::superweapon_fired(
+                source,
+                owner,
+                crate::events::SuperweaponKind::Gps,
+                revealed.len(),
+            );
+        }
         Ok(revealed.len())
     }
 
@@ -1827,6 +1854,14 @@ impl Game {
                 unit.invulnerable_until = until;
                 count += 1;
             }
+        }
+        if let Some(source) = self.event_source.as_ref() {
+            crate::events::superweapon_fired(
+                source,
+                owner,
+                crate::events::SuperweaponKind::IronCurtain,
+                count,
+            );
         }
         Ok(count)
     }
@@ -2798,6 +2833,13 @@ impl Game {
                 if let Some(cell) = self.spawn_cell_for(owner, role) {
                     self.spawn_unit(owner, item.class_id, cell);
                 }
+                if let Some(source) = self.event_source.as_ref() {
+                    if item.class_id.is_building() {
+                        crate::events::structure_produced(source, owner, item.class_id);
+                    } else {
+                        crate::events::unit_produced(source, owner, item.class_id);
+                    }
+                }
                 // AUDIO.CPP VOX_UNIT_READY / VOX_CONSTRUCTION: the player
                 // hears about their own completions.
                 if owner == self.player_owner {
@@ -2822,6 +2864,12 @@ impl Game {
                 continue;
             }
             self.ra_dead_units.push(index);
+            if let Some(source) = self.event_source.as_ref() {
+                let owner = self.units[index].owner;
+                let id = self.units[index].id;
+                let class_id = self.units[index].class_id;
+                crate::events::unit_lost(source, owner, id, class_id);
+            }
             if self.units[index].owner == self.player_owner {
                 spoken.get_or_insert(cnc_audio::EvaLine::UnitLost);
             }
@@ -2831,6 +2879,12 @@ impl Game {
                 continue;
             }
             self.ra_dead_structures.push(index);
+            if let Some(source) = self.event_source.as_ref() {
+                let owner = self.structures[index].owner;
+                let id = self.structures[index].id;
+                let class_id = self.structures[index].class_id;
+                crate::events::structure_lost(source, owner, id, class_id);
+            }
             if self.structures[index].owner == self.player_owner {
                 spoken.get_or_insert(cnc_audio::EvaLine::StructureLost);
             }

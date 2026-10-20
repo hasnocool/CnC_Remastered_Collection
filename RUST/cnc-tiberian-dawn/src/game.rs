@@ -267,6 +267,10 @@ pub struct Game {
     /// Elapsed time when "insufficient funds" may next be spoken.
     pub(crate) next_funds_speak: Fixed16_16,
     pub(crate) pending_blasts: Vec<PendingBlast>,
+    /// Observational event sink; `None` unless a host attached a bus.
+    pub(crate) event_source: Option<cnc_events::EventSource>,
+    /// Latch so the mission outcome is published exactly once.
+    pub(crate) mission_outcome_emitted: bool,
 }
 
 impl Game {
@@ -321,6 +325,9 @@ impl Game {
             next_base_attack_speak: Fixed16_16::ZERO,
             next_funds_speak: Fixed16_16::ZERO,
             pending_blasts: Vec::new(),
+            // Observational only: no bus until a host calls set_event_bus.
+            event_source: None,
+            mission_outcome_emitted: false,
         }
     }
 
@@ -1189,6 +1196,14 @@ impl Game {
             max_ttl: Fixed16_16::from_f32(0.6),
             color: [0.60, 0.85, 1.00, 1.0],
         });
+        if let Some(source) = self.event_source.as_ref() {
+            crate::events::superweapon_fired(
+                source,
+                owner,
+                crate::events::SuperweaponKind::IonCannon,
+                cell,
+            );
+        }
         true
     }
 
@@ -1277,6 +1292,14 @@ impl Game {
             max_ttl: Fixed16_16::from_f32(1.2),
             color: [1.0, 0.60, 0.25, 1.0],
         });
+        if let Some(source) = self.event_source.as_ref() {
+            crate::events::superweapon_fired(
+                source,
+                owner,
+                crate::events::SuperweaponKind::NuclearMissile,
+                cell,
+            );
+        }
         true
     }
 
@@ -1340,6 +1363,10 @@ impl Game {
             }
             self.dead_units_announced.push(index);
             let victim = self.units[index].owner;
+            if let Some(source) = self.event_source.as_ref() {
+                let unit_type = self.units[index].unit_type;
+                crate::events::unit_lost(source, victim, unit_type, index);
+            }
             let line = if victim == self.player_owner {
                 cnc_audio::EvaLine::UnitLost
             } else {
@@ -1362,6 +1389,10 @@ impl Game {
             }
             self.dead_buildings_announced.push(index);
             let victim = self.buildings[index].owner;
+            if let Some(source) = self.event_source.as_ref() {
+                let structure = self.buildings[index].structure.ini_name().to_string();
+                crate::events::structure_lost(source, victim, structure, index);
+            }
             let line = if victim == self.player_owner {
                 cnc_audio::EvaLine::StructureLost
             } else {
@@ -1438,6 +1469,9 @@ impl Game {
                 if owner == self.player_owner {
                     self.eva.speak(cnc_audio::EvaLine::ConstructionComplete);
                 }
+                if let Some(source) = self.event_source.as_ref() {
+                    crate::events::structure_ready(source, owner, structure);
+                }
                 self.ready_buildings.push((owner, structure));
                 continue;
             }
@@ -1457,6 +1491,9 @@ impl Game {
             }
             self.units.push(unit);
             self.units_produced += 1;
+            if let Some(source) = self.event_source.as_ref() {
+                crate::events::unit_produced(source, owner, unit_type, id);
+            }
             // UNIT.CPP: a completed unit announces "unit ready" to its owner.
             if owner == self.player_owner {
                 self.eva.speak(cnc_audio::EvaLine::UnitReady);
@@ -1599,6 +1636,10 @@ impl Game {
         if self.tiberium_tick.is_multiple_of(30) {
             self.map.grid.tiberium_cycle();
         }
+
+        // Post-step observation: nothing below this line reads simulation
+        // state back, so publishing cannot change the tick's outcome.
+        self.emit_mission_outcome();
     }
 
     /// Enable the expert AI for every non-player house (skirmish and
@@ -2390,6 +2431,20 @@ impl Game {
                 }
                 if let Some(new) = self.houses.get_mut(new_owner as usize) {
                     new.add_building(building_index as u32);
+                }
+                if let Some(source) = self.event_source.as_ref() {
+                    let structure = self
+                        .buildings
+                        .get(building_index)
+                        .map(|building| building.structure.ini_name().to_string())
+                        .unwrap_or_default();
+                    crate::events::structure_captured(
+                        source,
+                        previous,
+                        new_owner,
+                        structure,
+                        building_index,
+                    );
                 }
             }
             self.refresh_house_power();

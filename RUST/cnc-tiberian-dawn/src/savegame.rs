@@ -163,6 +163,9 @@ impl Game {
             powerups: snapshot.powerups,
             ai: snapshot.ai,
             pending_blasts: Vec::new(),
+            // Loaded games start with no attached bus; the host re-attaches.
+            event_source: None,
+            mission_outcome_emitted: false,
         })
     }
 

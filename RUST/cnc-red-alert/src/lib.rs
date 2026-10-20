@@ -5,6 +5,7 @@
 //! branches, country superweapons and infiltration.
 
 pub mod aircraft;
+pub mod events;
 pub mod game;
 pub mod gapgen;
 pub mod house;
@@ -20,6 +21,7 @@ pub mod superweapon;
 pub mod tesla;
 
 pub use aircraft::{AIRFIELD_CAPACITY, DEFAULT_AMMO, REARM_SECONDS};
+pub use events::{names as event_names, OutcomeKind as EventOutcomeKind, SuperweaponKind};
 pub use game::{
     AiCommander, BuildError, Game, GameCommand, GameStatus, GameStructure, GameUnit,
     ObjectiveState, RunningTrigger, ScenarioOutcome, Shot, TargetRef, UnitRole, WeaponSpec,
