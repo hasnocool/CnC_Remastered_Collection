@@ -57,11 +57,13 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 mod lobby;
+mod lobby_screen;
 mod menu;
 mod options;
 mod ready;
 mod score;
 
+use lobby_screen::LobbyScreen;
 use menu::{
     GameChoice, LaunchTarget, MainMenu, MenuCommand, OptionsAction, OptionsModal, VolumeBus,
 };
@@ -1816,6 +1818,7 @@ fn draw_net_lobby(
     title: &str,
     lobby: &NetLobby,
     scan: Option<&LanScan>,
+    directory: &LobbyScreen,
     error: Option<&str>,
     roster: &[(String, bool)],
     width: u32,
@@ -1909,6 +1912,30 @@ fn draw_net_lobby(
             }
         }
     }
+    lan_y += 6.0;
+    renderer.draw_text(
+        &format!(
+            "DIRECTORY ({})  D: switch backend  [{} row(s)]",
+            directory.mode.label(),
+            directory.row_count()
+        ),
+        60.0,
+        lan_y,
+        10.0,
+        [0.60, 0.75, 0.95, 1.0],
+    );
+    lan_y += 14.0;
+    for row in directory.scan.render_rows().iter().take(3) {
+        renderer.draw_text(row, 60.0, lan_y, 9.0, [0.82, 0.88, 0.96, 1.0]);
+        lan_y += 12.0;
+    }
+    renderer.draw_text(
+        &directory.scan.status_line(),
+        60.0,
+        lan_y,
+        9.0,
+        [0.75, 0.78, 0.62, 1.0],
+    );
     renderer.draw_text(
         match lobby.role {
             NetRole::Host => {
@@ -2796,6 +2823,8 @@ pub struct LauncherApp {
     td_lobby: NetLobby,
     td_lobby_error: Option<String>,
     td_lan_scan: Option<LanScan>,
+    /// Directory-backed lobby rows for the TD lobby (see `LobbyScreen`).
+    td_lobby_screen: LobbyScreen,
     /// Live lockstep session while a TD network match runs.
     network: Option<TdNetwork>,
     /// Host-side ready roster; ready flags ride out-of-band, never the
@@ -2884,6 +2913,7 @@ impl LauncherApp {
             td_lobby: NetLobby::td_default(),
             td_lobby_error: None,
             td_lan_scan: None,
+            td_lobby_screen: LobbyScreen::default(),
             network: None,
             ready_tracker: ReadyTracker::new(),
             return_to_menu: false,
@@ -3191,6 +3221,36 @@ impl LauncherApp {
         self.td_lobby_error = None;
         self.td_lan_scan = None;
         self.td_lobby.focus = 0;
+        self.td_lobby_screen = LobbyScreen::new(&self.td_lobby.join_address);
+        refresh_lobby_screen(&mut self.td_lobby_screen);
+    }
+
+    /// Switch the TD lobby between the directory and LAN-multicast backends.
+    fn toggle_td_lobby_directory(&mut self) {
+        self.td_lobby_screen.toggle_mode();
+        let scan = &self.td_lobby_screen.scan;
+        if scan.used_fallback() || !scan.has_directory_rows() {
+            if self.td_lobby_error.is_none() {
+                self.td_lobby_error = Some(scan.status_line());
+            }
+        } else {
+            self.td_lobby_error = None;
+        }
+    }
+
+    /// Broadcast the TD local player's ready flag to every known peer.
+    ///
+    /// The TD lane previously had no send hook at all: the gate in
+    /// `start_td_lobby` could never open because only remote flags arrived.
+    fn send_td_ready(&mut self, ready: bool) {
+        let Some(net) = self.network.as_mut() else {
+            return;
+        };
+        let local = net.session.local_player;
+        let name = format!("Player{local}");
+        let _ = self.ready_tracker.mark_ready(&name, ready);
+        let peers: Vec<SocketAddr> = net.session.peers.values().copied().collect();
+        broadcast_ready(&net.socket, &name, ready, &peers);
     }
 
     fn td_network_active(&self) -> bool {
@@ -3225,7 +3285,12 @@ impl LauncherApp {
             },
             NetRole::Join => NetworkSetup {
                 role: "join".to_string(),
-                join: Some(self.td_lobby.join_address.trim().to_string()),
+                join: Some(if self.td_lobby.join_address.trim().is_empty() {
+                    // Directory fallback: the manual address row is the target.
+                    lobby_direct_address(&self.td_lobby_screen)
+                } else {
+                    self.td_lobby.join_address.trim().to_string()
+                }),
                 port: self.td_lobby.join_port,
                 peers: Vec::new(),
                 bind: "0.0.0.0".to_string(),
@@ -3878,6 +3943,7 @@ impl LauncherApp {
                 "TIBERIAN DAWN",
                 &self.td_lobby,
                 self.td_lan_scan.as_ref(),
+                &self.td_lobby_screen,
                 self.td_lobby_error.as_deref(),
                 &self.ready_tracker.roster(),
                 self.width,
@@ -4721,6 +4787,7 @@ impl ApplicationHandler for LauncherApp {
                             Key::Character(text) => match text.as_str() {
                                 "r" | "R" => self.td_lobby.toggle_role(),
                                 "l" | "L" => self.toggle_td_lan_scan(),
+                                "d" | "D" => self.toggle_td_lobby_directory(),
                                 "[" => self.td_lobby.adjust_port(-1),
                                 "]" => self.td_lobby.adjust_port(1),
                                 other => {
@@ -4787,6 +4854,23 @@ impl ApplicationHandler for LauncherApp {
                                 } else {
                                     self.recall_td_control_group(slot);
                                 }
+                                return;
+                            }
+                        }
+                    }
+                    if self.ctrl_down && self.td_network_active() {
+                        if let Key::Character(text) = &event.logical_key {
+                            if text.eq_ignore_ascii_case("r") {
+                                // Ready-up hook: Ctrl+R toggles the local flag and
+                                // broadcasts it, mirroring the RA lane's R key.
+                                let local = self
+                                    .network
+                                    .as_ref()
+                                    .map(|net| net.session.local_player)
+                                    .unwrap_or(0);
+                                let name = format!("Player{local}");
+                                let ready = !self.ready_tracker.is_ready(&name);
+                                self.send_td_ready(ready);
                                 return;
                             }
                         }
@@ -5234,6 +5318,43 @@ fn toggle_lan_scan(scan: &mut Option<LanScan>, error: &mut Option<String>) {
     }
 }
 
+/// Format the ready datagram for one peer; shared by both poll loops.
+///
+/// Mirrors `send_chat`: `CNCREADY 1 <player> <0|1>\n` goes out to every known
+/// peer address and never enters the lockstep stream.
+fn ready_datagram(player: &str, ready: bool) -> String {
+    format_ready_line(player, ready)
+}
+
+/// Broadcast the local ready flag to `peers`, mirroring `send_chat`.
+///
+/// Returns how many datagrams the OS accepted, so the poll loops and their
+/// tests can assert the hook really sent something.
+fn broadcast_ready(socket: &UdpSocket, player: &str, ready: bool, peers: &[SocketAddr]) -> usize {
+    let line = ready_datagram(player, ready);
+    peers
+        .iter()
+        .filter(|peer| socket.send_to(line.as_bytes(), **peer).is_ok())
+        .count()
+}
+
+/// Server address the lobby's direct-connect row dials.
+///
+/// The lobby screen keeps a manual address for exactly this: when no
+/// directory answers, the value the player typed is the join target.
+fn lobby_direct_address(screen: &LobbyScreen) -> String {
+    screen.manual_address.trim().to_string()
+}
+
+/// Run a lobby refresh on the directory backends from the app's key handler.
+///
+/// `LobbyScreen::refresh` is the only caller of the blocking discovery path,
+/// and `refresh_lobby` already caps it with `DEFAULT_DIRECTORY_TIMEOUT`, so a
+/// dead directory costs one frame budget at most and never panics.
+fn refresh_lobby_screen(screen: &mut LobbyScreen) {
+    screen.refresh();
+}
+
 /// Collect every beacon that arrived since the last poll.
 fn poll_lan_scan_socket(scan: &mut Option<LanScan>) {
     let Some(scan) = scan.as_mut() else {
@@ -5563,6 +5684,9 @@ pub struct RaLauncherApp {
     lobby: NetLobby,
     lobby_error: Option<String>,
     lan_scan: Option<LanScan>,
+    /// Directory-backed lobby rows (LAN multicast / directory browse), with
+    /// the direct-connect fallback folded in when no directory answers.
+    lobby_screen: LobbyScreen,
     notice: Option<(String, Instant)>,
     campaign: Vec<CampaignEntry>,
     campaign_index: usize,
@@ -5633,6 +5757,7 @@ impl RaLauncherApp {
             lobby: NetLobby::default(),
             lobby_error: None,
             lan_scan: None,
+            lobby_screen: LobbyScreen::default(),
             notice: None,
             campaign: Vec::new(),
             campaign_index: 0,
@@ -6156,6 +6281,34 @@ impl RaLauncherApp {
         self.lobby_error = None;
         self.lan_scan = None;
         self.lobby.focus = 0;
+        self.lobby_screen = LobbyScreen::new(&self.lobby.join_address);
+        self.refresh_lobby_directory();
+    }
+
+    /// Refresh the RA lobby's directory rows (LAN multicast or directory browse).
+    fn refresh_lobby_directory(&mut self) {
+        refresh_lobby_screen(&mut self.lobby_screen);
+    }
+
+    /// Switch the RA lobby between the directory and LAN-multicast backends.
+    ///
+    /// A directory outage is a warning, not an error: `used_fallback` rows let
+    /// the player direct-connect, so the lobby stays usable.
+    fn toggle_lobby_directory(&mut self) {
+        self.lobby_screen.toggle_mode();
+        let scan = &self.lobby_screen.scan;
+        if scan.used_fallback() || !scan.has_directory_rows() {
+            if self.lobby_error.is_none() {
+                self.lobby_error = Some(scan.status_line());
+            }
+        } else {
+            self.lobby_error = None;
+        }
+    }
+
+    /// The direct-connect address the RA lobby will dial.
+    fn lobby_direct_connect(&self) -> String {
+        lobby_direct_address(&self.lobby_screen)
     }
 
     /// Start or stop listening for host beacons on the LAN discovery port.
@@ -6189,7 +6342,12 @@ impl RaLauncherApp {
             },
             NetRole::Join => NetworkSetup {
                 role: "join".to_string(),
-                join: Some(self.lobby.join_address.trim().to_string()),
+                join: Some(if self.lobby.join_address.trim().is_empty() {
+                    // Directory fallback: the manual address row is the target.
+                    self.lobby_direct_connect()
+                } else {
+                    self.lobby.join_address.trim().to_string()
+                }),
                 port: self.lobby.join_port,
                 peers: Vec::new(),
                 bind: "0.0.0.0".to_string(),
@@ -6953,10 +7111,8 @@ impl RaLauncherApp {
         let local = net.session.local_player;
         let name = format!("Player{local}");
         let _ = self.ready_tracker.mark_ready(&name, ready);
-        let line = format_ready_line(&name, ready);
-        for peer in net.session.peers.values().copied() {
-            let _ = net.socket.send_to(line.as_bytes(), peer);
-        }
+        let peers: Vec<SocketAddr> = net.session.peers.values().copied().collect();
+        broadcast_ready(&net.socket, &name, ready, &peers);
     }
 
     /// Pan the RA camera while the cursor rests near a window edge.
@@ -7153,6 +7309,7 @@ impl RaLauncherApp {
                 "RED ALERT",
                 &self.lobby,
                 self.lan_scan.as_ref(),
+                &self.lobby_screen,
                 self.lobby_error.as_deref(),
                 &self.ready_tracker.roster(),
                 self.width,
@@ -7884,6 +8041,7 @@ impl ApplicationHandler for RaLauncherApp {
                         Key::Character(text) => match text.as_str() {
                             "r" | "R" => self.lobby.toggle_role(),
                             "l" | "L" => self.toggle_lan_scan(),
+                            "d" | "D" => self.toggle_lobby_directory(),
                             "[" => self.lobby.adjust_port(-1),
                             "]" => self.lobby.adjust_port(1),
                             other => {
@@ -11169,6 +11327,146 @@ mod tests {
             0,
             "ready lines are out-of-band: no lockstep frame is applied"
         );
+    }
+
+    #[test]
+    fn ready_tracker_polls_in_udp_loop() {
+        // End-to-end across the real UDP socket pair: the sender's `send_ready`
+        // hook emits a line that the receiver's poll loop consumes into its
+        // `ReadyTracker` roster, in both the RA and the TD lane.
+        let mut host = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        host.enable_network(&NetworkSetup {
+            role: "host".to_string(),
+            join: None,
+            port: 0,
+            peers: Vec::new(),
+            bind: "127.0.0.1".to_string(),
+            advertised: None,
+        })
+        .unwrap();
+        let host_addr = host.network.as_ref().unwrap().socket.local_addr().unwrap();
+
+        // A join peer that only knows about the host address.
+        let mut join = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
+        join.enable_network(&NetworkSetup {
+            role: "join".to_string(),
+            join: Some(host_addr.to_string()),
+            port: 0,
+            peers: Vec::new(),
+            bind: "127.0.0.1".to_string(),
+            advertised: None,
+        })
+        .unwrap();
+
+        // Send hook: the joiner's local flag goes out to its known peers.
+        join.ready_tracker.set_expected(2);
+        join.send_ready(true);
+        assert_eq!(
+            join.ready_tracker.is_ready("Player1"),
+            true,
+            "the send hook records the local flag"
+        );
+
+        // Poll hook: the host's UDP loop folds the datagram into its roster.
+        let mut marked = false;
+        for _ in 0..100 {
+            host.poll_network();
+            if host.ready_tracker.is_ready("Player1") {
+                marked = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(marked, "the host poll loop marks the peer ready");
+        assert_eq!(
+            host.ready_tracker.roster(),
+            vec![("Player1".to_string(), true)]
+        );
+        assert_eq!(
+            host.network.as_ref().unwrap().applied,
+            0,
+            "ready lines stay out of the lockstep stream"
+        );
+
+        // The TD lane mirrors the same hooks through `send_td_ready`.
+        let mut td = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+            LauncherOptions::default(),
+        )
+        .expect("TD launcher app");
+        td.enable_td_network(&NetworkSetup {
+            role: "join".to_string(),
+            join: Some(host_addr.to_string()),
+            port: 0,
+            peers: Vec::new(),
+            bind: "127.0.0.1".to_string(),
+            advertised: None,
+        })
+        .unwrap();
+        td.send_td_ready(true);
+        let mut td_marked = false;
+        for _ in 0..100 {
+            host.poll_network();
+            if host.ready_tracker.roster().len() > 1 {
+                td_marked = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            td_marked,
+            "the TD ready hook reaches the host's UDP poll loop too"
+        );
+    }
+
+    #[test]
+    fn lobby_lists_directory_services() {
+        // The lobby screen renders what the directory reports, and falls back
+        // to a direct-connect row (never a panic) when no directory answers.
+        let mut screen = lobby_screen::LobbyScreen::new("10.0.0.5:47890");
+        let found = lobby_screen::compose_scan(
+            lobby_screen::RefreshMode::Http,
+            Ok(vec![
+                lobby_screen::LobbyListing {
+                    name: "Nod vs GDI".to_string(),
+                    address: "10.0.0.9:47870".to_string(),
+                    occupancy: "2/4".to_string(),
+                    game: "TD",
+                    source: lobby_screen::ListingSource::Directory,
+                },
+                lobby_screen::LobbyListing {
+                    name: "Allied Assault".to_string(),
+                    address: "10.0.0.10:47872".to_string(),
+                    occupancy: "1/2".to_string(),
+                    game: "RA",
+                    source: lobby_screen::ListingSource::Directory,
+                },
+            ]),
+            &screen.manual_address,
+        );
+        screen.mode = lobby_screen::RefreshMode::Http;
+        screen.scan = found;
+        assert_eq!(screen.row_count(), 3, "two directory rows + the manual row");
+        assert!(screen.scan.has_directory_rows());
+        assert!(!screen.scan.used_fallback());
+        let rows = screen.scan.render_rows();
+        assert!(rows[0].contains("Nod vs GDI"), "rows: {rows:?}");
+        assert!(rows[2].contains("DIRECT"), "rows: {rows:?}");
+
+        // Second half: a directory that never answers degrades to a direct
+        // connect instead of failing the lobby.
+        let fallback = lobby_screen::refresh_lobby_with(
+            lobby_screen::RefreshMode::Http,
+            "10.0.0.5:47890",
+            &["127.0.0.1:1".to_string()],
+        );
+        assert!(fallback.used_fallback());
+        assert_eq!(fallback.listings.len(), 1);
+        assert_eq!(fallback.listings[0].address, "10.0.0.5:47890");
+        assert!(fallback.has_directory_rows() == false);
     }
 
     #[test]

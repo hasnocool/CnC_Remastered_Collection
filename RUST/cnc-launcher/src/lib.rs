@@ -1,6 +1,7 @@
 //! C&C Launcher library
 
 pub mod lobby;
+pub mod lobby_screen;
 pub mod menu;
 pub mod ready;
 pub mod types;

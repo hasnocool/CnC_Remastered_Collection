@@ -25,6 +25,7 @@ cnc-red-alert = { path = "../cnc-red-alert" }
 cnc-renderer = { path = "../cnc-renderer" }
 cnc-audio = { path = "../cnc-audio" }
 cnc-asset = { path = "../cnc-asset" }
+cnc-net-directory = { path = "../cnc-net-directory" }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
