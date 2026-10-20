@@ -13,13 +13,14 @@
 use std::collections::VecDeque;
 
 use crate::mixer::Channel;
+use crate::speech::SpeechCategory;
 
 /// One EVA speech event, in the original `VoxType` order.
 ///
 /// Commented-out entries in the original enum are omitted, so the discriminant
 /// values here are NOT the original `VOX_*` integers; use
 /// [`EvaLine::voice_file`] or [`EvaLine::from_name`] rather than casting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EvaLine {
     MissionAccomplished,
     MissionFailed,
@@ -146,6 +147,259 @@ impl EvaLine {
             .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
             .map(|(_, line)| *line)
     }
+}
+
+/// Every Tiberian Dawn EVA line, in the engine's `VOX_*` order.
+impl EvaLine {
+    /// Number of lines in the TD vocabulary.
+    pub const COUNT: usize = SPEECH_FILES.len();
+
+    /// The `VOX_*` ordinal of the line inside the original `Speech[]` table.
+    ///
+    /// The table is transcribed in engine order, so the index is the engine's
+    /// own enum value (`VOX_ACCOMPLISHED` = 0 ... `VOX_ENEMY_UNIT` = 44).
+    pub fn voice_id(self) -> u16 {
+        SPEECH_FILES
+            .iter()
+            .position(|(_, line)| *line == self)
+            .expect("every EvaLine has a speech entry") as u16
+    }
+
+    /// The line stored at a `VOX_*` ordinal.
+    pub fn from_voice_id(id: u16) -> Option<Self> {
+        SPEECH_FILES.get(id as usize).map(|(_, line)| *line)
+    }
+
+    /// Speech category, and through it the playback priority.
+    pub fn category(self) -> SpeechCategory {
+        use SpeechCategory::{
+            BaseAttack, Combat, Economy, Info, Intel, Mission, Power, Production, Superweapon,
+            Warning,
+        };
+        match self {
+            Self::MissionAccomplished | Self::MissionFailed | Self::BattleControlTerminated => {
+                Mission
+            }
+            Self::BuildingInProgress
+            | Self::ConstructionComplete
+            | Self::UnitReady
+            | Self::NewConstructionOptions
+            | Self::CannotDeployHere
+            | Self::Building
+            | Self::UnableToBuildMore
+            | Self::PrimaryBuildingSelected => Production,
+            Self::InsufficientFunds | Self::NeedMoreFunds | Self::SilosNeeded => Economy,
+            Self::LowPower | Self::InsufficientPower => Power,
+            Self::BaseUnderAttack => BaseAttack,
+            Self::IncomingMissile
+            | Self::EnemyPlanesApproaching
+            | Self::IncomingNuclearWeapon
+            | Self::TransportSighted
+            | Self::EnemyApproaching => Warning,
+            Self::NodBuildingCaptured | Self::GdiBuildingCaptured => Intel,
+            Self::IonCannonCharging
+            | Self::IonCannonReady
+            | Self::NuclearWeaponAvailable
+            | Self::NuclearWeaponLaunched
+            | Self::AirstrikeReady => Superweapon,
+            Self::GdiUnitDestroyed
+            | Self::NodUnitDestroyed
+            | Self::CivilianKilled
+            | Self::UnitLost
+            | Self::StructureLost
+            | Self::EnemyUnitDestroyed
+            | Self::EnemyStructureDestroyed
+            | Self::GdiStructureDestroyed
+            | Self::NodStructureDestroyed => Combat,
+            Self::ReinforcementsArrived
+            | Self::Canceled
+            | Self::NeedHarvester
+            | Self::SelectTarget
+            | Self::NotReady
+            | Self::TransportLoaded
+            | Self::OnHold
+            | Self::Repairing => Info,
+        }
+    }
+
+    /// The EVA line a game event produces, if any.
+    pub fn from_event(event: TdEvent) -> Option<Self> {
+        let line = match event {
+            TdEvent::MissionAccomplished => Self::MissionAccomplished,
+            TdEvent::MissionFailed => Self::MissionFailed,
+            TdEvent::ProductionStarted => Self::BuildingInProgress,
+            TdEvent::ConstructionComplete => Self::ConstructionComplete,
+            TdEvent::UnitReady => Self::UnitReady,
+            TdEvent::NewConstructionOptions => Self::NewConstructionOptions,
+            TdEvent::CannotDeployHere => Self::CannotDeployHere,
+            TdEvent::UnitDestroyed(faction) => match faction {
+                TdFaction::Gdi => Self::GdiUnitDestroyed,
+                TdFaction::Nod => Self::NodUnitDestroyed,
+                TdFaction::Civilian => Self::CivilianKilled,
+            },
+            TdEvent::InsufficientFunds => Self::InsufficientFunds,
+            TdEvent::NeedMoreFunds => Self::NeedMoreFunds,
+            TdEvent::BattleControlTerminated => Self::BattleControlTerminated,
+            TdEvent::ReinforcementsArrived => Self::ReinforcementsArrived,
+            TdEvent::Canceled => Self::Canceled,
+            TdEvent::Building => Self::Building,
+            TdEvent::LowPower => Self::LowPower,
+            TdEvent::InsufficientPower => Self::InsufficientPower,
+            TdEvent::BaseUnderAttack => Self::BaseUnderAttack,
+            TdEvent::IncomingMissile => Self::IncomingMissile,
+            TdEvent::EnemyPlanesApproaching => Self::EnemyPlanesApproaching,
+            TdEvent::IncomingNuclearWeapon => Self::IncomingNuclearWeapon,
+            TdEvent::UnableToBuildMore => Self::UnableToBuildMore,
+            TdEvent::PrimaryBuildingSelected => Self::PrimaryBuildingSelected,
+            TdEvent::BuildingCaptured(faction) => match faction {
+                TdFaction::Gdi => Self::GdiBuildingCaptured,
+                TdFaction::Nod => Self::NodBuildingCaptured,
+                TdFaction::Civilian => return None,
+            },
+            TdEvent::IonCannonCharging => Self::IonCannonCharging,
+            TdEvent::IonCannonReady => Self::IonCannonReady,
+            TdEvent::NuclearWeaponAvailable => Self::NuclearWeaponAvailable,
+            TdEvent::NuclearWeaponLaunched => Self::NuclearWeaponLaunched,
+            TdEvent::UnitLost => Self::UnitLost,
+            TdEvent::StructureLost => Self::StructureLost,
+            TdEvent::NeedHarvester => Self::NeedHarvester,
+            TdEvent::SelectTarget => Self::SelectTarget,
+            TdEvent::AirstrikeReady => Self::AirstrikeReady,
+            TdEvent::NotReady => Self::NotReady,
+            TdEvent::TransportSighted => Self::TransportSighted,
+            TdEvent::TransportLoaded => Self::TransportLoaded,
+            TdEvent::EnemyApproaching => Self::EnemyApproaching,
+            TdEvent::SilosNeeded => Self::SilosNeeded,
+            TdEvent::OnHold => Self::OnHold,
+            TdEvent::Repairing => Self::Repairing,
+            TdEvent::StructureDestroyed(faction) => match faction {
+                TdFaction::Gdi => Self::GdiStructureDestroyed,
+                TdFaction::Nod => Self::NodStructureDestroyed,
+                TdFaction::Civilian => Self::EnemyStructureDestroyed,
+            },
+            TdEvent::EnemyUnitDestroyed => Self::EnemyUnitDestroyed,
+        };
+        Some(line)
+    }
+}
+
+impl crate::speech::EvaVocabulary for EvaLine {
+    fn voice_id(self) -> u16 {
+        self.voice_id()
+    }
+
+    fn sample_file(self) -> Option<&'static str> {
+        Some(EvaLine::voice_file(self))
+    }
+
+    fn category(self) -> SpeechCategory {
+        self.category()
+    }
+}
+
+/// Which army an event concerns (Tiberian Dawn speaks lines that name the
+/// side of the destroyed/captured object).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TdFaction {
+    /// Global Defense Initiative.
+    Gdi,
+    /// Brotherhood of Nod.
+    Nod,
+    /// Civilians / neutral houses (they share the generic "enemy" lines).
+    Civilian,
+}
+
+/// A game event that can make EVA speak.
+///
+/// This is the presentation-facing vocabulary: the simulation reports what
+/// happened and this layer decides which line (if any) it produces. Side
+/// dependent lines take a [`TdFaction`] instead of inventing one event per
+/// side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TdEvent {
+    /// Mission won.
+    MissionAccomplished,
+    /// Mission lost.
+    MissionFailed,
+    /// Production request accepted while the factory is busy
+    /// (`VOX_NO_FACTORY`).
+    ProductionStarted,
+    /// A structure finished building.
+    ConstructionComplete,
+    /// A unit rolled off the line.
+    UnitReady,
+    /// A new build option became available.
+    NewConstructionOptions,
+    /// Deployment of the selected unit is impossible here.
+    CannotDeployHere,
+    /// A unit belonging to `faction` died.
+    UnitDestroyed(TdFaction),
+    /// The player cannot pay for the current production.
+    InsufficientFunds,
+    /// The player is close to broke.
+    NeedMoreFunds,
+    /// The mission/network session is over.
+    BattleControlTerminated,
+    /// Friendly reinforcements arrived.
+    ReinforcementsArrived,
+    /// The player canceled production.
+    Canceled,
+    /// A structure is being built (production tick).
+    Building,
+    /// Power is below demand.
+    LowPower,
+    /// Power is not enough for the current load at all.
+    InsufficientPower,
+    /// Own base is taking damage.
+    BaseUnderAttack,
+    /// An enemy missile is inbound.
+    IncomingMissile,
+    /// Enemy aircraft are inbound.
+    EnemyPlanesApproaching,
+    /// An enemy nuclear warhead is inbound.
+    IncomingNuclearWeapon,
+    /// The build queue is full.
+    UnableToBuildMore,
+    /// A primary structure was selected.
+    PrimaryBuildingSelected,
+    /// A building belonging to `faction` was captured by the player.
+    BuildingCaptured(TdFaction),
+    /// The ion cannon started charging.
+    IonCannonCharging,
+    /// The ion cannon is ready to fire.
+    IonCannonReady,
+    /// A nuclear weapon became available.
+    NuclearWeaponAvailable,
+    /// A nuclear weapon was launched.
+    NuclearWeaponLaunched,
+    /// An own unit was lost.
+    UnitLost,
+    /// An own structure was lost.
+    StructureLost,
+    /// No harvester is available.
+    NeedHarvester,
+    /// The player must pick a target for a support power.
+    SelectTarget,
+    /// Airstrike support is ready.
+    AirstrikeReady,
+    /// A requested support power is not ready yet.
+    NotReady,
+    /// An enemy transport was spotted.
+    TransportSighted,
+    /// An enemy transport finished loading.
+    TransportLoaded,
+    /// Enemy forces are approaching.
+    EnemyApproaching,
+    /// More silos are needed for storage.
+    SilosNeeded,
+    /// The current production is on hold.
+    OnHold,
+    /// A structure is being repaired.
+    Repairing,
+    /// A structure belonging to `faction` was destroyed by the player.
+    StructureDestroyed(TdFaction),
+    /// Any enemy unit was destroyed.
+    EnemyUnitDestroyed,
 }
 
 /// Mirrors `Speak()` + `Speak_AI()`: one playing line plus one queued line.
