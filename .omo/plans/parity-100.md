@@ -238,7 +238,7 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): `transport_loads_unloads_deterministically` passes; destroyed transport kills passengers.
   QA scenarios: happy — Chinook boards 5 infantry, unloads at waypoint; failure — overloaded boarding rejected deterministically, Evidence .omo/evidence/task-16-parity-100.log
   Commit: Y | feat(td): passenger transports
-- [ ] 17. TD defensive buildings fire
+- [x] 17. TD defensive buildings fire
   What to do / Must NOT do: Add weapon field to Building; `update_attacks` (game.rs:1825) iterates buildings too; roster additions GTWR/DTWR towers, Obelisk, SAML, GASF, Airdrome, Fix; turret rotation for buildings; bibs for placement. Do NOT reuse unit turret code where ROF/recharge differs (SAML missile cadence per BUILDING.CPP).
   Parallelization: Wave 2 (TD chain) | Blocked by: 16 | Blocks: 18 | Parallel with: 22–31 (RA chain)
   References: RUST/cnc-tiberian-dawn/src/building.rs (311 L, no weapon today); RUST/cnc-tiberian-dawn/src/game.rs:1825 (update_attacks units-only); TIBERIANDAWN/BUILDING.CPP (towers, Obelisk, SAML); AUDIT §3.5, §4 defensive-buildings row (cited by category).
