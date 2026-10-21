@@ -2596,79 +2596,6 @@ impl Game {
         }
     }
 
-    /// Board an infantry passenger into a transport (APC/Chinook).
-    ///
-    /// Returns false if the transport or passenger is invalid, already aboard,
-    /// or the transport is at capacity.
-    fn apply_board(&mut self, player: u8, transport_idx: usize, passenger_idx: usize) -> bool {
-        let transport_ok = self
-            .units
-            .get(transport_idx)
-            .is_some_and(|t| t.is_transport() && t.owner == player && t.is_alive());
-        if !transport_ok {
-            return false;
-        }
-
-        let passenger_ok = self
-            .units
-            .get(passenger_idx)
-            .is_some_and(|p| p.is_alive() && p.is_infantry() && p.owner == player);
-        if !passenger_ok {
-            return false;
-        }
-
-        let (already_aboard, at_capacity) = {
-            let t = &self.units[transport_idx];
-            (t.has_passenger(passenger_idx), !t.has_cargo_space())
-        };
-        if already_aboard || at_capacity {
-            return false;
-        }
-
-        self.units[transport_idx].passengers.push(passenger_idx);
-        true
-    }
-
-    /// Unload a passenger from a transport at a sub-cell slot.
-    ///
-    /// Returns false if the transport is invalid, the slot is out of range,
-    /// or there is no passenger at that slot.
-    fn apply_unload(&mut self, player: u8, transport_idx: usize, slot: u8) -> bool {
-        let transport_ok = self
-            .units
-            .get(transport_idx)
-            .is_some_and(|t| t.is_transport() && t.owner == player && t.is_alive());
-        if !transport_ok {
-            return false;
-        }
-
-        if slot >= 5 {
-            return false;
-        }
-
-        let (passenger_idx, cell, offset) = {
-            let t = &self.units[transport_idx];
-            let idx = match t.passengers.get(slot as usize) {
-                Some(&idx) => idx,
-                None => return false,
-            };
-            let cell = Self::unit_cell(t);
-            let offset = Unit::stopping_offset(slot).expect("slot < 5");
-            (idx, cell, offset)
-        };
-
-        self.units[transport_idx].passengers.remove(slot as usize);
-
-        let passenger = &mut self.units[passenger_idx];
-        passenger.position = Self::cell_center(cell.x, cell.y) + offset;
-        passenger.set_sub_cell(Some(slot));
-        passenger.target = None;
-        passenger.ordered = false;
-        passenger.clear_path();
-
-        true
-    }
-
     /// Kill every passenger aboard a destroyed transport.
     ///
     /// Called when a transport is destroyed so its cargo does not survive
@@ -3005,11 +2932,10 @@ impl Game {
             if !building.is_powered {
                 continue;
             }
-            let Some(weapon_type) = structure.defence_weapon() else {
+            let Some(weapon) = &building.weapon else {
                 continue;
             };
-            let stats = weapon_type.stats();
-            let range = Fixed16_16::from_f32(stats.range_px());
+            let range = weapon.range;
             let anti_air_only = structure.is_anti_air();
 
             if building.reload > Fixed16_16::ZERO {
@@ -3047,8 +2973,22 @@ impl Game {
                 continue;
             };
 
-            hits.push((target_index, stats.damage, stats.warhead()));
-            building.reload = Fixed16_16::from_f32(stats.cooldown_seconds());
+            // Rotate turret to face the target (SAML missile cadence per BUILDING.CPP).
+            let target_position = targets[target_index].0;
+            let offset = target_position - building.position;
+            let desired = offset.y.to_f32().atan2(offset.x.to_f32());
+            let diff = (desired - building.turret_facing).rem_euclid(std::f32::consts::TAU);
+            let turn_rate = weapon.rate_of_fire.to_f32() * 2.0; // turrets track at 2x ROF
+            let step = diff.clamp(-turn_rate, turn_rate);
+            building.turret_facing =
+                (building.turret_facing + step).rem_euclid(std::f32::consts::TAU);
+
+            hits.push((
+                target_index,
+                weapon.damage.int(),
+                weapon.warhead.warhead_type,
+            ));
+            building.reload = weapon.rate_of_fire;
         }
 
         for (index, damage, warhead) in hits {
@@ -7242,6 +7182,68 @@ mod prerequisite_tests {
         assert_eq!(
             game.units[index].health, before,
             "non-defences have no weapon"
+        );
+    }
+
+    #[test]
+    fn tower_fires_without_player_units() {
+        // A guard tower must fire at an enemy in range even when the player
+        // has no units and issues no orders — base defence fires autonomously.
+        let mut game = Game::new("defence", 32, 32);
+        let tower = add_defence(&mut game, 0, StructureType::GuardTower, Vec2i::new(10, 10));
+
+        assert!(
+            game.buildings[tower].weapon.is_some(),
+            "guard tower carries a weapon"
+        );
+
+        let mut enemy = Unit::new(UnitType::Jeep, Game::cell_center(12, 10), 1);
+        enemy.health = enemy.max_health;
+        let before = enemy.health;
+        let enemy_index = game.units.len();
+        game.units.push(enemy);
+
+        // No player commands are issued — the tower still fires.
+        game.update_defence_combat(Fixed16_16::from_int(1));
+        assert!(
+            game.units[enemy_index].health < before,
+            "the tower fires at the enemy without player input"
+        );
+        assert!(
+            game.buildings[tower].reload > Fixed16_16::ZERO,
+            "firing must start the reload timer"
+        );
+    }
+
+    #[test]
+    fn obelisk_charge_up_cadence_pinned() {
+        // Obelisk of Nod fires its laser at a fixed cadence pinned to its
+        // BUILDING.CPP stats: ROF 90 ticks → ~1.55s reload at 60 ticks/sec.
+        let mut game = Game::new("defence", 32, 32);
+        add_defence(&mut game, 0, StructureType::Obelisk, Vec2i::new(10, 10));
+
+        let mut enemy = Unit::new(UnitType::Jeep, Game::cell_center(12, 10), 1);
+        enemy.health = enemy.max_health;
+        let before = enemy.health;
+        game.units.push(enemy);
+
+        // First shot fires immediately (reload starts at zero in add_defence).
+        game.update_defence_combat(Fixed16_16::from_int(1));
+        assert!(
+            game.units[0].health < before,
+            "obelisk fires on the first tick when in range"
+        );
+        assert!(
+            game.buildings[0].reload > Fixed16_16::ZERO,
+            "obelisk starts its charge-up reload after firing"
+        );
+
+        // While reloading, the obelisk holds fire.
+        let after_first = game.units[0].health;
+        game.update_defence_combat(Fixed16_16::from_int(1));
+        assert_eq!(
+            game.units[0].health, after_first,
+            "obelisk does not fire while reloading"
         );
     }
 

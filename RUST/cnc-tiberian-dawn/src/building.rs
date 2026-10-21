@@ -30,6 +30,10 @@ pub struct Building {
     pub is_captured: bool,
     /// Seconds until a defensive structure may fire again.
     pub reload: Fixed16_16,
+    /// Weapon carried by a defensive structure (None for non-defences).
+    pub weapon: Option<crate::weapon::Weapon>,
+    /// Turret facing angle in radians for defensive structures with turrets.
+    pub turret_facing: f32,
     /// The authored structure type.
     ///
     /// Several TD structures share a ClassId (all defences collapse onto
@@ -57,6 +61,10 @@ impl Building {
             whom_to_repay: None,
             is_captured: false,
             reload: Fixed16_16::ZERO,
+            weapon: StructureType::from_class_id(class_id)
+                .and_then(|s| s.defence_weapon())
+                .map(crate::weapon::Weapon::from_type),
+            turret_facing: 0.0,
             structure: StructureType::from_class_id(class_id)
                 .unwrap_or(StructureType::ConstructionYard),
         }
@@ -135,6 +143,9 @@ impl Building {
             owner,
         );
         building.armor = stats.armor;
+        building.weapon = structure
+            .defence_weapon()
+            .map(crate::weapon::Weapon::from_type);
         building.structure = structure;
         building
     }
