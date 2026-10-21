@@ -217,7 +217,7 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): test `campaign_flow_advances_and_carries_credits` (TD) passes; RA variant passes once 31 lands.
   QA scenarios: happy — scripted 2-mission run carries credits+surviving units; failure — missing next mission file → completion screen, no panic, Evidence .omo/evidence/task-13-parity-100.log
   Commit: Y | feat(launcher): original campaign progression + carry-over
-- [ ] 14. TD roster completion
+- [x] 14. TD roster completion
   What to do / Must NOT do: Add missing UnitType/AircraftType rows (APC, Artillery, MLRS, Stealth Tank, Flame Tank, SSM Launcher, Mobile HQ, Grenadier, Rocket Soldier, Flamethrower, Chem Warrior, Chinook/Transport, mission dinosaurs) with stats pinned to TIBERIANDAWN/UNIT.CPP + IDATA constants; MCV deploy gets a simulation apply arm (Command::Deploy is wire-only). Do NOT touch RA crate files.
   Parallelization: Wave 2 (TD chain head) | Blocked by: 1 | Blocks: 15 | Parallel with: 22–31 (RA chain)
   References: RUST/cnc-tiberian-dawn/src/td_rules.rs:613–641 (existing row pattern + test style); AUDIT §4 roster row (~⅔ of roster missing — reconcile the exact row count against UNIT.CPP at authoring time); TIBERIANDAWN/UNIT.CPP, AIRCRAFT.CPP (stats source).
@@ -280,7 +280,7 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): same seed + command stream → identical outcomes across two processes (`seeded_rolls_identical_across_processes`); replay v3 header round-trips seed + rng state.
   QA scenarios (name the exact tool + invocation): happy — two identical games with rolls stay identical incl. CRC; failure — seed mismatch → deterministic desync error naming the frame, Evidence .omo/evidence/task-22-parity-100.log
   Commit: Y | feat(ra): seeded deterministic combat RNG
-- [ ] 23. RA verses/armor combat
+- [x] 23. RA verses/armor combat
   What to do / Must NOT do: Apply `WarheadRule.verses_percent` + ArmorType per GameUnit/GameStructure (exists in cnc-core rules.rs:345, unconsumed by RA); miss/deflection rolls via todo-22 RNG; splash radius per warhead. Do NOT touch TD damage code.
   Parallelization: Wave 2 (RA chain) | Blocked by: 22 | Blocks: 24 | Parallel with: 14–21 (TD chain)
   References: RUST/cnc-core/src/rules.rs:345 (verses_percent — live anchor :347/:376 at review rr3; re-verify at todo 1; 12 tests); REDALERT/WARHEAD.CPP, COMBAT.CPP; RUST/cnc-red-alert/src/game.rs:1852–2046 (flat damage today); AUDIT §3.4, §5 combat row.
