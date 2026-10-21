@@ -18,10 +18,12 @@ pub mod tiles;
 pub mod tools;
 pub mod ui;
 
+pub use cnc_core::{TaskForce, TeamMember, TeamObjective, TeamType};
 pub use generator::{fbm, generate, value_noise, MapGenSettings, OverlayType, TerrainType};
 pub use history::{
-    AddTrigger, AddWaypoint, EditCommand, EraseObject, History, MoveObject, PaintCells,
-    PlaceObject, RemoveObject, RemoveTrigger, RemoveWaypoint, SetObjectOwner, SetTrigger,
+    AddTaskForce, AddTeamType, AddTrigger, AddWaypoint, EditCommand, EraseObject, History,
+    MoveObject, PaintCells, PlaceObject, RemoveObject, RemoveTaskForce, RemoveTeamType,
+    RemoveTrigger, RemoveWaypoint, SetObjectOwner, SetTeamType, SetTrigger,
 };
 pub use map::{HouseEntry, ImportKind, MapModel, MapObject, Trigger, Waypoint, TILE_SIZE};
 pub use original::{ObjectOrigin, OriginalImport, PreservedSection};

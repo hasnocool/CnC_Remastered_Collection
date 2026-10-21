@@ -6,7 +6,7 @@
 //! `undo` is exact, including object ids.
 
 use cnc_ai::AgentDefinition;
-use cnc_core::ClassId;
+use cnc_core::{ClassId, TaskForce, TeamType};
 
 use crate::map::{MapModel, MapObject, Trigger, Waypoint};
 
@@ -716,6 +716,143 @@ impl EditCommand for SetAgent {
         if let Some(slot) = model.agent_mut(self.before.id) {
             *slot = self.before.clone();
         }
+    }
+}
+
+/// Add a team type.
+pub struct AddTeamType {
+    pub team_type: TeamType,
+}
+
+impl EditCommand for AddTeamType {
+    fn label(&self) -> String {
+        format!("Add team type {}", self.team_type.name)
+    }
+
+    fn apply(&mut self, model: &mut MapModel) {
+        self.team_type.id = model.add_team_type(self.team_type.clone());
+    }
+
+    fn undo(&mut self, model: &mut MapModel) {
+        model.remove_team_type(self.team_type.id);
+    }
+}
+
+/// Remove a team type, remembering its position for an exact undo.
+pub struct RemoveTeamType {
+    pub team_type: TeamType,
+    pub index: usize,
+}
+
+impl RemoveTeamType {
+    pub fn new(model: &MapModel, id: u32) -> Option<Self> {
+        let index = model.team_types.iter().position(|tt| tt.id == id)?;
+        Some(Self {
+            team_type: model.team_types[index].clone(),
+            index,
+        })
+    }
+}
+
+impl EditCommand for RemoveTeamType {
+    fn label(&self) -> String {
+        format!("Delete team type {}", self.team_type.name)
+    }
+
+    fn apply(&mut self, model: &mut MapModel) {
+        model.remove_team_type(self.team_type.id);
+    }
+
+    fn undo(&mut self, model: &mut MapModel) {
+        let index = self.index.min(model.team_types.len());
+        let _ = index;
+        model.add_team_type(self.team_type.clone());
+    }
+}
+
+/// Edit a team type's authored fields as one undo step.
+pub struct SetTeamType {
+    pub before: TeamType,
+    pub after: TeamType,
+}
+
+impl SetTeamType {
+    pub fn new(model: &MapModel, after: TeamType) -> Option<Self> {
+        let before = model.team_type(after.id)?.clone();
+        if before == after {
+            None
+        } else {
+            Some(Self { before, after })
+        }
+    }
+}
+
+impl EditCommand for SetTeamType {
+    fn label(&self) -> String {
+        format!("Edit team type {}", self.after.name)
+    }
+
+    fn apply(&mut self, model: &mut MapModel) {
+        if let Some(slot) = model.team_type_mut(self.after.id) {
+            *slot = self.after.clone();
+        }
+    }
+
+    fn undo(&mut self, model: &mut MapModel) {
+        if let Some(slot) = model.team_type_mut(self.before.id) {
+            *slot = self.before.clone();
+        }
+    }
+}
+
+/// Add a taskforce.
+pub struct AddTaskForce {
+    pub taskforce: TaskForce,
+}
+
+impl EditCommand for AddTaskForce {
+    fn label(&self) -> String {
+        format!("Add taskforce {}", self.taskforce.name)
+    }
+
+    fn apply(&mut self, model: &mut MapModel) {
+        let name = model.add_taskforce(self.taskforce.clone());
+        self.taskforce.name = name;
+    }
+
+    fn undo(&mut self, model: &mut MapModel) {
+        model.remove_taskforce(&self.taskforce.name);
+    }
+}
+
+/// Remove a taskforce by name, remembering it for an exact undo.
+pub struct RemoveTaskForce {
+    pub taskforce: TaskForce,
+    pub index: usize,
+}
+
+impl RemoveTaskForce {
+    pub fn new(model: &MapModel, name: &str) -> Option<Self> {
+        let index = model.taskforces.iter().position(|tf| tf.name == name)?;
+        Some(Self {
+            taskforce: model.taskforces[index].clone(),
+            index,
+        })
+    }
+}
+
+impl EditCommand for RemoveTaskForce {
+    fn label(&self) -> String {
+        format!("Delete taskforce {}", self.taskforce.name)
+    }
+
+    fn apply(&mut self, model: &mut MapModel) {
+        model.remove_taskforce(&self.taskforce.name);
+    }
+
+    fn undo(&mut self, model: &mut MapModel) {
+        let _ = self.index;
+        model.add_taskforce(self.taskforce.clone());
     }
 }
 

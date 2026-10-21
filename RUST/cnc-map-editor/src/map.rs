@@ -5,7 +5,7 @@
 //! directly, so undo/redo stays consistent (see AGENTS.md).
 
 use cnc_ai::AgentDefinition;
-use cnc_core::{ClassId, IniFile, IniValue, Vec2, Vec2i};
+use cnc_core::{ClassId, IniFile, IniValue, TaskForce, TeamType, Vec2, Vec2i};
 use std::collections::HashMap;
 
 /// Pixels per map cell, matching the engines' ICON_PIXEL_W.
@@ -93,6 +93,10 @@ pub struct MapModel {
     pub player_starts: Vec<Vec2i>,
     /// Authored waypoints, ordered by id.
     pub waypoints: Vec<Waypoint>,
+    /// Authored taskforces ([TaskForces] section).
+    pub taskforces: Vec<TaskForce>,
+    /// Authored team types ([TeamTypes] section).
+    pub team_types: Vec<TeamType>,
     /// Original-format import metadata (sections + object origins), when this
     /// model was opened from a retail scenario. `None` for editor-authored maps.
     pub original: Option<crate::original::OriginalImport>,
@@ -163,6 +167,8 @@ impl MapModel {
             agents: Vec::new(),
             player_starts: Vec::new(),
             waypoints: Vec::new(),
+            taskforces: Vec::new(),
+            team_types: Vec::new(),
             original: None,
             next_object_id: 1,
             next_agent_id: 1,
@@ -308,6 +314,81 @@ impl MapModel {
         Some(self.waypoints.remove(index))
     }
 
+    /// Team type with the given id.
+    pub fn team_type(&self, id: u32) -> Option<&TeamType> {
+        self.team_types.iter().find(|team_type| team_type.id == id)
+    }
+
+    /// Mutable team type with the given id.
+    pub fn team_type_mut(&mut self, id: u32) -> Option<&mut TeamType> {
+        self.team_types
+            .iter_mut()
+            .find(|team_type| team_type.id == id)
+    }
+
+    /// Insert a team type, assigning a fresh id when `id` is zero.
+    pub fn add_team_type(&mut self, mut team_type: TeamType) -> u32 {
+        if team_type.id == 0 {
+            team_type.id = self.team_types.iter().map(|tt| tt.id).max().unwrap_or(0) + 1;
+        }
+        let id = team_type.id;
+        // Keep the embedded taskforce name aligned with a matching authored
+        // taskforce when possible, so the [TaskForces] reference resolves.
+        if team_type.taskforce.name.is_empty() {
+            if let Some(tf) = self.taskforces.first() {
+                team_type.taskforce.name = tf.name.clone();
+            }
+        }
+        self.team_types.push(team_type);
+        self.team_types.sort_by_key(|tt| tt.id);
+        id
+    }
+
+    /// Remove the team type with the given id, returning it for an exact undo.
+    pub fn remove_team_type(&mut self, id: u32) -> Option<TeamType> {
+        let index = self
+            .team_types
+            .iter()
+            .position(|team_type| team_type.id == id)?;
+        Some(self.team_types.remove(index))
+    }
+
+    /// Insert a taskforce, ensuring a unique name.
+    pub fn add_taskforce(&mut self, mut taskforce: TaskForce) -> String {
+        if taskforce.name.is_empty() {
+            let mut index = self.taskforces.len();
+            loop {
+                let candidate = format!("TaskForce{index}");
+                if !self.taskforces.iter().any(|tf| tf.name == candidate) {
+                    taskforce.name = candidate;
+                    break;
+                }
+                index += 1;
+            }
+        } else if self.taskforces.iter().any(|tf| tf.name == taskforce.name) {
+            let base = taskforce.name.clone();
+            let mut index = 1;
+            loop {
+                let candidate = format!("{base}{index}");
+                if !self.taskforces.iter().any(|tf| tf.name == candidate) {
+                    taskforce.name = candidate;
+                    break;
+                }
+                index += 1;
+            }
+        }
+        let name = taskforce.name.clone();
+        self.taskforces.push(taskforce);
+        self.taskforces.sort_by(|a, b| a.name.cmp(&b.name));
+        name
+    }
+
+    /// Remove a taskforce by name, returning it for an exact undo.
+    pub fn remove_taskforce(&mut self, name: &str) -> Option<TaskForce> {
+        let index = self.taskforces.iter().position(|tf| tf.name == name)?;
+        Some(self.taskforces.remove(index))
+    }
+
     /// Structural problems that block saving.
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
@@ -384,6 +465,24 @@ impl MapModel {
                 }
             }
             issues.extend(agent.validate(&[]));
+        }
+        let mut team_type_ids = std::collections::BTreeSet::new();
+        for team_type in &self.team_types {
+            if !team_type_ids.insert(team_type.id) {
+                issues.push(format!("duplicate team type id {}", team_type.id));
+            }
+            if !team_type.owner.is_house() {
+                issues.push(format!(
+                    "team type {} has unknown owner house {:?}",
+                    team_type.name, team_type.owner
+                ));
+            }
+        }
+        let mut taskforce_names = std::collections::BTreeSet::new();
+        for taskforce in &self.taskforces {
+            if !taskforce_names.insert(taskforce.name.clone()) {
+                issues.push(format!("duplicate taskforce name {}", taskforce.name));
+            }
         }
         issues
     }
@@ -493,6 +592,110 @@ impl MapModel {
             out.push_str(&format!("Owner={}\n", encode_ini_text(&agent.owner)));
             out.push_str(&format!("Doctrine={}\n", encode_ini_text(&agent.doctrine)));
             out.push_str(&format!("Script={}\n", encode_ini_text(&agent.script)));
+        }
+        // [TaskForces] + per-taskforce sections (original dialect consumed by
+        // cnc_core::taskforces_from_ini).
+        if !self.taskforces.is_empty() {
+            let mut taskforces = self.taskforces.clone();
+            taskforces.sort_by(|a, b| a.name.cmp(&b.name));
+            out.push_str("[TaskForces]\n");
+            for (index, taskforce) in taskforces.iter().enumerate() {
+                let token = if taskforce.name.is_empty() {
+                    format!("TaskForce{index}")
+                } else {
+                    taskforce.name.clone()
+                };
+                out.push_str(&format!("{}={}\n", index, token));
+            }
+            for (index, taskforce) in taskforces.iter().enumerate() {
+                let token = if taskforce.name.is_empty() {
+                    format!("TaskForce{index}")
+                } else {
+                    taskforce.name.clone()
+                };
+                out.push_str(&format!("\n[{}]\n", token));
+                for (member_index, member) in taskforce.members.iter().enumerate() {
+                    out.push_str(&format!(
+                        "{}={},{}\n",
+                        member_index, member.class as u32, member.count
+                    ));
+                }
+            }
+        }
+        // [TeamTypes] + per-team sections.
+        if !self.team_types.is_empty() {
+            let mut team_types = self.team_types.clone();
+            team_types.sort_by_key(|tt| tt.id);
+            out.push_str("[TeamTypes]\n");
+            for (index, team_type) in team_types.iter().enumerate() {
+                out.push_str(&format!("{}=TeamType{}\n", index, index));
+                let _ = team_type;
+            }
+            for (index, team_type) in team_types.iter().enumerate() {
+                out.push_str(&format!("\n[TeamType{}]\n", index));
+                out.push_str(&format!("Name={}\n", encode_ini_text(&team_type.name)));
+                let house_token = match team_type.owner {
+                    cnc_core::ClassId::HouseGDI => "GDI",
+                    cnc_core::ClassId::HouseNod => "Nod",
+                    cnc_core::ClassId::HouseAllies => "Allies",
+                    cnc_core::ClassId::HouseSoviet => "Soviet",
+                    _ => "Neutral",
+                };
+                out.push_str(&format!("Owner={}\n", house_token));
+                // Resolve the taskforce token by matching members.
+                let token = self
+                    .taskforces
+                    .iter()
+                    .find(|tf| tf.members == team_type.taskforce.members)
+                    .map(|tf| {
+                        if tf.name.is_empty() {
+                            // fallback by index
+                            format!(
+                                "TaskForce{}",
+                                self.taskforces
+                                    .iter()
+                                    .position(|x| x.members == tf.members)
+                                    .unwrap_or(0)
+                            )
+                        } else {
+                            tf.name.clone()
+                        }
+                    })
+                    .unwrap_or_else(|| {
+                        if self.taskforces.is_empty() {
+                            String::new()
+                        } else {
+                            self.taskforces[0].name.clone()
+                        }
+                    });
+                if !token.is_empty() {
+                    out.push_str(&format!("TaskForce={}\n", token));
+                }
+                // Mission
+                let mission = match &team_type.objective {
+                    cnc_core::TeamObjective::None => "none".to_string(),
+                    cnc_core::TeamObjective::Unload => "unload".to_string(),
+                    cnc_core::TeamObjective::Move { cell } => format!("move:{}", cell),
+                    cnc_core::TeamObjective::Attack => "attack".to_string(),
+                    cnc_core::TeamObjective::Guard => "guard".to_string(),
+                    cnc_core::TeamObjective::Patrol { waypoints } => {
+                        let args: Vec<String> = waypoints.iter().map(|w| w.to_string()).collect();
+                        format!("patrol:{}", args.join(","))
+                    }
+                    cnc_core::TeamObjective::Hunt => "hunt".to_string(),
+                    cnc_core::TeamObjective::Retreat => "retreat".to_string(),
+                    cnc_core::TeamObjective::EnterObject => "enter".to_string(),
+                };
+                out.push_str(&format!("Mission={}\n", mission));
+                out.push_str(&format!(
+                    "Active={}\n",
+                    if team_type.active_at_start {
+                        "Yes"
+                    } else {
+                        "No"
+                    }
+                ));
+            }
         }
         out
     }
@@ -889,6 +1092,14 @@ impl MapModel {
             }
         }
         model.waypoints = parse_waypoints(&ini, width, height);
+        // Consume cnc-core's [TaskForces]/[TeamTypes] parsers rather than
+        // re-implementing the dialect.
+        if let Ok(taskforces) = cnc_core::taskforces_from_ini(&ini) {
+            model.taskforces = taskforces;
+        }
+        if let Ok(team_types) = cnc_core::team_types_from_ini(&ini) {
+            model.team_types = team_types;
+        }
         for (section_name, target) in [
             ("Terrain", Target::Terrain),
             ("Overlay", Target::Overlay),
