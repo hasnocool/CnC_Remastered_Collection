@@ -21,7 +21,9 @@ pub use ai::{AIDifficulty, ProductionWeight, AI};
 pub use building::{Building, Factory, PowerPlant, Refinery};
 pub use carryover::Carryover;
 pub use events::{names as event_names, OutcomeKind, SuperweaponKind};
-pub use game::{Buildable, Game, GameStatus, SidebarOption, SubCellError, TransportError};
+pub use game::{
+    ApplyCommandError, Buildable, Game, GameStatus, SidebarOption, SubCellError, TransportError,
+};
 pub use house::House;
 pub use map::{CellGrid, Map};
 pub use mission::{

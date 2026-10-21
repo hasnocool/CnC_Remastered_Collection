@@ -327,6 +327,8 @@ pub struct LockstepSession {
     pub replay: Vec<NetCommand>,
     /// Checksum recorded for each executed frame.
     pub checksums: Vec<(u32, u32)>,
+    /// World-state CRC recorded for each executed frame (FRAMESYNC-style).
+    pub state_crcs: Vec<(u32, u64)>,
 }
 
 impl LockstepSession {
@@ -336,6 +338,7 @@ impl LockstepSession {
             players: players.max(1),
             replay: Vec::new(),
             checksums: Vec::new(),
+            state_crcs: Vec::new(),
         }
     }
 
@@ -380,6 +383,21 @@ impl LockstepSession {
         executed
     }
 
+    /// Advance until (but not past) the target frame, recording world-state CRCs
+    /// from `game` for every frame.
+    pub fn advance_to_with_game(
+        &mut self,
+        target: u32,
+        game: &crate::game::Game,
+    ) -> Vec<NetCommand> {
+        let mut executed = Vec::new();
+        while self.current_frame() <= target {
+            let commands = self.advance_with_game(game);
+            executed.extend(commands);
+        }
+        executed
+    }
+
     fn record(&mut self, frame: u32, commands: &[NetCommand]) {
         if commands.is_empty() {
             return;
@@ -408,6 +426,51 @@ impl LockstepSession {
             .is_some_and(|(_, local)| *local != remote_checksum)
     }
 
+    /// Record a world-state CRC for `frame`, exchanged like FRAMESYNC.
+    pub fn record_state_crc(&mut self, frame: u32, crc: u64) {
+        if let Some(entry) = self.state_crcs.iter_mut().find(|(f, _)| *f == frame) {
+            entry.1 = crc;
+        } else {
+            self.state_crcs.push((frame, crc));
+        }
+    }
+
+    /// World-state CRC recorded for `frame`, if any.
+    pub fn state_crc(&self, frame: u32) -> Option<u64> {
+        self.state_crcs
+            .iter()
+            .find(|(recorded, _)| *recorded == frame)
+            .map(|(_, crc)| *crc)
+    }
+
+    /// Compare this session's world-state CRC against a remote peer's value.
+    pub fn desynced_state(&self, frame: u32, remote_crc: u64) -> bool {
+        self.state_crcs
+            .iter()
+            .find(|(recorded, _)| *recorded == frame)
+            .is_some_and(|(_, local)| *local != remote_crc)
+    }
+
+    /// Alias for [`Self::desynced_state`].
+    pub fn state_desynced(&self, frame: u32, remote_crc: u64) -> bool {
+        self.desynced_state(frame, remote_crc)
+    }
+
+    /// Alias for [`Self::desynced_state`].
+    pub fn desynced_crc(&self, frame: u32, remote_crc: u64) -> bool {
+        self.desynced_state(frame, remote_crc)
+    }
+
+    /// Advance using a game to record its world-state CRC for the frame.
+    pub fn advance_with_game(&mut self, game: &crate::game::Game) -> Vec<NetCommand> {
+        let frame = self.current_frame();
+        let commands = self.queue.pop_frame(frame);
+        self.record(frame, &commands);
+        self.record_state_crc(frame, game.state_crc());
+        self.queue.current_frame = frame.saturating_add(1);
+        commands
+    }
+
     /// Rebuild a session from a recorded replay (used by save/load and tests).
     pub fn from_replay(players: u8, replay: Vec<NetCommand>) -> Self {
         let mut session = Self::new(players);
@@ -425,15 +488,28 @@ pub struct NetPacket {
     pub frame: u32,
     pub commands: Vec<NetCommand>,
     pub checksum: u32,
+    /// World-state CRC carried by this frame (FRAMESYNC-style), beyond the
+    /// command-stream checksum above. Zero when unset.
+    pub state_crc: u64,
 }
 
 impl NetPacket {
     pub fn new(sequence: u32, frame: u32, commands: Vec<NetCommand>) -> Self {
+        Self::with_state_crc(sequence, frame, commands, 0)
+    }
+
+    pub fn with_state_crc(
+        sequence: u32,
+        frame: u32,
+        commands: Vec<NetCommand>,
+        state_crc: u64,
+    ) -> Self {
         let mut packet = Self {
             sequence,
             frame,
             commands,
             checksum: 0,
+            state_crc,
         };
         packet.checksum = packet.calculate_checksum();
         packet
@@ -447,6 +523,7 @@ impl NetPacket {
         for command in &self.commands {
             mix(&mut hash, command.hash());
         }
+        mix(&mut hash, self.state_crc);
         (hash & 0xFFFF_FFFF) as u32
     }
 
@@ -459,8 +536,8 @@ impl NetPacket {
 pub const PACKET_MAGIC: [u8; 4] = *b"CNCP";
 /// Wire protocol version.
 pub const PACKET_VERSION: u8 = 1;
-/// Header: magic(4) + version(1) + reserved(1) + sequence(4) + frame(4) + checksum(4) + count(2).
-const PACKET_HEADER_LEN: usize = 20;
+/// Header: magic(4) + version(1) + reserved(1) + sequence(4) + frame(4) + checksum(4) + count(2) + state_crc(8).
+const PACKET_HEADER_LEN: usize = 28;
 /// Defensive cap so a malformed datagram cannot force a huge allocation.
 const MAX_COMMANDS_PER_PACKET: usize = 4_096;
 
@@ -743,6 +820,7 @@ impl NetPacket {
         push_u32(&mut out, self.frame);
         push_u32(&mut out, self.calculate_checksum());
         push_u16(&mut out, self.commands.len() as u16);
+        out.extend_from_slice(&self.state_crc.to_le_bytes());
         for command in &self.commands {
             let mut payload = Vec::new();
             command.command.encode_payload(&mut payload)?;
@@ -775,6 +853,12 @@ impl NetPacket {
         if count > MAX_COMMANDS_PER_PACKET {
             return Err(PacketError::TooManyCommands(count));
         }
+        let state_crc_bytes = reader.take(8)?;
+        let state_crc = u64::from_le_bytes(
+            state_crc_bytes
+                .try_into()
+                .map_err(|_| PacketError::Truncated)?,
+        );
 
         let mut commands = Vec::with_capacity(count);
         for _ in 0..count {
@@ -795,6 +879,7 @@ impl NetPacket {
             frame,
             commands,
             checksum,
+            state_crc,
         };
         if !packet.verify() {
             return Err(PacketError::ChecksumMismatch);
@@ -1799,6 +1884,7 @@ pub struct LiveSession {
     pub relay: MeshRelay,
     pub queue: CommandQueue,
     pub frame: u32,
+    pub state_crc: u64,
     next_sequence: u32,
 }
 
@@ -1832,6 +1918,7 @@ impl LiveSession {
             relay: MeshRelay::new(256),
             queue: CommandQueue::new(),
             frame: 0,
+            state_crc: 0,
             next_sequence: 0,
         })
     }
@@ -1911,7 +1998,12 @@ impl LiveSession {
     /// Drain this frame's commands, build the packet and advance the frame.
     pub fn advance(&mut self) -> Result<AdvanceBatch, PacketError> {
         let commands = self.queue.pop_frame(self.frame);
-        let packet = NetPacket::new(self.next_sequence, self.frame, commands.clone());
+        let packet = NetPacket::with_state_crc(
+            self.next_sequence,
+            self.frame,
+            commands.clone(),
+            self.state_crc,
+        );
         self.next_sequence = self.next_sequence.wrapping_add(1);
         self.frame = self.frame.wrapping_add(1);
         let bytes = packet.encode()?;
