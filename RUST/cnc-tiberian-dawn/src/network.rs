@@ -64,6 +64,16 @@ pub enum Command {
     PlaceBuilding {
         location: Vec2,
     },
+    /// Board a passenger into a transport (APC/Chinook).
+    Board {
+        transport: u32,
+        passenger: u32,
+    },
+    /// Unload a passenger from a transport at a sub-cell slot.
+    Unload {
+        transport: u32,
+        slot: u8,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +131,8 @@ impl Command {
             Command::RepairStructure { .. } => 13,
             Command::CancelProduction => 14,
             Command::PlaceBuilding { .. } => 15,
+            Command::Board { .. } => 16,
+            Command::Unload { .. } => 17,
         }
     }
 
@@ -168,6 +180,17 @@ impl Command {
             Command::RepairStructure { building } => mix(&mut hash, u64::from(*building)),
             Command::CancelProduction => {}
             Command::PlaceBuilding { location } => mix_vec2(&mut hash, location),
+            Command::Board {
+                transport,
+                passenger,
+            } => {
+                mix(&mut hash, u64::from(*transport));
+                mix(&mut hash, u64::from(*passenger));
+            }
+            Command::Unload { transport, slot } => {
+                mix(&mut hash, u64::from(*transport));
+                mix(&mut hash, u64::from(*slot));
+            }
         }
         hash
     }
@@ -617,6 +640,17 @@ impl Command {
             Command::RepairStructure { building } => push_u32(out, *building),
             Command::CancelProduction => {}
             Command::PlaceBuilding { location } => push_vec2(out, location),
+            Command::Board {
+                transport,
+                passenger,
+            } => {
+                push_u32(out, *transport);
+                push_u32(out, *passenger);
+            }
+            Command::Unload { transport, slot } => {
+                push_u32(out, *transport);
+                out.push(*slot);
+            }
         }
         Ok(())
     }
@@ -679,6 +713,14 @@ impl Command {
             14 => Command::CancelProduction,
             15 => Command::PlaceBuilding {
                 location: reader.vec2()?,
+            },
+            16 => Command::Board {
+                transport: reader.u32()?,
+                passenger: reader.u32()?,
+            },
+            17 => Command::Unload {
+                transport: reader.u32()?,
+                slot: reader.u8()?,
             },
             other => return Err(PacketError::InvalidTag(other)),
         };

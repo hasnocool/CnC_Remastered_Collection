@@ -92,6 +92,180 @@ impl std::fmt::Display for TransportError {
 
 impl std::error::Error for TransportError {}
 
+impl Game {
+    /// CARGO.CPP semantics: board an infantry passenger onto a transport.
+    ///
+    /// LIFO boarding order (CargoClass::Attach). The passenger must be alive
+    /// infantry, not already aboard, and the transport must have cargo space.
+    /// On success the passenger is added to the transport's passenger list and
+    /// its sub-cell is cleared (it is no longer on the map).
+    pub fn load_transport_at(
+        &mut self,
+        transport_idx: usize,
+        passenger_idx: usize,
+    ) -> Result<(), TransportError> {
+        let transport = self
+            .units
+            .get(transport_idx)
+            .ok_or(TransportError::InvalidTransportIndex)?;
+        if !transport.is_transport() {
+            return Err(TransportError::NotATransport);
+        }
+        if !transport.is_alive() {
+            return Err(TransportError::TransportNotAlive);
+        }
+
+        let passenger = self
+            .units
+            .get(passenger_idx)
+            .ok_or(TransportError::InvalidPassengerIndex)?;
+        if !passenger.is_alive() {
+            return Err(TransportError::PassengerNotAlive);
+        }
+        if !passenger.is_infantry() {
+            return Err(TransportError::PassengerNotInfantry);
+        }
+        if transport.has_passenger(passenger_idx) {
+            return Err(TransportError::AlreadyAboard);
+        }
+        if !transport.has_cargo_space() {
+            return Err(TransportError::AtCapacity);
+        }
+
+        // Safe: all validation passed, both indexes are in bounds.
+        let transport = self.units.get_mut(transport_idx).unwrap();
+        transport.passengers.push(passenger_idx);
+
+        let passenger = self.units.get_mut(passenger_idx).unwrap();
+        passenger.set_sub_cell(None);
+
+        Ok(())
+    }
+
+    /// CARGO.CPP semantics: unload all passengers from a transport at `cell`.
+    ///
+    /// Passengers exit in LIFO order (last aboard, first out). Each passenger
+    /// is assigned a sub-cell slot at the target cell via
+    /// [`Game::assign_infantry_sub_cell`]. If the cell is full, no passengers
+    /// are unloaded and `CellFull` is returned.
+    pub fn unload_transport_at(
+        &mut self,
+        transport_idx: usize,
+        cell: Vec2i,
+    ) -> Result<(), TransportError> {
+        // Validate transport and clone passenger indices (immutable borrows only).
+        let passengers = {
+            let transport = self
+                .units
+                .get(transport_idx)
+                .ok_or(TransportError::InvalidTransportIndex)?;
+            if !transport.is_transport() {
+                return Err(TransportError::NotATransport);
+            }
+            if !transport.is_alive() {
+                return Err(TransportError::TransportNotAlive);
+            }
+            if transport.passengers.is_empty() {
+                return Err(TransportError::NoPassengers);
+            }
+            let existing = self.infantry_in_cell(cell).len();
+            if existing + transport.passengers.len() > 5 {
+                return Err(TransportError::CellFull);
+            }
+            transport.passengers.clone()
+        };
+
+        // Clear the transport's passenger list.
+        {
+            let transport = self
+                .units
+                .get_mut(transport_idx)
+                .ok_or(TransportError::InvalidTransportIndex)?;
+            transport.passengers.clear();
+        }
+
+        // Unload in LIFO order: last aboard, first out.
+        for &passenger_idx in passengers.iter().rev() {
+            let passenger = self.units.get(passenger_idx);
+            let Some(passenger) = passenger else {
+                continue;
+            };
+            if !passenger.is_alive() || !passenger.is_infantry() {
+                continue;
+            }
+
+            self.assign_infantry_sub_cell(passenger_idx, cell)
+                .map_err(|_| TransportError::CellFull)?;
+        }
+
+        Ok(())
+    }
+
+    /// Kill all passengers aboard transports that have been destroyed.
+    ///
+    /// Called from [`Game::update`] each tick so that passengers die with
+    /// their transport (CARGO.CPP semantics).
+    pub fn kill_passengers_of_destroyed_transports(&mut self) {
+        let destroyed_transports: Vec<(usize, Vec<usize>)> = self
+            .units
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, unit)| {
+                if unit.is_transport() && !unit.is_alive() && !unit.passengers.is_empty() {
+                    let passengers = unit.passengers.clone();
+                    Some((idx, passengers))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (transport_idx, passengers) in destroyed_transports {
+            // Clear the transport's passenger list first.
+            if let Some(transport) = self.units.get_mut(transport_idx) {
+                transport.passengers.clear();
+            }
+
+            // Kill each passenger that is still alive.
+            for &passenger_idx in &passengers {
+                if let Some(passenger) = self.units.get_mut(passenger_idx) {
+                    if passenger.is_alive() {
+                        passenger.health = Fixed16_16::ZERO;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Game-side arm of `Command::Board`: validate ownership and load a
+    /// passenger onto a transport. Returns true when the order had effect.
+    pub fn apply_board(&mut self, player: u8, transport_idx: usize, passenger_idx: usize) -> bool {
+        let transport = match self.units.get(transport_idx) {
+            Some(t) if t.owner == player && t.is_transport() && t.is_alive() => t,
+            _ => return false,
+        };
+        if transport.has_passenger(passenger_idx) {
+            return false;
+        }
+        self.load_transport_at(transport_idx, passenger_idx).is_ok()
+    }
+
+    /// Game-side arm of `Command::Unload`: validate ownership and unload
+    /// all passengers from a transport at its current cell. Returns true when
+    /// the order had effect.
+    pub fn apply_unload(&mut self, player: u8, transport_idx: usize, _slot: u8) -> bool {
+        let transport = match self.units.get(transport_idx) {
+            Some(t) if t.owner == player && t.is_transport() && t.is_alive() => t,
+            _ => return false,
+        };
+        if transport.passengers.is_empty() {
+            return false;
+        }
+        let cell = Self::unit_cell(transport);
+        self.unload_transport_at(transport_idx, cell).is_ok()
+    }
+}
+
 /// Short-lived superweapon blast visual.
 #[derive(Clone, Copy, Debug)]
 pub struct Blast {
@@ -1633,6 +1807,7 @@ impl Game {
         }
 
         self.update_production(delta_time);
+        self.kill_passengers_of_destroyed_transports();
         self.update_death_announcements();
         self.announce_base_attack();
         self.announce_insufficient_funds();
@@ -2410,10 +2585,116 @@ impl Game {
                 }
                 false
             }
+            Command::Board {
+                transport,
+                passenger,
+            } => self.apply_board(player, *transport as usize, *passenger as usize),
+            Command::Unload { transport, slot } => {
+                self.apply_unload(player, *transport as usize, *slot)
+            }
             _ => crate::network::apply_sabotage(self, command, player),
         }
     }
 
+    /// Board an infantry passenger into a transport (APC/Chinook).
+    ///
+    /// Returns false if the transport or passenger is invalid, already aboard,
+    /// or the transport is at capacity.
+    fn apply_board(&mut self, player: u8, transport_idx: usize, passenger_idx: usize) -> bool {
+        let transport_ok = self
+            .units
+            .get(transport_idx)
+            .is_some_and(|t| t.is_transport() && t.owner == player && t.is_alive());
+        if !transport_ok {
+            return false;
+        }
+
+        let passenger_ok = self
+            .units
+            .get(passenger_idx)
+            .is_some_and(|p| p.is_alive() && p.is_infantry() && p.owner == player);
+        if !passenger_ok {
+            return false;
+        }
+
+        let (already_aboard, at_capacity) = {
+            let t = &self.units[transport_idx];
+            (t.has_passenger(passenger_idx), !t.has_cargo_space())
+        };
+        if already_aboard || at_capacity {
+            return false;
+        }
+
+        self.units[transport_idx].passengers.push(passenger_idx);
+        true
+    }
+
+    /// Unload a passenger from a transport at a sub-cell slot.
+    ///
+    /// Returns false if the transport is invalid, the slot is out of range,
+    /// or there is no passenger at that slot.
+    fn apply_unload(&mut self, player: u8, transport_idx: usize, slot: u8) -> bool {
+        let transport_ok = self
+            .units
+            .get(transport_idx)
+            .is_some_and(|t| t.is_transport() && t.owner == player && t.is_alive());
+        if !transport_ok {
+            return false;
+        }
+
+        if slot >= 5 {
+            return false;
+        }
+
+        let (passenger_idx, cell, offset) = {
+            let t = &self.units[transport_idx];
+            let idx = match t.passengers.get(slot as usize) {
+                Some(&idx) => idx,
+                None => return false,
+            };
+            let cell = Self::unit_cell(t);
+            let offset = Unit::stopping_offset(slot).expect("slot < 5");
+            (idx, cell, offset)
+        };
+
+        self.units[transport_idx].passengers.remove(slot as usize);
+
+        let passenger = &mut self.units[passenger_idx];
+        passenger.position = Self::cell_center(cell.x, cell.y) + offset;
+        passenger.set_sub_cell(Some(slot));
+        passenger.target = None;
+        passenger.ordered = false;
+        passenger.clear_path();
+
+        true
+    }
+
+    /// Kill every passenger aboard a destroyed transport.
+    ///
+    /// Called when a transport is destroyed so its cargo does not survive
+    /// the wreck.
+    fn kill_transport_passengers(&mut self, transport_idx: usize) {
+        let passenger_indices = {
+            let transport = &self.units[transport_idx];
+            transport.passengers.clone()
+        };
+
+        for passenger_idx in passenger_indices {
+            if let Some(passenger) = self.units.get_mut(passenger_idx) {
+                passenger.health = Fixed16_16::ZERO;
+                passenger.is_selected = false;
+                passenger.attack_target = None;
+                passenger.special_target = None;
+                passenger.target = None;
+                passenger.ordered = false;
+                passenger.clear_path();
+            }
+        }
+
+        if let Some(transport) = self.units.get_mut(transport_idx) {
+            transport.passengers.clear();
+        }
+    }
     /// INFANTRY.CPP:660-740 `InfantryClass::Per_Cell_Process`: resolve the
     /// MISSION_SABOTAGE and MISSION_CAPTURE arrivals, then run the BUILDING.CPP
     /// demolition timeout.
@@ -2535,6 +2816,10 @@ impl Game {
             unit.clear_path();
             if let Some(house) = self.houses.get_mut(unit.owner as usize) {
                 house.remove_unit(index as u32);
+            }
+            // Passengers die with a destroyed transport
+            if unit.is_transport() {
+                self.kill_transport_passengers(index);
             }
         }
     }
@@ -7400,5 +7685,254 @@ mod prerequisite_tests {
         // Deploying an out-of-range index must fail.
         let result = game.apply_command(0, &Command::Deploy { unit: 9999 });
         assert!(!result, "deploying out-of-range unit must fail");
+    }
+
+    #[test]
+    fn transport_loads_unloads_deterministically() {
+        // Happy path: Chinook boards 5 infantry, unloads at waypoint.
+        let cell = Game::cell_origin(5, 5);
+        let mut game = Game::new("test", 32, 32);
+        game.units.clear();
+        game.houses.clear();
+        game.buildings.clear();
+        game.projectiles.clear();
+        game.houses
+            .push(House::new(ClassId::HouseGDI, "GDI".to_string()));
+
+        let chinook_idx = game.units.len();
+        game.units.push(Unit::new(UnitType::Chinook, cell, 0));
+        game.units[chinook_idx].owner = 0;
+
+        let mut passenger_indices = Vec::new();
+        for _ in 0..5 {
+            let idx = game.units.len();
+            game.units.push(Unit::new(
+                UnitType::InfantryE1,
+                Game::cell_origin(10, 10),
+                0,
+            ));
+            game.units[idx].owner = 0;
+            game.load_transport_at(chinook_idx, idx).unwrap();
+            passenger_indices.push(idx);
+        }
+
+        // At capacity: 5th boarding rejected.
+        let overflow_idx = game.units.len();
+        game.units.push(Unit::new(
+            UnitType::InfantryE1,
+            Game::cell_origin(11, 11),
+            0,
+        ));
+        game.units[overflow_idx].owner = 0;
+        assert_eq!(
+            game.load_transport_at(chinook_idx, overflow_idx),
+            Err(TransportError::AtCapacity)
+        );
+
+        // All 5 aboard.
+        assert_eq!(game.units[chinook_idx].passenger_count(), 5);
+
+        // Unload at waypoint cell.
+        let unload_cell = Vec2i::new(7, 7);
+        game.unload_transport_at(chinook_idx, unload_cell).unwrap();
+        assert_eq!(game.units[chinook_idx].passenger_count(), 0);
+
+        // All passengers are back on the map at the unload cell.
+        for idx in &passenger_indices {
+            let passenger = &game.units[*idx];
+            assert!(passenger.is_alive(), "passenger {idx} must be alive");
+            assert_eq!(
+                Game::unit_cell(passenger),
+                Vec2i::new(7, 7),
+                "passenger {idx} must be at unload cell"
+            );
+        }
+    }
+
+    #[test]
+    fn transport_overload_boarding_rejected() {
+        let cell = Game::cell_origin(5, 5);
+        let mut game = Game::new("test", 32, 32);
+        game.units.clear();
+        game.houses.clear();
+        game.buildings.clear();
+        game.projectiles.clear();
+        game.houses
+            .push(House::new(ClassId::HouseGDI, "GDI".to_string()));
+
+        let apc_idx = game.units.len();
+        game.units.push(Unit::new(UnitType::APC, cell, 0));
+        game.units[apc_idx].owner = 0;
+
+        // Fill capacity with 5 infantry.
+        for _ in 0..5 {
+            let idx = game.units.len();
+            game.units.push(Unit::new(
+                UnitType::InfantryE1,
+                Game::cell_origin(10, 10),
+                0,
+            ));
+            game.units[idx].owner = 0;
+            game.load_transport_at(apc_idx, idx).unwrap();
+        }
+
+        // 6th boarding must be rejected deterministically.
+        let overflow_idx = game.units.len();
+        game.units.push(Unit::new(
+            UnitType::InfantryE1,
+            Game::cell_origin(11, 11),
+            0,
+        ));
+        game.units[overflow_idx].owner = 0;
+        assert_eq!(
+            game.load_transport_at(apc_idx, overflow_idx),
+            Err(TransportError::AtCapacity)
+        );
+    }
+
+    #[test]
+    fn transport_destroyed_kills_passengers() {
+        let cell = Game::cell_origin(5, 5);
+        let mut game = Game::new("test", 32, 32);
+        game.units.clear();
+        game.houses.clear();
+        game.buildings.clear();
+        game.projectiles.clear();
+        game.houses
+            .push(House::new(ClassId::HouseGDI, "GDI".to_string()));
+
+        let chinook_idx = game.units.len();
+        game.units.push(Unit::new(UnitType::Chinook, cell, 0));
+        game.units[chinook_idx].owner = 0;
+
+        let mut passenger_indices = Vec::new();
+        for _ in 0..3 {
+            let idx = game.units.len();
+            game.units.push(Unit::new(
+                UnitType::InfantryE1,
+                Game::cell_origin(10, 10),
+                0,
+            ));
+            game.units[idx].owner = 0;
+            game.load_transport_at(chinook_idx, idx).unwrap();
+            passenger_indices.push(idx);
+        }
+
+        // Destroy the transport.
+        game.units[chinook_idx].health = Fixed16_16::ZERO;
+
+        // Kill passengers of destroyed transports.
+        game.kill_passengers_of_destroyed_transports();
+
+        // Transport passenger list cleared.
+        assert_eq!(game.units[chinook_idx].passenger_count(), 0);
+
+        // All passengers dead.
+        for idx in &passenger_indices {
+            assert!(!game.units[*idx].is_alive(), "passenger {idx} must be dead");
+        }
+    }
+
+    #[test]
+    fn transport_board_non_infantry_rejected() {
+        let cell = Game::cell_origin(5, 5);
+        let mut game = Game::new("test", 32, 32);
+        game.units.clear();
+        game.houses.clear();
+        game.buildings.clear();
+        game.projectiles.clear();
+        game.houses
+            .push(House::new(ClassId::HouseGDI, "GDI".to_string()));
+
+        let apc_idx = game.units.len();
+        game.units.push(Unit::new(UnitType::APC, cell, 0));
+        game.units[apc_idx].owner = 0;
+
+        let tank_idx = game.units.len();
+        game.units.push(Unit::new(
+            UnitType::MediumTank,
+            Game::cell_origin(10, 10),
+            0,
+        ));
+        game.units[tank_idx].owner = 0;
+
+        assert_eq!(
+            game.load_transport_at(apc_idx, tank_idx),
+            Err(TransportError::PassengerNotInfantry)
+        );
+    }
+
+    #[test]
+    fn transport_board_dead_passenger_rejected() {
+        let cell = Game::cell_origin(5, 5);
+        let mut game = Game::new("test", 32, 32);
+        game.units.clear();
+        game.houses.clear();
+        game.buildings.clear();
+        game.projectiles.clear();
+        game.houses
+            .push(House::new(ClassId::HouseGDI, "GDI".to_string()));
+
+        let apc_idx = game.units.len();
+        game.units.push(Unit::new(UnitType::APC, cell, 0));
+        game.units[apc_idx].owner = 0;
+
+        let dead_idx = game.units.len();
+        game.units.push(Unit::new(
+            UnitType::InfantryE1,
+            Game::cell_origin(10, 10),
+            0,
+        ));
+        game.units[dead_idx].health = Fixed16_16::ZERO;
+        game.units[dead_idx].owner = 0;
+
+        assert_eq!(
+            game.load_transport_at(apc_idx, dead_idx),
+            Err(TransportError::PassengerNotAlive)
+        );
+    }
+
+    #[test]
+    fn transport_unload_cell_full_rejected() {
+        let cell = Game::cell_origin(5, 5);
+        let mut game = Game::new("test", 32, 32);
+        game.units.clear();
+        game.houses.clear();
+        game.buildings.clear();
+        game.projectiles.clear();
+        game.houses
+            .push(House::new(ClassId::HouseGDI, "GDI".to_string()));
+
+        let apc_idx = game.units.len();
+        game.units.push(Unit::new(UnitType::APC, cell, 0));
+        game.units[apc_idx].owner = 0;
+
+        // Board 1 infantry.
+        let passenger_idx = game.units.len();
+        game.units.push(Unit::new(
+            UnitType::InfantryE1,
+            Game::cell_origin(10, 10),
+            0,
+        ));
+        game.units[passenger_idx].owner = 0;
+        game.load_transport_at(apc_idx, passenger_idx).unwrap();
+
+        // Fill the unload cell with 5 infantry already.
+        for _ in 0..5 {
+            let idx = game.units.len();
+            game.units
+                .push(Unit::new(UnitType::InfantryE1, Game::cell_origin(7, 7), 0));
+            game.units[idx].owner = 0;
+            game.assign_infantry_sub_cell(idx, Vec2i::new(7, 7))
+                .unwrap();
+        }
+
+        // Unload into full cell must fail.
+        assert_eq!(
+            game.unload_transport_at(apc_idx, Vec2i::new(7, 7)),
+            Err(TransportError::CellFull)
+        );
+        // Passenger still aboard.
+        assert_eq!(game.units[apc_idx].passenger_count(), 1);
     }
 }

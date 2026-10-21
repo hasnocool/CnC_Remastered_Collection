@@ -224,14 +224,14 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): td_rules roster tests pin every new row vs C++ constants; per-unit in-game spawn/build/fire test `td_roster_per_unit_checks` in game.rs.
   QA scenarios (name the exact tool + invocation): happy — each unit builds, moves, fires per pinned stats; failure — unknown ini name → deterministic error (never silently skipped), Evidence .omo/evidence/task-14-parity-100.log
   Commit: Y | feat(td): complete unit roster
-- [ ] 15. TD sub-cell infantry + stances + doors
+- [x] 15. TD sub-cell infantry + stances + doors
   What to do / Must NOT do: Implement StoppingCoordAbs 5-slot per-cell infantry groups (CONST.CPP:59–65), stance states incl. prone, door-tile open/close semantics for transport pairs. Replaces the `reserved_cell` single-occupancy mitigation. Snapshot format must version-bump (new per-cell sub-slots).
   Parallelization: Wave 2 (TD chain) | Blocked by: 14 | Blocks: 16 | Parallel with: 22–31 (RA chain)
   References: TIBERIANDAWN/CONST.CPP:59–65 (StoppingCoordAbs); TIBERIANDAWN/INFANTRY.CPP:2891–2901 region; RUST/cnc-tiberian-dawn/src/unit.rs; AUDIT §4 infantry row.
   Acceptance criteria (agent-executable): 5 infantry occupy one cell deterministically; save/replay round-trip includes sub-cell positions; `five_infantry_share_cell_deterministically` passes.
   QA scenarios: happy — five E1 in one cell with pinned offsets; failure — 6th entry rejected deterministically, Evidence .omo/evidence/task-15-parity-100.log
   Commit: Y | feat(td): sub-cell infantry groups
-- [ ] 16. TD transports/cargo system
+- [x] 16. TD transports/cargo system
   What to do / Must NOT do: CARGO.CPP semantics: passenger list field, boarding/unload orders for APC/Chinook/Transport (roster from 14); passengers die with destroyed transport; dock/unload at waypoint. Do NOT implement paradrops here (todo 38).
   Parallelization: Wave 2 (TD chain) | Blocked by: 15 | Blocks: 17,38 | Parallel with: 22–31 (RA chain)
   References: TIBERIANDAWN/CARGO.CPP; AUDIT §3.6 (transport passengers MISSING — both engines), §4 transports row (cited by category; audit row numbers drift).

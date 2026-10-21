@@ -114,3 +114,24 @@
 {"event":"task-completed","plan":".omo/plans/parity-100.md","task":"51. Tools completion + MIX tilesets + team colors","session_id":"codex:main","tier":"MEDIUM","worker":"lane-07ab28e3","verdict":"confirmed (orchestrator verified)","commands":["cargo test -p cnc-procgen","cargo fmt -p cnc-procgen --check","cargo clippy -p cnc-procgen --all-targets"],"evidence":["commit 0687417 feat(procgen): tileset and expansion modules", "tileset/: CNC32 procedural tileset generator (terrain transitions, roads/shorelines/cliffs/walls, pack builder + validation)", "expansion/: campaign/cutscene/ui/briefing modules", "cnc-procgen tests pass (full_pack_build_passes_all_gates), fmt/clippy clean"],"adversarial_classes":[{"class":"stale_state","probe":"verified tileset_pack exports all expected types","result":"confirmed"},{"class":"dirty_worktree","probe":"explicit pathspec commits","result":"clean"}],"cleanup":"none"}
 {"event":"task-completed","todo":23,"task":"RA verses/armor combat","commit":"bbcb9d5","gate":"tests_passed,fmt_ok,clippy_ok"}
 {"event":"task-completed","plan":".omo/plans/parity-100.md","task":"todo-14-td-roster-completion","session_id":"codex:main","commands":["cargo test -p cnc-tiberian-dawn --lib roster","cargo test -p cnc-tiberian-dawn","cargo fmt -p cnc-tiberian-dawn","cargo clippy -p cnc-tiberian-dawn","git commit c0f608e"],"artifact":"RUST/cnc-tiberian-dawn/src/{unit.rs,game.rs}","adversarial_verify":{"verdict":"confirmed","evidence":["319 TD lib tests pass (incl. td_roster_per_unit_checks, td_deploy_command_sets_deployed_flag)","fmt clean","clippy clean for cnc-tiberian-dawn","commit c0f608e on master"]},"cleanup":[]}
+{
+ "event": "task-completed",
+ "plan": ".omo/plans/parity-100.md",
+ "task": "15. TD sub-cell infantry + stances + doors",
+ "session_id": "session-3e5cf539-c53f-4bde-96e9-870310416cb9",
+ "commands": [
+  "cargo test -p cnc-tiberian-dawn",
+  "cargo fmt -p cnc-tiberian-dawn",
+  "cargo clippy -p cnc-tiberian-dawn",
+  "git commit -F .commit-msg-15.txt RUST/cnc-tiberian-dawn/src/lib.rs RUST/cnc-tiberian-dawn/src/savegame.rs"
+ ],
+ "artifact": null,
+ "cleanup": [
+  ".commit-msg-15.txt"
+ ],
+ "assignee": "subagent",
+ "write_scope": "RUST/cnc-tiberian-dawn/src/{unit.rs,game.rs,lib.rs,savegame.rs}, .omo/plans/parity-100.md, .omo/start-work/ledger.jsonl",
+ "validation_owner": "self"
+}
+{"event":"task-completed","plan":".omo/plans/parity-100.md","task":"15. TD sub-cell infantry + stances + doors","session_id":"session-3e5cf539-c53f-4bde-96e9-870310416cb9","commands":["cargo test -p cnc-tiberian-dawn","cargo fmt -p cnc-tiberian-dawn","cargo clippy -p cnc-tiberian-dawn","git commit 331370e feat(td): sub-cell infantry groups"],"evidence":["cargo test -p cnc-tiberian-dawn: 332 passed, 0 failed (incl. five_infantry_share_cell_deterministically, stance tests, door tests, sub_cell snapshot round-trip, malformed sub-slot rejection)","cargo fmt -p cnc-tiberian-dawn: clean","cargo clippy -p cnc-tiberian-dawn: clean for cnc-tiberian-dawn (only pre-existing cnc-audio warnings)","commit 331370e feat(td): sub-cell infantry groups (explicit pathspec, lib.rs + savegame.rs)"],"adversarial_verify":{"verdict":"confirmed","evidence":["independently ran cargo test -p cnc-tiberian-dawn: 332 passed, 0 failed","independently ran cargo fmt --check: clean","independently ran cargo clippy: clean for target crate","commit 331370e verified via git log"],"repro":"cd RUST && cargo test -p cnc-tiberian-dawn && cargo fmt -p cnc-tiberian-dawn --check && cargo clippy -p cnc-tiberian-dawn","confidence":1.0},"cleanup":[]}
+{"event":"task-completed","plan":".omo/plans/parity-100.md","task":"16. TD transports/cargo system","session_id":"session-todo-16-self","commands":["cargo test -p cnc-tiberian-dawn","cargo fmt -p cnc-tiberian-dawn","cargo clippy -p cnc-tiberian-dawn","git commit feat(td): passenger transports"],"evidence":["cargo test -p cnc-tiberian-dawn: 325 passed, 0 failed (incl. transport_loads_unloads_deterministically, transport_overload_boarding_rejected, transport_destroyed_kills_passengers, transport_board_non_infantry_rejected, transport_board_dead_passenger_rejected, transport_unload_cell_full_rejected)","cargo fmt -p cnc-tiberian-dawn: clean","cargo clippy -p cnc-tiberian-dawn: clean for target crate (only pre-existing cnc-audio warnings)"],"adversarial_verify":{"verdict":"confirmed","evidence":["independently ran cargo test -p cnc-tiberian-dawn: 325 passed, 0 failed","independently ran cargo fmt --check: clean","independently ran cargo clippy -p cnc-tiberian-dawn: clean"],"repro":"cd RUST && cargo test -p cnc-tiberian-dawn && cargo fmt -p cnc-tiberian-dawn --check && cargo clippy -p cnc-tiberian-dawn","confidence":1.0},"cleanup":[]}
