@@ -347,6 +347,11 @@ const HARVEST_ORE_PER_SECOND: f32 = 25.0;
 /// Radius affected by the Iron Curtain, in pixels.
 const IRON_CURTAIN_RADIUS: f32 = 5.0 * TILE_SIZE;
 
+/// Per-hit deflection (miss) chance applied to every damage event, 0..=100.
+/// A draw is always made (even at 0) so the RNG draw count per combat event
+/// stays stable and deterministic; the cursor is part of the saved state.
+const DAMAGE_DEFLECT_CHANCE_PERCENT: u8 = 25;
+
 /// How a unit moves and what it can attack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnitRole {
@@ -424,6 +429,7 @@ pub enum ArmorClass {
     Light = 2,
     Heavy = 3,
     Concrete = 4,
+    Unknown = 5,
 }
 
 impl ArmorClass {
@@ -528,7 +534,7 @@ impl GameUnit {
         owner: usize,
         class_id: ClassId,
         cell: Vec2i,
-        rules: &cnc_core::RulesDatabase,
+        rules: &mut cnc_core::RulesDatabase,
     ) -> Self {
         let (role, health, speed, weapon) = unit_profile_with_rules(class_id, rules);
         let health = Fixed16_16::from_f32(health);
@@ -563,10 +569,17 @@ impl GameUnit {
 }
 
 /// Armor class for a unit: Rules.ini `Armor=` when present, else a role default.
-pub fn armor_for(class_id: ClassId, rules: &cnc_core::RulesDatabase) -> ArmorClass {
+pub fn armor_for(class_id: ClassId, rules: &mut cnc_core::RulesDatabase) -> ArmorClass {
     if let Some(rule) = rules_type_name(class_id).and_then(|name| rules.type_rule(name)) {
-        if let Some(armor) = rule.armor.as_deref().and_then(ArmorClass::from_ini_name) {
-            return armor;
+        if let Some(armor_name) = rule.armor.as_deref() {
+            if let Some(armor) = ArmorClass::from_ini_name(armor_name) {
+                return armor;
+            }
+            let msg = format!("unknown armor type '{}'", armor_name);
+            if !rules.warnings.iter().any(|w| w == &msg) {
+                rules.warnings.push(msg);
+            }
+            return ArmorClass::Unknown;
         }
     }
     match role_for(class_id) {
@@ -593,6 +606,8 @@ pub struct GameStructure {
     pub weapon: Option<WeaponSpec>,
     pub reload: Fixed16_16,
     pub tesla: Option<TeslaCoil>,
+    /// Armor class consulted by warhead `Verses=` tables.
+    pub armor: ArmorClass,
 }
 
 impl GameStructure {
@@ -604,7 +619,13 @@ impl GameStructure {
         format!("{:?}", self.class_id)
     }
 
-    fn new(id: u32, owner: usize, class_id: ClassId, cell: Vec2i) -> Self {
+    fn new(
+        id: u32,
+        owner: usize,
+        class_id: ClassId,
+        cell: Vec2i,
+        rules: &mut cnc_core::RulesDatabase,
+    ) -> Self {
         let health = Fixed16_16::from_f32(structure_health(class_id));
         let position = cell_center(cell);
         Self {
@@ -624,6 +645,7 @@ impl GameStructure {
             },
             reload: Fixed16_16::ZERO,
             tesla: (class_id == ClassId::TeslaCoil).then(|| TeslaCoil::new(position)),
+            armor: armor_for(class_id, rules),
         }
     }
 
@@ -924,6 +946,10 @@ pub struct Game {
     /// Seeded simulation RNG. Every random draw on a simulation path comes
     /// from here and its cursor is part of the saved state (see `rng.rs`).
     pub rng: SimRng,
+    /// Per-hit deflection (miss) chance, 0..=100. Defaults to
+    /// `DAMAGE_DEFLECT_CHANCE_PERCENT` (25). Tests set it to 0 for
+    /// deterministic damage.
+    pub deflect_chance_percent: u8,
     /// Which house the human controls (0 Allied, 1 Soviet).
     pub player_owner: usize,
     pub briefing: String,
@@ -965,6 +991,7 @@ impl Game {
             messages: Vec::new(),
             ai: AiCommander::new(1),
             rng: SimRng::from_default_seed(),
+            deflect_chance_percent: DAMAGE_DEFLECT_CHANCE_PERCENT,
             player_owner: 0,
             briefing: String::new(),
             objectives: Vec::new(),
@@ -1228,7 +1255,7 @@ impl Game {
         }
         let id = self.next_id;
         self.next_id += 1;
-        let unit = GameUnit::new(id, owner, class_id, cell, &self.rules);
+        let unit = GameUnit::new(id, owner, class_id, cell, &mut self.rules);
         self.units.push(unit);
         id
     }
@@ -1239,8 +1266,8 @@ impl Game {
         }
         let id = self.next_id;
         self.next_id += 1;
-        self.structures
-            .push(GameStructure::new(id, owner, class_id, cell));
+        let structure = GameStructure::new(id, owner, class_id, cell, &mut self.rules);
+        self.structures.push(structure);
         id
     }
 
@@ -3065,30 +3092,57 @@ impl Game {
         damage: i32,
         warhead: Option<&str>,
     ) {
-        let amount = Fixed16_16::from_int(damage.max(0));
         let mut hits: Vec<(TargetRef, Fixed16_16, Option<String>)> = Vec::new();
         for unit in &self.units {
             if !unit.is_alive() {
                 continue;
             }
-            if unit.position.distance(centre).to_f32() <= radius {
-                hits.push((
-                    TargetRef::Unit(unit.id),
-                    amount,
-                    warhead.map(str::to_string),
-                ));
+            let dist = unit.position.distance(centre).to_f32();
+            if dist <= radius {
+                let factor = if radius <= 0.0 {
+                    if dist <= 0.0 {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    (1.0 - dist / radius).max(0.0)
+                };
+                if factor > 0.0 {
+                    let scaled_amount =
+                        Fixed16_16::from_f32(Fixed16_16::from_int(damage.max(0)).to_f32() * factor);
+                    hits.push((
+                        TargetRef::Unit(unit.id),
+                        scaled_amount,
+                        warhead.map(str::to_string),
+                    ));
+                }
             }
         }
         for structure in &self.structures {
             if !structure.is_alive() {
                 continue;
             }
-            if structure.position.distance(centre).to_f32() <= radius {
-                hits.push((
-                    TargetRef::Structure(structure.id),
-                    amount,
-                    warhead.map(str::to_string),
-                ));
+            let dist = structure.position.distance(centre).to_f32();
+            if dist <= radius {
+                let factor = if radius <= 0.0 {
+                    if dist <= 0.0 {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    (1.0 - dist / radius).max(0.0)
+                };
+                if factor > 0.0 {
+                    let scaled_amount =
+                        Fixed16_16::from_f32(Fixed16_16::from_int(damage.max(0)).to_f32() * factor);
+                    hits.push((
+                        TargetRef::Structure(structure.id),
+                        scaled_amount,
+                        warhead.map(str::to_string),
+                    ));
+                }
             }
         }
         self.apply_damage(hits);
@@ -3103,6 +3157,11 @@ impl Game {
             .map(|(_, _, name)| name.as_deref().and_then(|w| self.rules.warhead(w).cloned()))
             .collect();
         for ((target, amount, _), warhead) in damage.into_iter().zip(warheads) {
+            // Deflection roll: always draw from RNG so the cursor advances
+            // by exactly one per damage event, keeping lockstep deterministic.
+            if self.rng.percent(self.deflect_chance_percent as u32) {
+                continue;
+            }
             match target {
                 TargetRef::Unit(id) => {
                     if let Some(unit) = self.units.iter_mut().find(|unit| unit.id == id) {
@@ -3118,9 +3177,7 @@ impl Game {
                         .iter_mut()
                         .find(|structure| structure.id == id)
                     {
-                        // Structures are modelled as concrete emplacements.
-                        let scaled =
-                            damage_vs_armor(amount, ArmorClass::Concrete, warhead.as_ref());
+                        let scaled = damage_vs_armor(amount, structure.armor, warhead.as_ref());
                         structure.health = (structure.health - scaled).max(Fixed16_16::ZERO);
                     }
                 }
@@ -3964,7 +4021,7 @@ impl Game {
                         owner,
                         class_id,
                         cell,
-                        &cnc_core::RulesDatabase::default(),
+                        &mut cnc_core::RulesDatabase::default(),
                     );
                     unit.position = Vec2::new(
                         Fixed16_16::from_bits(parse_i32(fields[6])?),
@@ -3982,7 +4039,13 @@ impl Game {
                     let class_id = ClassId::from_u32(parse_u32(fields[2])?);
                     let owner = parse_usize(fields[3])?;
                     let cell = Vec2i::new(parse_i32(fields[4])?, parse_i32(fields[5])?);
-                    let mut structure = GameStructure::new(id, owner, class_id, cell);
+                    let mut structure = GameStructure::new(
+                        id,
+                        owner,
+                        class_id,
+                        cell,
+                        &mut cnc_core::RulesDatabase::default(),
+                    );
                     structure.health = Fixed16_16::from_bits(parse_i32(fields[6])?);
                     next_id = next_id.max(id + 1);
                     structures.push(structure);
@@ -4483,6 +4546,7 @@ mod trigger_apply_tests {
     #[test]
     fn ra_trigger_nuke_damages_the_struck_cell() {
         let mut game = fresh();
+        game.deflect_chance_percent = 0;
         game.structures.clear();
         let id = game.spawn_unit(1, ClassId::VehicleE2, Vec2i::new(20, 20));
         let before = game
@@ -4873,6 +4937,7 @@ Briefing=Hold the line.\n\
     #[test]
     fn ra_scripted_nuke_actually_damages_units() {
         let mut game = Game::new(40, 40);
+        game.deflect_chance_percent = 0;
         game.player_owner = 0;
         game.units.clear();
         game.structures.clear();
@@ -5107,6 +5172,7 @@ Briefing=Hold the line.\n\
     #[test]
     fn ra_strike_with_a_cell_hits_that_cell_not_the_base() {
         let mut game = Game::new(40, 40);
+        game.deflect_chance_percent = 0;
         game.player_owner = 0;
         game.units.clear();
         game.structures.clear();
@@ -5153,6 +5219,7 @@ Briefing=Hold the line.\n\
     #[test]
     fn ra_radius_damage_respects_the_radius() {
         let mut game = Game::new(40, 40);
+        game.deflect_chance_percent = 0;
         game.units.clear();
         game.structures.clear();
         let centre_cell = Vec2i::new(20, 20);
@@ -6663,7 +6730,7 @@ Player=Allies
 
     #[test]
     fn empty_rules_reproduce_the_builtin_profile() {
-        let empty = cnc_core::RulesDatabase::default();
+        let mut empty = cnc_core::RulesDatabase::default();
         for class_id in [ClassId::VehicleE1, ClassId::InfantryE1, ClassId::ShipE4] {
             assert_eq!(
                 unit_profile_with_rules(class_id, &empty),
@@ -6675,7 +6742,7 @@ Player=Allies
 
     #[test]
     fn rules_strength_and_speed_override_the_builtin_profile() {
-        let rules = rules_with("[LTNK]\nStrength=1234\nSpeed=100\n");
+        let mut rules = rules_with("[LTNK]\nStrength=1234\nSpeed=100\n");
         let (_, health, speed, _) = unit_profile_with_rules(ClassId::VehicleE1, &rules);
         assert_eq!(health, 1234.0, "Strength= wins over the built-in table");
         assert_eq!(speed, MAX_UNIT_SPEED_PX, "Speed=100 maps to the top speed");
@@ -6684,7 +6751,7 @@ Player=Allies
     #[test]
     fn missing_rules_fields_keep_builtin_values() {
         // Only Strength is present; speed must stay as the built-in value.
-        let rules = rules_with("[LTNK]\nStrength=999\n");
+        let mut rules = rules_with("[LTNK]\nStrength=999\n");
         let (_, health, speed, _) = unit_profile_with_rules(ClassId::VehicleE1, &rules);
         let (_, base_health, base_speed, _) = unit_profile(ClassId::VehicleE1);
         assert_eq!(health, 999.0);
@@ -6749,15 +6816,15 @@ Player=Allies
 
     #[test]
     fn default_armor_comes_from_role_when_rules_are_absent() {
-        let empty = cnc_core::RulesDatabase::default();
-        assert_eq!(armor_for(ClassId::VehicleE1, &empty), ArmorClass::Heavy);
-        assert_eq!(armor_for(ClassId::InfantryE1, &empty), ArmorClass::None);
-        assert_eq!(armor_for(ClassId::ShipE4, &empty), ArmorClass::Light);
+        let mut empty = cnc_core::RulesDatabase::default();
+        assert_eq!(armor_for(ClassId::VehicleE1, &mut empty), ArmorClass::Heavy);
+        assert_eq!(armor_for(ClassId::InfantryE1, &mut empty), ArmorClass::None);
+        assert_eq!(armor_for(ClassId::ShipE4, &mut empty), ArmorClass::Light);
     }
 
     #[test]
     fn rules_armor_overrides_the_role_default() {
-        let rules = rules_with("[LTNK]\nArmor=light\n");
-        assert_eq!(armor_for(ClassId::VehicleE1, &rules), ArmorClass::Light);
+        let mut rules = rules_with("[LTNK]\nArmor=light\n");
+        assert_eq!(armor_for(ClassId::VehicleE1, &mut rules), ArmorClass::Light);
     }
 }

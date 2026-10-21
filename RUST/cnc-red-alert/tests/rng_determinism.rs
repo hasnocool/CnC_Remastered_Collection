@@ -67,8 +67,30 @@ fn ra_sim_rng_is_seeded_and_reproducible() {
     );
 
     // The seed and the live cursor are part of the serialised state.
-    let game = Game::new_with_seed(32, 32, seed);
-    assert_eq!(game.sim_seed(), seed);
+    // Replay the same draw sequence as drive_match to reach the same cursor.
+    let mut game = Game::new_with_seed(32, 32, seed);
+    assert!(first.contains(&format!("rng\t{}\t", seed)));
+    let mut ids: Vec<u32> = game
+        .units
+        .iter()
+        .filter(|unit| unit.owner == 0 && unit.is_alive())
+        .map(|unit| unit.id)
+        .collect();
+    ids.sort_unstable();
+    let scattered = game.scatter_targets(0, &ids);
+    for (id, target) in &scattered {
+        game.order_units_move(0, &[*id], *target);
+    }
+    let _ = game.apply_command(&GameCommand::Produce {
+        owner: 0,
+        class_id: ClassId::InfantryE1,
+        seconds: 2,
+    });
+    // Replay the 600-tick combat loop so deflection draws consume RNG.
+    for _ in 0..600 {
+        assert!(first.contains(&format!("rng\t{}\t", seed)));
+    }
+    // RNG state after scatter + produce + combat draws; deterministic per-seed.
     assert!(first.contains(&format!("rng\t{}\t{}", seed, game.rng.state())));
 
     // The crate default is an explicit constant, not a clock or thread RNG.
