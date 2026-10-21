@@ -145,6 +145,19 @@ pub struct Unit {
     /// Seconds of halved incoming damage granted by a crate armor bonus.
     #[serde(default)]
     pub shield: Fixed16_16,
+    /// Passenger unit indices currently aboard this transport, in LIFO boarding
+    /// order (CARGO.CPP CargoClass::Attach semantics). Only valid for
+    /// `is_transport()` units (APC, Chinook).
+    #[serde(default)]
+    pub passengers: Vec<usize>,
+    /// Cargo capacity: maximum number of passengers. 5 for APC and Chinook,
+    /// 0 for all other unit types.
+    #[serde(default)]
+    pub capacity: usize,
+    /// True once the unit has deployed (MCV -> Construction Yard, etc.).
+    /// Deployed units stop moving and act as fixed emplacements.
+    #[serde(default)]
+    pub deployed: bool,
 }
 
 impl Unit {
@@ -203,6 +216,12 @@ impl Unit {
             track_phase: 0.0,
             rearm_timer: Fixed16_16::ZERO,
             shield: Fixed16_16::ZERO,
+            passengers: Vec::new(),
+            capacity: match unit_type {
+                UnitType::APC | UnitType::Chinook => 5,
+                _ => 0,
+            },
+            deployed: false,
         }
     }
 
@@ -347,6 +366,26 @@ impl Unit {
             self.unit_type,
             crate::td_rules::UnitType::APC | crate::td_rules::UnitType::Chinook
         )
+    }
+
+    /// Cargo capacity: max passengers this transport can carry.
+    pub fn cargo_capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Number of passengers currently aboard.
+    pub fn passenger_count(&self) -> usize {
+        self.passengers.len()
+    }
+
+    /// True if there is room for at least one more passenger.
+    pub fn has_cargo_space(&self) -> bool {
+        self.passengers.len() < self.capacity
+    }
+
+    /// True if the given unit index is a passenger aboard this transport.
+    pub fn has_passenger(&self, unit_index: usize) -> bool {
+        self.passengers.contains(&unit_index)
     }
 
     pub fn next_rearm_delay(&self, weapon: &Weapon) -> Fixed16_16 {

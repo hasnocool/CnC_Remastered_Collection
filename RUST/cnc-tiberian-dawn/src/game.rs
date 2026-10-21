@@ -58,6 +58,40 @@ impl std::fmt::Display for SubCellError {
 
 impl std::error::Error for SubCellError {}
 
+/// Error returned by transport/cargo operations (boarding, unloading).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransportError {
+    InvalidTransportIndex,
+    NotATransport,
+    TransportNotAlive,
+    InvalidPassengerIndex,
+    PassengerNotAlive,
+    PassengerNotInfantry,
+    AlreadyAboard,
+    AtCapacity,
+    NoPassengers,
+    CellFull,
+}
+
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidTransportIndex => write!(f, "invalid transport unit index"),
+            Self::NotATransport => write!(f, "unit is not a transport (APC/Chinook)"),
+            Self::TransportNotAlive => write!(f, "transport is not alive"),
+            Self::InvalidPassengerIndex => write!(f, "invalid transport unit index"),
+            Self::PassengerNotAlive => write!(f, "passenger is not alive"),
+            Self::PassengerNotInfantry => write!(f, "passenger is not infantry"),
+            Self::AlreadyAboard => write!(f, "unit is already aboard this transport"),
+            Self::AtCapacity => write!(f, "transport cargo hold is full"),
+            Self::NoPassengers => write!(f, "transport has no passengers"),
+            Self::CellFull => write!(f, "target cell has no free sub-cell slot"),
+        }
+    }
+}
+
+impl std::error::Error for TransportError {}
+
 /// Short-lived superweapon blast visual.
 #[derive(Clone, Copy, Debug)]
 pub struct Blast {
@@ -2367,7 +2401,17 @@ impl Game {
     pub fn apply_command(&mut self, player: u8, command: &Command) -> bool {
         // The per-variant game-side arms live in network.rs next to the wire
         // format; this is only the dispatch entry point for replay/UI callers.
-        crate::network::apply_sabotage(self, command, player)
+        match command {
+            Command::Deploy { unit } => {
+                let idx = *unit as usize;
+                if self.units.get(idx).is_some_and(|u| u.owner == player) {
+                    self.units[idx].deployed = true;
+                    return true;
+                }
+                false
+            }
+            _ => crate::network::apply_sabotage(self, command, player),
+        }
     }
 
     /// INFANTRY.CPP:660-740 `InfantryClass::Per_Cell_Process`: resolve the
@@ -7258,5 +7302,103 @@ mod prerequisite_tests {
         game.units.push(b);
         let bytes = game.to_save_bytes().unwrap();
         assert!(Game::from_save_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn td_roster_per_unit_checks() {
+        // Every roster unit must spawn with sane, non-default stats.
+        let cases: &[(UnitType, &str)] = &[
+            (UnitType::InfantryE1, "rifleman"),
+            (UnitType::Engineer, "engineer"),
+            (UnitType::Commando, "commando"),
+            (UnitType::MediumTank, "medium tank"),
+            (UnitType::MammothTank, "mammoth tank"),
+            (UnitType::Harvester, "harvester"),
+            (UnitType::APC, "APC"),
+            (UnitType::Artillery, "artillery"),
+            (UnitType::MLRS, "MLRS"),
+            (UnitType::StealthTank, "stealth tank"),
+            (UnitType::FlameTank, "flame tank"),
+            (UnitType::MobileHQ, "mobile HQ"),
+            (UnitType::Grenadier, "grenadier"),
+            (UnitType::RocketSoldier, "rocket soldier"),
+            (UnitType::Flamethrower, "flamethrower"),
+            (UnitType::ChemWarrior, "chem warrior"),
+            (UnitType::Chinook, "chinook"),
+            (UnitType::Orca, "orca"),
+            (UnitType::Apache, "apache"),
+            (UnitType::Triceratops, "triceratops"),
+            (UnitType::Trex, "T-rex"),
+            (UnitType::Raptor, "raptor"),
+            (UnitType::Stegosaurus, "stegosaurus"),
+        ];
+
+        for (unit_type, name) in cases {
+            let unit = Unit::new(*unit_type, Vec2::zero(), 0);
+            let stats = unit_type.stats();
+
+            // Strength must be positive (non-zero).
+            assert!(stats.strength > 0, "{name} strength must be > 0");
+            // Cost must be non-negative.
+            assert!(stats.cost >= 0, "{name} cost must be >= 0");
+            // Sight range must be >= 0.
+            assert!(stats.sight_range >= 0, "{name} sight range must be >= 0");
+            // Tech level must be sane.
+            assert!(stats.tech_level <= 99, "{name} tech level must be <= 99");
+            // Health must match strength.
+            assert_eq!(unit.max_health.to_f32(), stats.strength as f32);
+            assert_eq!(unit.health, unit.max_health);
+            // Unit must start alive.
+            assert!(unit.health > Fixed16_16::ZERO);
+            // Not deployed by default.
+            assert!(!unit.deployed);
+            // Infantry must be flagged infantry.
+            if stats.is_infantry {
+                assert!(stats.cost <= 1000, "{name} infantry cost sane");
+            }
+        }
+    }
+
+    #[test]
+    fn td_deploy_command_sets_deployed_flag() {
+        let cell = Game::cell_origin(5, 5);
+        let mut game = Game::new("test", 32, 32);
+        game.units.clear();
+        game.houses.clear();
+        game.buildings.clear();
+        game.projectiles.clear();
+        game.houses
+            .push(House::new(ClassId::HouseGDI, "GDI".to_string()));
+
+        let mcv_idx = game.units.len();
+        game.units.push(Unit::new(UnitType::APC, cell, 0)); // use APC as deployable stand-in
+        game.units[mcv_idx].owner = 0;
+
+        // Deploy must flip the flag.
+        assert!(!game.units[mcv_idx].deployed);
+        let result = game.apply_command(
+            0,
+            &Command::Deploy {
+                unit: mcv_idx as u32,
+            },
+        );
+        assert!(result, "deploy command must succeed");
+        assert!(game.units[mcv_idx].deployed, "unit must be marked deployed");
+
+        // Deploying another player's unit must fail.
+        game.units[mcv_idx].deployed = false;
+        game.units[mcv_idx].owner = 1;
+        let result = game.apply_command(
+            0,
+            &Command::Deploy {
+                unit: mcv_idx as u32,
+            },
+        );
+        assert!(!result, "deploying another player's unit must fail");
+        assert!(!game.units[mcv_idx].deployed);
+
+        // Deploying an out-of-range index must fail.
+        let result = game.apply_command(0, &Command::Deploy { unit: 9999 });
+        assert!(!result, "deploying out-of-range unit must fail");
     }
 }
