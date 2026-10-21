@@ -10,6 +10,7 @@ pub mod fixtures;
 pub mod generator;
 pub mod history;
 pub mod map;
+pub mod original;
 pub mod pack_tileset;
 pub mod plugin;
 pub mod presenter;
@@ -22,8 +23,11 @@ pub use history::{
     AddTrigger, AddWaypoint, EditCommand, EraseObject, History, MoveObject, PaintCells,
     PlaceObject, RemoveObject, RemoveTrigger, RemoveWaypoint, SetObjectOwner, SetTrigger,
 };
-pub use map::{MapModel, MapObject, Trigger, Waypoint, TILE_SIZE};
-pub use plugin::{GamePlugin, RedAlertPlugin, Theater, TiberianDawnPlugin};
+pub use map::{HouseEntry, ImportKind, MapModel, MapObject, Trigger, Waypoint, TILE_SIZE};
+pub use original::{ObjectOrigin, OriginalImport, PreservedSection};
+pub use plugin::{
+    load_scenario, save_scenario, GamePlugin, RedAlertPlugin, Theater, TiberianDawnPlugin,
+};
 pub use tools::{
     line_cells, rect_cells, EraseTool, ObjectTool, SelectTool, TerrainTool, Tool, TriggerTool,
     WaypointTool,

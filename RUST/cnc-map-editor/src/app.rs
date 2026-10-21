@@ -21,7 +21,7 @@ use crate::history::{
     AddAgent, EditCommand, RemoveAgent, RemoveObject, RemoveTrigger, ScenarioInfo, SetAgent,
     SetObjectClass, SetScenarioInfo, SetTrigger,
 };
-use crate::map::{MapModel, MapObject, Trigger, TILE_SIZE};
+use crate::map::{ImportKind, MapModel, MapObject, Trigger, TILE_SIZE};
 use crate::pack_tileset::PackTileset;
 use crate::plugin::{GamePlugin, RedAlertPlugin, Theater, TiberianDawnPlugin};
 use crate::tools::{EraseTool, ObjectTool, TerrainTool, TriggerTool};
@@ -849,8 +849,15 @@ impl EditorState {
                 let _ = std::fs::create_dir_all(parent);
             }
         }
-        match std::fs::write(&path, self.map.to_ini()) {
-            Ok(()) => self.status = format!("saved {} ({})", path.display(), self.map.summary()),
+        match self.plugin().save_map(&self.map, &path) {
+            Ok(written) => {
+                let files = written
+                    .iter()
+                    .map(|file| file.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.status = format!("saved {files} ({})", self.map.summary());
+            }
             Err(error) => self.status = format!("save failed: {error}"),
         }
     }
@@ -869,16 +876,16 @@ impl EditorState {
     pub fn open(&mut self) {
         self.reset_agent_editor();
         let path = self.resolve_path();
-        // An original TD scenario needs its sibling .bin cell image; look it
-        // up by stem so open() handles both games without hand-pairing.
-        let sibling_bin = path.with_extension("bin");
-        let bin = std::fs::read(&sibling_bin).ok();
-        match std::fs::read_to_string(&path)
-            .map_err(|error| error.to_string())
-            .and_then(|text| {
-                MapModel::import_text_with(&text, bin.as_deref()).map_err(|error| error.to_string())
-            }) {
-            Ok((map, kind)) => {
+        // The plugin dispatches on extension/dialect and pairs a TD .ini with
+        // its sibling .bin, so both games open through one path.
+        match self.plugin().load_map(&path) {
+            Ok(map) => {
+                let kind = map.original_dialect().unwrap_or(ImportKind::EditorDialect);
+                self.plugin_index = match kind {
+                    ImportKind::OriginalTd => 0,
+                    ImportKind::OriginalRa => 1,
+                    ImportKind::EditorDialect => self.plugin_index,
+                };
                 self.map = map;
                 self.editor = EditorUI::new();
                 self.selected_trigger = None;
@@ -997,6 +1004,7 @@ impl EditorState {
     }
 
     /// Trigger ids matching the trigger-folder filter.
+    #[allow(dead_code)]
     fn visible_trigger_ids(&self) -> Vec<u32> {
         let query = self.trigger_filter.trim().to_ascii_lowercase();
         self.trigger_ids()

@@ -170,7 +170,7 @@ mod tests {
         // Guards the fixture itself: if every icon were 0, a reader that
         // dropped TIcon would still pass.
         let bytes = td_bin_bytes();
-        let icons: Vec<u8> = bytes.chunks_exact(2).map(|r| r[1]).collect();
+        let icons: Vec<u8> = bytes.as_chunks::<2>().0.iter().map(|r| r[1]).collect();
         assert!(
             icons.iter().any(|i| *i != 0),
             "the fixture must exercise the icon byte"

@@ -93,6 +93,9 @@ pub struct MapModel {
     pub player_starts: Vec<Vec2i>,
     /// Authored waypoints, ordered by id.
     pub waypoints: Vec<Waypoint>,
+    /// Original-format import metadata (sections + object origins), when this
+    /// model was opened from a retail scenario. `None` for editor-authored maps.
+    pub original: Option<crate::original::OriginalImport>,
     next_object_id: u32,
     next_agent_id: u32,
 }
@@ -160,6 +163,7 @@ impl MapModel {
             agents: Vec::new(),
             player_starts: Vec::new(),
             waypoints: Vec::new(),
+            original: None,
             next_object_id: 1,
             next_agent_id: 1,
         }
@@ -564,7 +568,11 @@ impl MapModel {
             .unwrap_or("Imported Scenario")
             .to_string();
         // SCENARIO.CPP:2392 defaults the player house to Greece.
-        model.player = basic.get_string("Player").unwrap_or("Greece").to_string();
+        model.player = basic
+            .values
+            .get("Player")
+            .map(ini_value_text)
+            .unwrap_or_default();
         model.briefing = basic.get_string("Briefing").unwrap_or("").to_string();
         model.theater = "Temperate".to_string();
 
@@ -582,12 +590,14 @@ impl MapModel {
         // Object sections: Units/Infantry/Structures, record layout per
         // REDALERT/UNIT.CPP and INFANTRY.CPP:
         //   House,Type,Strength,Cell[,extra...]
+        let captured_sections = crate::original::capture_sections(input);
+        let mut object_origins = Vec::new();
         let mut object_id = 0u32;
         for section_name in ["Units", "Infantry", "Structures"] {
             let Some(section) = ini.section(section_name) else {
                 continue;
             };
-            for value in section.values.values() {
+            for (key, value) in &section.values {
                 let text = ini_value_text(value);
                 let fields: Vec<&str> = text.split(',').map(str::trim).collect();
                 if fields.len() < 4 {
@@ -605,15 +615,30 @@ impl MapModel {
                 }
                 let (x, y) = ((cell % side) as i32, (cell / side) as i32);
                 object_id += 1;
+                let owner = cnc_core::house_class_from_token(fields[0]).ok();
+                object_origins.push(crate::original::ObjectOrigin {
+                    section: section_name.to_string(),
+                    key: key.clone(),
+                    object_id,
+                    cell,
+                    owner,
+                    fields: fields.iter().map(|s| s.to_string()).collect(),
+                    named_section: None,
+                });
                 model.insert_object(MapObject {
                     id: object_id,
                     class_id,
                     position: Vec2i::new(x, y),
-                    owner: cnc_core::house_class_from_token(fields[0]).ok(),
+                    owner,
                 });
             }
         }
         model.houses = parse_house_entries(&ini);
+        model.original = Some(crate::original::OriginalImport {
+            dialect: ImportKind::OriginalRa,
+            sections: captured_sections,
+            objects: object_origins,
+        });
         Ok(model)
     }
     /// Import an **original-format** TD scenario (`.ini` + `.bin`).
@@ -637,7 +662,11 @@ impl MapModel {
             .get_string("Name")
             .unwrap_or("Imported Scenario")
             .to_string();
-        model.player = basic.get_string("Player").unwrap_or("GDI").to_string();
+        model.player = basic
+            .values
+            .get("Player")
+            .map(ini_value_text)
+            .unwrap_or_default();
         model.briefing = basic.get_string("Briefing").unwrap_or("").to_string();
         model.theater = basic
             .get_string("Theater")
@@ -650,38 +679,109 @@ impl MapModel {
         for (slot, icon) in model.icon.iter_mut().zip(icons) {
             *slot = icon;
         }
-        // Object sections: [Wunits] (units) and [Structures]. Record layout
-        // per TIBERIANDAWN/UNIT.CPP and BUILDING.CPP:
-        //   House,Type,Strength,Cell,Facing,Mission,Trigger
-        // The cell is a row-major index; houses and types resolve through
-        // cnc_core so the editor shares one vocabulary with the engines.
+        // Object sections: [Wunits] (units) and [Structures]. Each entry
+        // references a named section carrying House/Type/X/Y.
+        let captured_sections = crate::original::capture_sections(input);
+        let mut object_origins = Vec::new();
+        // House ordinals in the object sections index the [Houses] list.
+        let house_names: Vec<String> = ini
+            .section("Houses")
+            .map(|section| {
+                section
+                    .values
+                    .values()
+                    .map(|value| ini_value_text(value).trim().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut object_id = 0u32;
         for section_name in ["Wunits", "Structures"] {
             let Some(section) = ini.section(section_name) else {
                 continue;
             };
-            for value in section.values.values() {
-                let text = ini_value_text(value);
-                let fields: Vec<&str> = text.split(',').map(str::trim).collect();
+            for (key, value) in &section.values {
+                let raw = ini_value_text(value).trim().to_string();
+                // Named-section form (retail TD): value references a section.
+                if let Some(obj_section) = ini.section(&raw) {
+                    let type_token = obj_section
+                        .values
+                        .get("Type")
+                        .map(ini_value_text)
+                        .unwrap_or_default();
+                    let class_id = cnc_core::class_id_from_token(&type_token)
+                        .unwrap_or(cnc_core::ClassId::Unknown);
+                    let x: i32 = obj_section
+                        .values
+                        .get("X")
+                        .map(ini_value_text)
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    let y: i32 = obj_section
+                        .values
+                        .get("Y")
+                        .map(ini_value_text)
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    if x < 0 || y < 0 || (x as u32) >= side || (y as u32) >= side {
+                        continue;
+                    }
+                    let cell = y as u32 * side + x as u32;
+                    let owner = obj_section
+                        .values
+                        .get("House")
+                        .map(ini_value_text)
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .and_then(|index| house_names.get(index))
+                        .and_then(|name| cnc_core::house_class_from_token(name).ok());
+                    object_id += 1;
+                    object_origins.push(crate::original::ObjectOrigin {
+                        section: section_name.to_string(),
+                        key: key.clone(),
+                        object_id,
+                        cell,
+                        owner,
+                        fields: Vec::new(),
+                        named_section: Some(raw.clone()),
+                    });
+                    model.insert_object(MapObject {
+                        id: object_id,
+                        class_id,
+                        position: Vec2i::new(x, y),
+                        owner,
+                    });
+                    continue;
+                }
+
+                // Comma-record form (synthetic/tests): House,Type,Strength,Cell,...
+                let fields: Vec<&str> = raw.split(',').map(str::trim).collect();
                 if fields.len() < 4 {
                     continue;
                 }
-                // Building codes (FACT/PROC/POWR) live in the TD crate and
-                // cnc_core's shared table has none, so an unresolved type is
-                // kept as Unknown rather than silently dropping the object —
-                // the cell and house still matter to the editor.
                 let class_id =
                     cnc_core::class_id_from_token(fields[1]).unwrap_or(cnc_core::ClassId::Unknown);
                 let Ok(cell) = fields[3].parse::<u32>() else {
                     continue;
                 };
+                if cell >= side * side {
+                    continue;
+                }
                 let (x, y) = ((cell % side) as i32, (cell / side) as i32);
+                let owner = cnc_core::house_class_from_token(fields[0]).ok();
                 object_id += 1;
+                object_origins.push(crate::original::ObjectOrigin {
+                    section: section_name.to_string(),
+                    key: key.clone(),
+                    object_id,
+                    cell,
+                    owner,
+                    fields: Vec::new(),
+                    named_section: None,
+                });
                 model.insert_object(MapObject {
                     id: object_id,
                     class_id,
                     position: Vec2i::new(x, y),
-                    owner: cnc_core::house_class_from_token(fields[0]).ok(),
+                    owner,
                 });
             }
         }
@@ -691,11 +791,16 @@ impl MapModel {
         // imported scenario is inspectable even though the dialects differ.
         if let Some(list) = ini.section("Trigs") {
             let mut trigger_id = 0u32;
-            // The list is keyed by bare ordinal ("1=TRIGA"), not "Trigger1".
-            for index in 1..=9999 {
-                let Some(section_name) = list.get_string(&index.to_string()) else {
-                    break;
+            // The list may be keyed by bare ordinal ("1=TRIGA") or by
+            // "TriggerN"; accept either by walking every value.
+            for value in list.values.values() {
+                let Some(section_name) = value.as_string() else {
+                    continue;
                 };
+                let section_name = section_name.trim().to_string();
+                if section_name.is_empty() {
+                    continue;
+                }
                 let Some(section) = ini.section(&section_name) else {
                     continue;
                 };
@@ -726,7 +831,13 @@ impl MapModel {
             }
         }
         // [Houses]: see parse_house_entries.
+        model.waypoints = parse_waypoints(&ini, side, side);
         model.houses = parse_house_entries(&ini);
+        model.original = Some(crate::original::OriginalImport {
+            dialect: ImportKind::OriginalTd,
+            sections: captured_sections,
+            objects: object_origins,
+        });
         Ok(model)
     }
 
@@ -1133,7 +1244,7 @@ fn decode_td_bin(raw: &[u8]) -> anyhow::Result<(Vec<u8>, Vec<u8>, u32)> {
     }
     const RECORD: usize = 2;
     // Exact square: plain uncompressed image.
-    if raw.len() % RECORD == 0 {
+    if raw.len().is_multiple_of(RECORD) {
         let total = raw.len() / RECORD;
         let root = (total as f64).sqrt() as u32;
         if root > 0 && (root as usize) * (root as usize) == total {
@@ -1159,7 +1270,9 @@ fn decode_td_bin(raw: &[u8]) -> anyhow::Result<(Vec<u8>, Vec<u8>, u32)> {
 /// Take the first byte of every 2-byte cell record (the template id).
 fn td_byte(cells: &[u8], side: u32, index: usize) -> Vec<u8> {
     cells
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .take((side * side) as usize)
         .map(|record| record[index])
         .collect()

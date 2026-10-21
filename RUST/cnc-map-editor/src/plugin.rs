@@ -4,8 +4,10 @@
 //! validation rules that differ between Tiberian Dawn and Red Alert. The editor
 //! core stays game-agnostic and talks to this trait only.
 
-use crate::map::{MapModel, MapObject};
+use crate::map::{ImportKind, MapModel, MapObject};
+use anyhow::Context;
 use cnc_core::ClassId;
+use std::path::{Path, PathBuf};
 
 /// Terrain theater a map is authored for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +79,105 @@ pub trait GamePlugin: Send + Sync {
     /// Faction hint shown in the palette when an object is side-locked.
     fn object_side(&self, _class_id: ClassId) -> Option<&'static str> {
         None
+    }
+
+    /// Open a scenario from disk, dispatching on its extension/dialect.
+    fn load_map(&self, path: &Path) -> anyhow::Result<MapModel> {
+        load_scenario(path).map(|(model, _kind)| model)
+    }
+
+    /// Save a scenario to disk in the dialect it was opened from (or the
+    /// editor dialect for a new map). Returns every file written, so the TD
+    /// `.ini`+`.bin` pair is visible to the caller.
+    fn save_map(&self, model: &MapModel, path: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        save_scenario(model, path)
+    }
+}
+
+/// Extensions a scenario can be opened from. TD needs its sibling `.bin`.
+pub const SCENARIO_EXTENSIONS: &[&str] = &["ini", "mpr"];
+
+fn extension_of(path: &Path) -> String {
+    path.extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+fn require_scenario_extension(path: &Path) -> anyhow::Result<String> {
+    let extension = extension_of(path);
+    if !SCENARIO_EXTENSIONS.contains(&extension.as_str()) {
+        let shown = if extension.is_empty() {
+            "<none>".to_string()
+        } else {
+            format!(".{extension}")
+        };
+        anyhow::bail!(
+            "unsupported scenario extension '{shown}' for {} (supported: .ini, .mpr; a TD .ini reads its sibling .bin)",
+            path.display()
+        );
+    }
+    Ok(extension)
+}
+
+/// Load a scenario, picking the reader by extension and dialect.
+///
+/// `.mpr` is an RA scenario; `.ini` may be either dialect and is sniffed by
+/// content, with a sibling `.bin` supplied to the TD reader.
+pub fn load_scenario(path: &Path) -> anyhow::Result<(MapModel, ImportKind)> {
+    let extension = require_scenario_extension(path)?;
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("read scenario {}", path.display()))?;
+    let bin = if extension == "ini" {
+        std::fs::read(path.with_extension("bin")).ok()
+    } else {
+        None
+    };
+    MapModel::import_text_with(&text, bin.as_deref())
+        .with_context(|| format!("open scenario {}", path.display()))
+}
+
+/// Save a scenario in its original dialect when it was imported from one.
+///
+/// A fresh map is written in the editor dialect unless the target is `.mpr`,
+/// which always denotes an original RA scenario. TD original saves also write
+/// the sibling `.bin` cell image.
+pub fn save_scenario(model: &MapModel, path: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let extension = extension_of(path);
+    let dialect = model.original_dialect().unwrap_or_else(|| {
+        if extension == "mpr" {
+            ImportKind::OriginalRa
+        } else {
+            ImportKind::EditorDialect
+        }
+    });
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create directory {}", parent.display()))?;
+        }
+    }
+    match dialect {
+        ImportKind::OriginalRa => {
+            let text = model.to_original_ra()?;
+            std::fs::write(path, text)
+                .with_context(|| format!("write scenario {}", path.display()))?;
+            Ok(vec![path.to_path_buf()])
+        }
+        ImportKind::OriginalTd => {
+            let (text, bin) = model.to_original_td()?;
+            std::fs::write(path, text)
+                .with_context(|| format!("write scenario {}", path.display()))?;
+            let bin_path = path.with_extension("bin");
+            std::fs::write(&bin_path, bin)
+                .with_context(|| format!("write cell image {}", bin_path.display()))?;
+            Ok(vec![path.to_path_buf(), bin_path])
+        }
+        ImportKind::EditorDialect => {
+            std::fs::write(path, model.to_ini())
+                .with_context(|| format!("write scenario {}", path.display()))?;
+            Ok(vec![path.to_path_buf()])
+        }
     }
 }
 
