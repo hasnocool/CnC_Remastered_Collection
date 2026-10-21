@@ -1081,7 +1081,7 @@ impl Game {
             .map(|c| c.index as u32)
             .chain(scenario.objects.iter().map(|o| o.cell))
             .max()
-            .unwrap_or(0) as u32;
+            .unwrap_or(0);
         let mut side = 1u32;
         while side * side <= max_cell {
             side += 1;
@@ -2520,8 +2520,8 @@ impl Game {
                         })
                         .unwrap_or(Vec2i::new(0, 0));
                     for index in 0..4 {
-                        let x = cell.x + (index % 2) as i32;
-                        let y = cell.y + (index / 2) as i32;
+                        let x = cell.x + (index % 2);
+                        let y = cell.y + (index / 2);
                         self.spawn_unit(self.player_owner, ClassId::InfantryE1, Vec2i::new(x, y));
                     }
                     self.eva.speak(cnc_audio::EvaLine::ReinforcementsArrived);
@@ -3281,7 +3281,6 @@ impl Game {
                 continue;
             }
 
-            let unit_cell = self.units[index].cell;
             // A helipad parks exactly one aircraft; an airfield parks up to
             // AIRFIELD_CAPACITY (the rule aircraft.rs encoded standalone).
             let mut pads = self.pad_capacity(owner);
@@ -3667,7 +3666,7 @@ fn parse_cell(text: &str) -> Option<Vec2i> {
 fn terrain_for_template(id: u8) -> Option<Terrain> {
     // Template 0 is clear ground; RA water templates are the open-water set
     // the templates terrain table lists as "Water".
-    matches!(id, 74 | 75 | 76 | 77 | 78 | 79 | 80 | 81).then_some(Terrain::Water)
+    matches!(id, 74..=81).then_some(Terrain::Water)
 }
 
 /// Bind `[CellTriggers]` entries to triggers by name.

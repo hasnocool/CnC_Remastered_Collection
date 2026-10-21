@@ -234,7 +234,7 @@ mod tests {
     use super::*;
     use crate::game::{Game, ScenarioOutcome};
     use cnc_core::Fixed16_16;
-    use cnc_events::{Event, EventBus};
+    use cnc_events::EventBus;
 
     fn attach(game: &mut Game) -> (Arc<EventBus>, cnc_events::EventSubscription) {
         let bus = Arc::new(EventBus::new(4096));

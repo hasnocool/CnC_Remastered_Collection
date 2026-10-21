@@ -669,6 +669,7 @@ fn parse_terrain_objects(ini: &IniFile) -> Vec<TerrainObject> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
