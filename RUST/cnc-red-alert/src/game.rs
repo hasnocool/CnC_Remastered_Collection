@@ -15,9 +15,14 @@ use crate::house::{Country, Faction, House, ProductionItem};
 use crate::map::{Map, Terrain, TILE_SIZE};
 use crate::original_scenario::{ObjectKind, OriginalScenario};
 use crate::pathfind::{find_path, MoveClass};
+use crate::rng::SimRng;
 use crate::scenario::{parse_class_id, Scenario};
 use crate::superweapon::{Superweapon, SuperweaponError, GPS, IRON_CURTAIN_SECONDS};
 use crate::tesla::TeslaCoil;
+
+/// Compact text save format version. v2 added the `rng` line (the seeded
+/// simulation cursor): v1 saves still load and start from the default seed.
+pub const SAVE_VERSION: u32 = 2;
 
 /// Starting credits for each skirmish house.
 pub const DEFAULT_CREDITS: i32 = 10_000;
@@ -645,7 +650,7 @@ struct EnemyInfo {
 }
 
 /// Commands that can be routed through the network layer.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GameCommand {
     Move {
         owner: usize,
@@ -762,9 +767,6 @@ pub struct AiCommander {
     pub attack_timer: Fixed16_16,
 }
 
-/// Deterministic stand-in for the `Random_Pick` the original uses to
-/// scatter `[TeamTypes]` missions. Identical inputs always give identical
-/// offsets so lockstep stays reproducible.
 /// One Rules.ini `Owner=` list: any matching faction token allows the type.
 fn ra_owner_allows(tokens: &[String], allied: bool) -> bool {
     tokens
@@ -801,14 +803,6 @@ fn strike_kind(action: &str) -> Option<&'static str> {
         _ => None,
     }
 }
-fn team_scatter_offset(team_id: u32, tick: u32, ordinal: u32) -> Fixed16_16 {
-    let sample = team_id
-        .wrapping_mul(2_654_435_761)
-        .wrapping_add(tick.wrapping_mul(40_503))
-        .wrapping_add(ordinal.wrapping_mul(2_246_822_519));
-    Fixed16_16::from_int((sample % 7) as i32 - 3)
-}
-
 /// Runtime consumer for `[TeamTypes]` in Red Alert.
 ///
 /// Mirrors the Tiberian Dawn manager: parsed types live here, instances spawn
@@ -927,6 +921,9 @@ pub struct Game {
     pub outcome: Option<ScenarioOutcome>,
     pub messages: Vec<String>,
     pub ai: AiCommander,
+    /// Seeded simulation RNG. Every random draw on a simulation path comes
+    /// from here and its cursor is part of the saved state (see `rng.rs`).
+    pub rng: SimRng,
     /// Which house the human controls (0 Allied, 1 Soviet).
     pub player_owner: usize,
     pub briefing: String,
@@ -967,6 +964,7 @@ impl Game {
             outcome: None,
             messages: Vec::new(),
             ai: AiCommander::new(1),
+            rng: SimRng::from_default_seed(),
             player_owner: 0,
             briefing: String::new(),
             objectives: Vec::new(),
@@ -978,8 +976,17 @@ impl Game {
     }
 
     /// Build a 1v1 skirmish with bases, units, ore and superweapons.
+    ///
+    /// Uses [`crate::rng::DEFAULT_SEED`]; matches that need a lobby-supplied
+    /// stream call [`Game::new_with_seed`].
     pub fn new(width: u32, height: u32) -> Self {
+        Self::new_with_seed(width, height, crate::rng::DEFAULT_SEED)
+    }
+
+    /// Build a 1v1 skirmish whose simulation RNG starts from `seed`.
+    pub fn new_with_seed(width: u32, height: u32, seed: u64) -> Self {
         let mut game = Self::base(width, height);
+        game.rng = SimRng::new(seed);
         game.map = Map::new(width, height);
         game.superweapons.push(Superweapon::new(
             ClassId::Chronosphere,
@@ -1137,6 +1144,30 @@ impl Game {
         game.briefing = scenario.briefing.clone();
         game.recompute_power();
         game
+    }
+
+    /// The seed this match's simulation stream started from.
+    pub fn sim_seed(&self) -> u64 {
+        self.rng.seed()
+    }
+
+    /// Reseed the simulation stream (match start / lobby handshake).
+    pub fn set_sim_seed(&mut self, seed: u64) {
+        self.rng.reseed(seed);
+    }
+
+    /// Deterministic CRC over the full serialised game state, including the
+    /// seeded RNG cursor. Two processes that agree on the command stream and
+    /// the seed must agree on this value every frame.
+    pub fn state_crc(&self) -> u64 {
+        const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+        let mut hash = FNV_OFFSET;
+        for byte in self.to_save_string().as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash
     }
 
     /// Turn off the skirmish AI (used when another human controls the other house).
@@ -1625,8 +1656,12 @@ impl Game {
                     .units
                     .iter()
                     .find(|unit| unit.id == *id && unit.owner == owner && unit.is_alive())?;
-                let mut dx = (unit.id.wrapping_mul(7) % 5) as i32 - 2;
-                let dy = (unit.id.wrapping_mul(13) % 5) as i32 - 2;
+                // Per-unit sub-stream so the scatter stays a pure function of
+                // the match seed + unit id (this helper takes `&self` and must
+                // not advance the tick cursor).
+                let mut rng = SimRng::stream(self.rng.seed(), u64::from(unit.id));
+                let mut dx = rng.range_inclusive(-2, 2);
+                let dy = rng.range_inclusive(-2, 2);
                 if dx == 0 && dy == 0 {
                     dx = 1;
                 }
@@ -2769,7 +2804,10 @@ impl Game {
                     else {
                         continue;
                     };
-                    let offset = team_scatter_offset(team_id, tick, 0);
+                    // The original's `Random_Pick` retreat offset now comes
+                    // from the saved simulation stream, so the cursor advances
+                    // with every retreat decision and replays resume mid-stream.
+                    let offset = Fixed16_16::from_int(self.rng.range_inclusive(-3, 3));
                     let destination = Vec2::new(anchor.x + offset, anchor.y + offset);
                     self.order_units_move(owner, &member_ids, destination);
                     self.team_manager.teams[index].progress = cnc_core::entity::Team::MAX_PROGRESS;
@@ -3747,7 +3785,7 @@ impl Game {
     /// Serialize a mid-mission snapshot to the compact RA save format.
     pub fn to_save_string(&self) -> String {
         let mut out = String::new();
-        out.push_str("RA_SAVE\t1\n");
+        out.push_str(&format!("RA_SAVE\t{SAVE_VERSION}\n"));
         out.push_str(&format!("elapsed\t{}\n", self.elapsed.to_bits()));
         out.push_str(&format!("player\t{}\n", self.player_owner));
         out.push_str(&format!(
@@ -3759,6 +3797,8 @@ impl Game {
             }
         ));
         out.push_str(&format!("map\t{}\t{}\n", self.map.width, self.map.height));
+        // v2: the seeded simulation RNG cursor is part of the saved state.
+        out.push_str(&format!("rng\t{}\t{}\n", self.rng.seed(), self.rng.state()));
         let terrain: Vec<String> = self
             .map
             .terrain
@@ -3846,8 +3886,10 @@ impl Game {
 
     pub fn from_save_string(text: &str) -> Result<Self, String> {
         let mut lines = text.lines();
-        if lines.next() != Some("RA_SAVE\t1") {
-            return Err("not an RA save file".to_string());
+        // v1 saves predate the seeded RNG and load from the default stream.
+        match lines.next() {
+            Some("RA_SAVE\t1") | Some("RA_SAVE\t2") => {}
+            _ => return Err("not an RA save file".to_string()),
         }
         let mut width = 0u32;
         let mut height = 0u32;
@@ -3864,6 +3906,7 @@ impl Game {
         let mut messages = Vec::new();
         let mut superweapons = Vec::new();
         let mut ai = AiCommander::new(1);
+        let mut rng = SimRng::from_default_seed();
         let mut next_id = 1u32;
 
         for line in lines {
@@ -3888,6 +3931,11 @@ impl Game {
                         .split(',')
                         .filter_map(|value| value.parse::<u32>().ok())
                         .collect();
+                }
+                "rng" if fields.len() >= 3 => {
+                    let mut loaded = SimRng::new(fields[1].parse().map_err(|_| "bad rng seed")?);
+                    loaded.set_state(fields[2].parse().map_err(|_| "bad rng state")?);
+                    rng = loaded;
                 }
                 "elapsed" if fields.len() >= 2 => {
                     elapsed = Fixed16_16::from_bits(parse_i32(fields[1])?);
@@ -4012,6 +4060,7 @@ impl Game {
         game.messages = messages;
         game.superweapons = superweapons;
         game.ai = ai;
+        game.rng = rng;
         game.elapsed = elapsed;
         game.outcome = outcome;
         game.player_owner = player;
