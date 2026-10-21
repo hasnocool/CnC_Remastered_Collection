@@ -35,7 +35,7 @@ use crate::weapon::Projectile;
 /// File magic; the trailing NUL makes text-mode mangling obvious.
 pub const SAVE_MAGIC: [u8; 8] = *b"CNCSAVE\0";
 /// Current save format version. Bump when [`GameSnapshot`] changes shape.
-pub const SAVE_VERSION: u32 = 3;
+pub const SAVE_VERSION: u32 = 4;
 /// Header size in bytes.
 pub const SAVE_HEADER_LEN: usize = 8 + 4 + 8 + 8;
 
@@ -168,6 +168,33 @@ impl Game {
             mission_outcome_emitted: false,
         };
         game.validate_sub_cells().map_err(|e| anyhow::anyhow!(e))?;
+        // Validate all transport passenger lists refer to live, in-bounds,
+        // infantry passengers and never exceed capacity.
+        for unit in &game.units {
+            if unit.is_transport() {
+                if unit.passengers.len() > unit.capacity {
+                    bail!(
+                        "transport has {} passengers but capacity {}",
+                        unit.passengers.len(),
+                        unit.capacity
+                    );
+                }
+                for &passenger_idx in &unit.passengers {
+                    let Some(passenger) = game.units.get(passenger_idx) else {
+                        bail!(
+                            "transport passenger index {} is out of bounds",
+                            passenger_idx
+                        );
+                    };
+                    if !passenger.is_infantry() {
+                        bail!("transport passenger {} is not infantry", passenger_idx);
+                    }
+                    if !passenger.is_alive() {
+                        bail!("transport passenger {} is not alive", passenger_idx);
+                    }
+                }
+            }
+        }
         Ok(game)
     }
 
