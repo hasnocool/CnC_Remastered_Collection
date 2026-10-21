@@ -43,17 +43,12 @@ impl ArmorType {
 }
 
 /// Theater types (terrain sets)
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Theater {
+    #[default]
     Temperate,
     Snow,
     Desert,
-}
-
-impl Default for Theater {
-    fn default() -> Self {
-        Self::Temperate
-    }
 }
 
 /// Warhead classes from DEFINES.H.
@@ -1186,8 +1181,6 @@ pub fn unit_type_for_class(class_id: ClassId) -> Option<UnitType> {
         ClassId::VehicleE6 => Some(UnitType::Harvester),
         ClassId::AircraftE1 => Some(UnitType::Orca),
         ClassId::AircraftE2 => Some(UnitType::Apache),
-        ClassId::AircraftE1 => Some(UnitType::MLRS),
-        ClassId::AircraftE1 => Some(UnitType::Chinook),
         _ => None,
     }
 }

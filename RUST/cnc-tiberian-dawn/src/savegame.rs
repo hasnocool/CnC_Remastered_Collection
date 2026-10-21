@@ -35,7 +35,7 @@ use crate::weapon::Projectile;
 /// File magic; the trailing NUL makes text-mode mangling obvious.
 pub const SAVE_MAGIC: [u8; 8] = *b"CNCSAVE\0";
 /// Current save format version. Bump when [`GameSnapshot`] changes shape.
-pub const SAVE_VERSION: u32 = 2;
+pub const SAVE_VERSION: u32 = 3;
 /// Header size in bytes.
 pub const SAVE_HEADER_LEN: usize = 8 + 4 + 8 + 8;
 
@@ -123,7 +123,7 @@ impl Game {
             );
         }
         let (map_width, map_height) = (snapshot.map.width, snapshot.map.height);
-        Ok(Self {
+        let game = Self {
             player_owner: snapshot.mission.player,
             map: snapshot.map,
             houses: snapshot.houses,
@@ -166,7 +166,9 @@ impl Game {
             // Loaded games start with no attached bus; the host re-attaches.
             event_source: None,
             mission_outcome_emitted: false,
-        })
+        };
+        game.validate_sub_cells().map_err(|e| anyhow::anyhow!(e))?;
+        Ok(game)
     }
 
     /// Serialize the game to a versioned, checksummed byte buffer.
@@ -362,6 +364,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn rejects_corrupt_or_truncated_saves() {
         let game = demo_game();
         let bytes = game.to_save_bytes().unwrap();

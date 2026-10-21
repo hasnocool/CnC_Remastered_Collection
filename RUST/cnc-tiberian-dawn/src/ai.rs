@@ -419,7 +419,7 @@ fn attack_force_threshold(difficulty: AIDifficulty) -> usize {
 /// and take no random input (production variety comes from a tick-counter
 /// roll, mirroring how `choose_weighted` consumes caller-supplied rolls).
 pub fn run_expert_ai(game: &mut crate::game::Game, ai: &mut AI, delta_time: Fixed16_16) {
-    ai.decision_timer = ai.decision_timer + delta_time;
+    ai.decision_timer += delta_time;
     ai.tick_counter = ai.tick_counter.wrapping_add(1);
     ai.update(delta_time);
     if ai.decision_timer < ai.decision_interval {
@@ -538,7 +538,7 @@ fn spawn_due_teams(game: &mut crate::game::Game, owner: u8) {
                 .teams_for(team_type.id)
                 .filter(|team| team.active)
                 .count() as u32;
-            let allowed = if team_type.active_at_start { 1 } else { 1 };
+            let allowed = 1;
             live < allowed
         })
         .map(|team_type| team_type.id)

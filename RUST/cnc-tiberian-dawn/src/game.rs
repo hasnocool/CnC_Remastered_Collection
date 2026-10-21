@@ -31,6 +31,32 @@ use crate::td_rules::{
 };
 use crate::unit::Unit;
 use crate::weapon::{Projectile, Warhead, Weapon};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Error returned when a sub-cell slot cannot be assigned or a snapshot
+/// contains an invalid sub-cell assignment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubCellError {
+    InvalidUnit,
+    NotInfantry,
+    CellFull,
+    OutOfRange,
+    DuplicateSlot,
+}
+
+impl std::fmt::Display for SubCellError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidUnit => write!(f, "invalid unit index"),
+            Self::NotInfantry => write!(f, "unit is not infantry"),
+            Self::CellFull => write!(f, "cell already holds 5 infantry"),
+            Self::OutOfRange => write!(f, "sub-slot index out of range"),
+            Self::DuplicateSlot => write!(f, "duplicate sub-slot in cell"),
+        }
+    }
+}
+
+impl std::error::Error for SubCellError {}
 
 /// Short-lived superweapon blast visual.
 #[derive(Clone, Copy, Debug)]
@@ -712,10 +738,8 @@ impl Game {
             // HOUSE.CPP announces low power only on the transition into it,
             // not on every recalculation.
             let low_now = house.power < house.max_power;
-            if low_now && !self.low_power_announced[owner] {
-                if owner as u8 == self.player_owner {
-                    self.eva.speak(cnc_audio::EvaLine::LowPower);
-                }
+            if low_now && !self.low_power_announced[owner] && owner as u8 == self.player_owner {
+                self.eva.speak(cnc_audio::EvaLine::LowPower);
             }
             self.low_power_announced[owner] = low_now;
         }
@@ -2818,7 +2842,7 @@ impl Game {
         // A fully revealed board needs no overlay. The guard must be "every
         // cell is visible", not "some cell is hidden" — the latter is also
         // true when the whole board is hidden, which is when fog matters most.
-        let player_cells = (self.map.width * self.map.height) as u32;
+        let player_cells = self.map.width * self.map.height;
         if self.shroud.visible_count(self.player_owner as usize) >= player_cells {
             return;
         }
@@ -3166,6 +3190,122 @@ impl Game {
         self.order_move_indices(&indices, world)
     }
 
+    /// Top-left origin of a cell in world coordinates.
+    pub fn cell_origin(cx: i32, cy: i32) -> Vec2 {
+        Self::cell(cx, cy)
+    }
+
+    /// Live infantry unit indices currently resting in `cell`.
+    pub fn infantry_in_cell(&self, cell: Vec2i) -> Vec<usize> {
+        self.units
+            .iter()
+            .enumerate()
+            .filter(|(_, unit)| {
+                unit.is_alive() && unit.is_infantry() && Self::unit_cell(unit) == cell
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// Lowest free sub-cell slot in `cell`, if fewer than five infantry occupy it.
+    pub fn free_sub_cell(&self, cell: Vec2i) -> Option<u8> {
+        let used: BTreeSet<u8> = self
+            .infantry_in_cell(cell)
+            .iter()
+            .filter_map(|&index| self.units.get(index).and_then(Unit::effective_sub_cell))
+            .collect();
+        (0..5u8).find(|slot| !used.contains(slot))
+    }
+
+    /// Assign `unit_index` to a free sub-cell slot in `cell`.
+    pub fn assign_infantry_sub_cell(
+        &mut self,
+        unit_index: usize,
+        cell: Vec2i,
+    ) -> Result<u8, SubCellError> {
+        let unit = self
+            .units
+            .get(unit_index)
+            .ok_or(SubCellError::InvalidUnit)?;
+        if !unit.is_infantry() {
+            return Err(SubCellError::NotInfantry);
+        }
+        if !unit.is_alive() {
+            return Err(SubCellError::InvalidUnit);
+        }
+        if self.units[unit_index].effective_sub_cell().is_some()
+            && Self::unit_cell(&self.units[unit_index]) == cell
+        {
+            return Ok(self.units[unit_index].effective_sub_cell().unwrap());
+        }
+        let slot = self.free_sub_cell(cell).ok_or(SubCellError::CellFull)?;
+        self.units[unit_index].set_sub_cell(Some(slot));
+        let origin = Self::cell(cell.x, cell.y);
+        if let Some(offset) = Unit::stopping_offset(slot) {
+            self.units[unit_index].position = origin + offset;
+        }
+        Ok(slot)
+    }
+
+    /// Deterministically assign sub-cell slots to all live infantry.
+    pub fn compact_infantry_sub_cells(&mut self) {
+        let mut grouped: BTreeMap<(i32, i32), Vec<usize>> = BTreeMap::new();
+        for (index, unit) in self.units.iter().enumerate() {
+            if !unit.is_alive() || !unit.is_infantry() {
+                continue;
+            }
+            grouped
+                .entry((Self::unit_cell(unit).x, Self::unit_cell(unit).y))
+                .or_default()
+                .push(index);
+        }
+        for ((cx, cy), indices) in grouped {
+            for (slot, index) in indices.into_iter().enumerate() {
+                if slot >= 5 {
+                    self.units[index].set_sub_cell(None);
+                    continue;
+                }
+                let slot = slot as u8;
+                self.units[index].set_sub_cell(Some(slot));
+                let origin = Self::cell(cx, cy);
+                if let Some(offset) = Unit::stopping_offset(slot) {
+                    self.units[index].position = origin + offset;
+                }
+            }
+        }
+    }
+
+    /// Validate every live infantry sub-cell assignment.
+    pub fn validate_sub_cells(&self) -> Result<(), SubCellError> {
+        let mut grouped: BTreeMap<(i32, i32), Vec<usize>> = BTreeMap::new();
+        for (index, unit) in self.units.iter().enumerate() {
+            if !unit.is_alive() || !unit.is_infantry() {
+                continue;
+            }
+            grouped
+                .entry((Self::unit_cell(unit).x, Self::unit_cell(unit).y))
+                .or_default()
+                .push(index);
+        }
+        for indices in grouped.values() {
+            if indices.len() > 5 {
+                return Err(SubCellError::CellFull);
+            }
+            let mut seen = BTreeSet::new();
+            for &index in indices {
+                if let Some(slot) = self.units[index].effective_sub_cell() {
+                    if slot >= 5 {
+                        return Err(SubCellError::OutOfRange);
+                    }
+                    if !seen.insert(slot) {
+                        return Err(SubCellError::DuplicateSlot);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn world_cell(position: Vec2) -> Vec2i {
         Vec2i::new(
             (position.x.to_f32() / TILE_SIZE).floor() as i32,
@@ -3185,13 +3325,42 @@ impl Game {
     }
 
     /// Cells currently occupied by live units and buildings.
+    ///
+    /// Infantry cells are only considered blocked once all five sub-slots are
+    /// full, so up to five infantry may share one cell deterministically.
     fn occupied_cells(&self, exclude_unit: Option<usize>) -> Vec<Vec2i> {
         let mut cells = Vec::new();
+        let mut full_cells = BTreeSet::new();
+        for (index, unit) in self.units.iter().enumerate() {
+            if Some(index) == exclude_unit || !unit.is_alive() || !unit.is_infantry() {
+                continue;
+            }
+            let cell = Self::unit_cell(unit);
+            let count = self
+                .units
+                .iter()
+                .enumerate()
+                .filter(|(other, other_unit)| {
+                    Some(*other) != exclude_unit
+                        && other_unit.is_alive()
+                        && other_unit.is_infantry()
+                        && Self::unit_cell(other_unit) == cell
+                })
+                .count();
+            if count >= 5 {
+                full_cells.insert((cell.x, cell.y));
+            }
+        }
+        for (x, y) in full_cells {
+            cells.push(Vec2i::new(x, y));
+        }
         for (index, unit) in self.units.iter().enumerate() {
             if Some(index) == exclude_unit || !unit.is_alive() {
                 continue;
             }
-            cells.push(Self::unit_cell(unit));
+            if !unit.is_infantry() {
+                cells.push(Self::unit_cell(unit));
+            }
             if let Some(reserved) = unit.reserved_cell {
                 cells.push(reserved);
             }
@@ -5381,6 +5550,7 @@ mod tests {
         assert!(game.team_manager.teams[0].active);
     }
 
+    #[test]
     fn ion_cannon_requires_building_and_charge() {
         let mut game = Game::new("test", 16, 16);
         game.units.clear();
@@ -6921,5 +7091,172 @@ mod prerequisite_tests {
             game.units[0].health < before,
             "the tower fires once the target is visible"
         );
+    }
+
+    #[test]
+    fn five_infantry_share_cell_deterministically() {
+        let mut game = Game::new("test", 16, 16);
+        game.units.clear();
+        game.houses.clear();
+        game.buildings.clear();
+        game.projectiles.clear();
+
+        let cell = Vec2i::new(4, 4);
+        let mut indices = Vec::new();
+        for _ in 0..5 {
+            let unit = Unit::new(UnitType::InfantryE1, Game::cell_origin(4, 4), 0);
+            let idx = game.units.len();
+            game.units.push(unit);
+            indices.push(idx);
+            game.assign_infantry_sub_cell(idx, cell)
+                .expect("slot available");
+        }
+
+        for (slot, &idx) in indices.iter().enumerate() {
+            assert_eq!(
+                game.units[idx].effective_sub_cell(),
+                Some(slot as u8),
+                "deterministic slot assignment"
+            );
+            let expected = Game::cell_origin(4, 4) + Unit::stopping_offset(slot as u8).unwrap();
+            assert_eq!(game.units[idx].position, expected, "pinned sub-cell offset");
+        }
+
+        // Determinism: compacting again yields the same slots.
+        let before: Vec<Option<u8>> = indices
+            .iter()
+            .map(|&idx| game.units[idx].effective_sub_cell())
+            .collect();
+        game.compact_infantry_sub_cells();
+        let after: Vec<Option<u8>> = indices
+            .iter()
+            .map(|&idx| game.units[idx].effective_sub_cell())
+            .collect();
+        assert_eq!(before, after);
+
+        // Sixth entry is rejected deterministically.
+        let sixth = Unit::new(UnitType::InfantryE1, Game::cell_origin(4, 4), 0);
+        let sixth_idx = game.units.len();
+        game.units.push(sixth);
+        assert_eq!(
+            game.assign_infantry_sub_cell(sixth_idx, cell),
+            Err(SubCellError::CellFull)
+        );
+    }
+
+    #[test]
+    fn infantry_stance_resolves_to_pinned_values() {
+        let mut unit = Unit::new(UnitType::InfantryE1, Vec2::zero(), 0);
+        assert_eq!(unit.effective_stance(), crate::Stance::Standing);
+        assert_eq!(unit.stance_speed_multiplier(), 1.0);
+
+        unit.set_stance(crate::Stance::Prone);
+        assert!(unit.is_prone);
+        assert_eq!(unit.effective_stance(), crate::Stance::Prone);
+        assert_eq!(unit.stance_speed_multiplier(), 0.0);
+
+        unit.set_stance(crate::Stance::Crawling);
+        assert_eq!(unit.stance_speed_multiplier(), 0.5);
+    }
+
+    #[test]
+    fn transport_door_blocks_then_allows_passage() {
+        let mut unit = Unit::new(UnitType::APC, Vec2::zero(), 0);
+        assert!(!unit.is_door_open());
+        assert_eq!(unit.effective_door_state(), crate::DoorState::Closed);
+        assert!(unit.open_door());
+        assert!(unit.is_door_open());
+        assert!(unit.close_door());
+        assert!(!unit.is_door_open());
+    }
+
+    #[test]
+    fn sub_cell_positions_survive_snapshot_round_trip() {
+        let mut game = Game::new("test", 16, 16);
+        game.units.clear();
+        game.houses.clear();
+        game.buildings.clear();
+        game.projectiles.clear();
+        game.houses
+            .push(House::new(ClassId::HouseGDI, "GDI".to_string()));
+
+        let cell = Vec2i::new(3, 3);
+        for _ in 0..5 {
+            let idx = game.units.len();
+            game.units
+                .push(Unit::new(UnitType::InfantryE1, Game::cell_origin(3, 3), 0));
+            game.assign_infantry_sub_cell(idx, cell).unwrap();
+        }
+
+        let bytes = game.to_save_bytes().unwrap();
+        let reloaded = Game::from_save_bytes(&bytes).unwrap();
+        assert_eq!(reloaded.units.len(), 5);
+        for (slot, unit) in reloaded.units.iter().enumerate() {
+            assert_eq!(unit.effective_sub_cell(), Some(slot as u8));
+            let expected = Game::cell_origin(3, 3) + Unit::stopping_offset(slot as u8).unwrap();
+            assert_eq!(unit.position, expected);
+        }
+        assert_eq!(
+            game.to_save_bytes().unwrap(),
+            reloaded.to_save_bytes().unwrap()
+        );
+    }
+
+    #[test]
+    fn malformed_sub_cell_snapshots_are_rejected() {
+        // Six infantry in one cell.
+        let mut game = Game::new("test", 16, 16);
+        game.units.clear();
+        game.houses.clear();
+        game.buildings.clear();
+        game.projectiles.clear();
+        game.houses
+            .push(House::new(ClassId::HouseGDI, "GDI".to_string()));
+        for _ in 0..6 {
+            game.units
+                .push(Unit::new(UnitType::InfantryE1, Game::cell_origin(2, 2), 0));
+        }
+        // Force all six into the same cell without slot validation at construction.
+        game.compact_infantry_sub_cells();
+        // compact only assigns five; manually mark sixth as slot 0 (duplicate) to exercise validation.
+        if let Some(unit) = game.units.get_mut(5) {
+            unit.set_sub_cell(Some(0));
+        }
+        let bytes = game.to_save_bytes().unwrap();
+        assert!(Game::from_save_bytes(&bytes).is_err());
+
+        // Out-of-range slot.
+        let mut game2 = Game::new("test", 16, 16);
+        game2.units.clear();
+        game2.houses.clear();
+        game2.buildings.clear();
+        game2.projectiles.clear();
+        game2
+            .houses
+            .push(House::new(ClassId::HouseGDI, "GDI".to_string()));
+        let mut u = Unit::new(UnitType::InfantryE1, Game::cell_origin(1, 1), 0);
+        u.set_sub_cell(Some(9));
+        game2.units.push(u);
+        let bytes2 = game2.to_save_bytes().unwrap();
+        assert!(Game::from_save_bytes(&bytes2).is_err());
+    }
+
+    #[test]
+    fn malformed_duplicate_sub_slot_rejected() {
+        let mut game = Game::new("test", 16, 16);
+        game.units.clear();
+        game.houses.clear();
+        game.buildings.clear();
+        game.projectiles.clear();
+        game.houses
+            .push(House::new(ClassId::HouseGDI, "GDI".to_string()));
+        let mut a = Unit::new(UnitType::InfantryE1, Game::cell_origin(2, 2), 0);
+        a.set_sub_cell(Some(0));
+        let mut b = Unit::new(UnitType::InfantryE1, Game::cell_origin(2, 2), 0);
+        b.set_sub_cell(Some(0));
+        game.units.push(a);
+        game.units.push(b);
+        let bytes = game.to_save_bytes().unwrap();
+        assert!(Game::from_save_bytes(&bytes).is_err());
     }
 }

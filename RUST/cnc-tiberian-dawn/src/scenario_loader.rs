@@ -16,6 +16,7 @@
 use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
 
+use cnc_core::trigger_attach::TriggerMode;
 use cnc_core::{ClassId, Fixed16_16, IniFile, Vec2, Vec2i};
 
 use crate::building::Building;
@@ -163,6 +164,22 @@ pub struct TriggerRecord {
     pub width: u32,
 }
 
+impl TriggerRecord {
+    /// One-shot/persistent semantics in the shared attachment model.
+    ///
+    /// The original field is `IsPersistant` (`TRIGGER.CPP`
+    /// `TriggerClass::Write_INI`): `0` is volatile (fires once), anything
+    /// greater keeps firing. Kept as a conversion so the loader and the
+    /// engine agree on one definition of the flag.
+    pub fn attachment_mode(&self) -> TriggerMode {
+        if self.persistent <= 0 {
+            TriggerMode::OneShot
+        } else {
+            TriggerMode::Persistent
+        }
+    }
+}
+
 /// Decode one original trigger record.
 pub fn parse_trigger_record(trigger_name: &str, record: &str) -> TriggerRecord {
     let fields: Vec<&str> = record.split(',').map(str::trim).collect();
@@ -185,7 +202,7 @@ pub fn parse_trigger_record(trigger_name: &str, record: &str) -> TriggerRecord {
         house: field(3).to_string(),
         team: field(4).to_string(),
         persistent: field(5).parse::<i64>().unwrap_or(0),
-        width: MAP_FALLBACK_SIDE as u32,
+        width: MAP_FALLBACK_SIDE,
     }
 }
 
@@ -332,8 +349,9 @@ pub fn trigger_records_to_triggers(records: &[TriggerRecord]) -> (Vec<Trigger>, 
             name: record.name.clone(),
             condition,
             actions: vec![action],
-            // `IsPersistant` > 0 means repeatable.
-            once: record.persistent <= 0,
+            // `IsPersistant` > 0 means repeatable; the shared attachment
+            // model owns the flag's meaning (`TriggerRecord::attachment_mode`).
+            once: record.attachment_mode() == TriggerMode::OneShot,
             enabled: true,
             fired: false,
         });
@@ -444,8 +462,8 @@ pub fn parse_scenario(ini: &IniFile) -> Result<ParsedScenario> {
     if let Some(section) = ini.section("Objectives") {
         let mut keyed: Vec<(i64, String)> = section
             .values
-            .iter()
-            .filter_map(|(key, _)| key.parse::<i64>().ok())
+            .keys()
+            .filter_map(|key| key.parse::<i64>().ok())
             .filter_map(|order| {
                 let raw = section.get_string(&order.to_string())?;
                 Some((order, raw.to_string()))
@@ -472,7 +490,7 @@ pub fn parse_scenario(ini: &IniFile) -> Result<ParsedScenario> {
         trigger_records: parse_trigger_records(ini),
         // Team types are optional: a scenario without [TeamTypes] yields an
         // empty roster and the game falls back to the built-in expert AI.
-        team_types: cnc_core::entity::team_types_from_ini(&ini).unwrap_or_default(),
+        team_types: cnc_core::entity::team_types_from_ini(ini).unwrap_or_default(),
         warnings: scenario_warnings(ini),
     })
 }
@@ -872,7 +890,7 @@ pub fn decode_bin(raw: &[u8], expected_side: Option<u32>) -> Result<ScenarioMap>
 
 /// Largest `side` with `side * side * 2 == byte_len`, if any.
 fn square_side(byte_len: usize) -> Option<u32> {
-    if byte_len % BIN_CELL_BYTES != 0 {
+    if !byte_len.is_multiple_of(BIN_CELL_BYTES) {
         return None;
     }
     let cells = byte_len / BIN_CELL_BYTES;
@@ -886,7 +904,9 @@ fn square_side(byte_len: usize) -> Option<u32> {
 
 fn cells_to_map(bytes: &[u8], width: u32, height: u32) -> ScenarioMap {
     let cells = bytes
-        .chunks_exact(BIN_CELL_BYTES)
+        .as_chunks::<BIN_CELL_BYTES>()
+        .0
+        .iter()
         .map(|pair| BinCell {
             template: pair[0],
             icon: pair[1],
@@ -1617,6 +1637,20 @@ Action1=Win
         let records = vec![parse_trigger_record("Repeating", "Time, Win, 5, , , 1")];
         let (triggers, _) = trigger_records_to_triggers(&records);
         assert!(!triggers[0].once, "persistent > 0 means repeatable");
+    }
+
+    #[test]
+    fn attachment_mode_tracks_is_persistant() {
+        let once = parse_trigger_record("Once", "Time, Win, 5, , , 0");
+        let repeat = parse_trigger_record("Repeat", "Time, Win, 5, , , 1");
+        let negative = parse_trigger_record("Odd", "Time, Win, 5, , , -3");
+        assert_eq!(once.attachment_mode(), TriggerMode::OneShot);
+        assert_eq!(repeat.attachment_mode(), TriggerMode::Persistent);
+        assert_eq!(
+            negative.attachment_mode(),
+            TriggerMode::OneShot,
+            "anything not greater than zero is volatile, as in TriggerClass"
+        );
     }
 
     #[test]

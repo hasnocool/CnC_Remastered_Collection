@@ -21,7 +21,7 @@ pub use ai::{AIDifficulty, ProductionWeight, AI};
 pub use building::{Building, Factory, PowerPlant, Refinery};
 pub use carryover::Carryover;
 pub use events::{names as event_names, OutcomeKind, SuperweaponKind};
-pub use game::{Buildable, Game, GameStatus, SidebarOption};
+pub use game::{Buildable, Game, GameStatus, SidebarOption, SubCellError};
 pub use house::House;
 pub use map::{CellGrid, Map};
 pub use mission::{
@@ -31,5 +31,5 @@ pub use network::{CommandQueue, LiveEvent, LiveSession, NetworkConfig, PeerHands
 pub use powerup::{Crate, PowerupKind, PowerupState};
 pub use savegame::{GameSnapshot, SAVE_MAGIC, SAVE_VERSION};
 pub use td_rules::{ArmorType, StructureType, Theater, UnitType, WarheadType, WeaponType};
-pub use unit::{Aircraft, Infantry, Unit, Vehicle};
+pub use unit::{Aircraft, DoorState, Infantry, Stance, Unit, Vehicle};
 pub use weapon::{Projectile, Warhead, Weapon};

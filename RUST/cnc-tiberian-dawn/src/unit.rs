@@ -22,6 +22,33 @@ pub fn facing_difference(a: f32, b: f32) -> f32 {
     difference
 }
 
+/// Infantry stance states (C++ `DoType` / `InfantryClass::IsProne`).
+///
+/// `Standing` is the default upright stance; `Prone` is the lowered stance
+/// infantry adopt under fire (half damage, crawl movement).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Stance {
+    #[default]
+    Standing,
+    Prone,
+    Crawling,
+    Firing,
+    FiringProne,
+}
+
+/// Door state for units that carry a `DoorClass` (transports, factories).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DoorState {
+    #[default]
+    Closed,
+    Opening,
+    Open,
+    Closing,
+}
+
+/// Sub-cell slot index inside a cell (0..5), matching `StoppingCoordAbs`.
+pub type SubCellSlot = u8;
+
 /// Base unit structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Unit {
@@ -63,6 +90,30 @@ pub struct Unit {
     pub path_index: usize,
     /// Cell reserved for this unit's next path step (dynamic reservation).
     pub reserved_cell: Option<Vec2i>,
+    /// Sub-cell slot (0..5) occupied by an infantry unit inside its cell.
+    /// `None` for vehicles/aircraft or unassigned infantry.
+    #[serde(default)]
+    pub sub_cell: Option<u8>,
+    #[serde(default)]
+    pub sub_cell_slot: Option<u8>,
+    #[serde(default)]
+    pub sub_slot: Option<u8>,
+    #[serde(default)]
+    pub cell_slot: Option<u8>,
+    #[serde(default)]
+    pub slot: Option<u8>,
+    /// Infantry stance (standing/prone/...).
+    #[serde(default)]
+    pub stance: Stance,
+    #[serde(default)]
+    pub infantry_stance: Stance,
+    #[serde(default)]
+    pub is_prone: bool,
+    /// Door state for transports/factories.
+    #[serde(default)]
+    pub door_state: DoorState,
+    #[serde(default)]
+    pub door: DoorState,
     /// True for harvesters.
     pub is_harvester: bool,
     /// Carried tiberium steps (0..HARVESTER_STEP_COUNT).
@@ -128,6 +179,16 @@ impl Unit {
             path: Vec::new(),
             path_index: 0,
             reserved_cell: None,
+            sub_cell: None,
+            sub_cell_slot: None,
+            sub_slot: None,
+            cell_slot: None,
+            slot: None,
+            stance: Stance::Standing,
+            infantry_stance: Stance::Standing,
+            is_prone: false,
+            door_state: DoorState::Closed,
+            door: DoorState::Closed,
             is_harvester: unit_type == UnitType::Harvester,
             tiberium: 0,
             harvest_timer: Fixed16_16::ZERO,
@@ -173,6 +234,119 @@ impl Unit {
 
     pub fn is_infantry(&self) -> bool {
         self.unit_type.stats().is_infantry
+    }
+
+    /// Effective sub-cell slot, checking every alias field.
+    pub fn effective_sub_cell(&self) -> Option<u8> {
+        self.sub_cell
+            .or(self.sub_cell_slot)
+            .or(self.sub_slot)
+            .or(self.cell_slot)
+            .or(self.slot)
+    }
+
+    /// Assign one sub-cell slot to all alias fields.
+    pub fn set_sub_cell(&mut self, slot: Option<u8>) {
+        self.sub_cell = slot;
+        self.sub_cell_slot = slot;
+        self.sub_slot = slot;
+        self.cell_slot = slot;
+        self.slot = slot;
+    }
+
+    /// Pixel offsets inside a cell for the five `StoppingCoordAbs` slots.
+    pub const STOPPING_OFFSETS_PX: [(f32, f32); 5] = [
+        (12.0, 12.0),
+        (6.0, 6.0),
+        (18.0, 6.0),
+        (6.0, 18.0),
+        (18.0, 18.0),
+    ];
+
+    /// Original C++ `StoppingCoordAbs` values (lepton-packed COORDINATE).
+    pub const STOPPING_COORD_ABS: [u32; 5] = [
+        0x0080_0080,
+        0x0040_0040,
+        0x0040_00C0,
+        0x00C0_0040,
+        0x00C0_00C0,
+    ];
+
+    pub fn stopping_offset(slot: u8) -> Option<cnc_core::Vec2> {
+        let (x, y) = Self::STOPPING_OFFSETS_PX.get(slot as usize).copied()?;
+        Some(cnc_core::Vec2::new(
+            cnc_core::Fixed16_16::from_f32(x),
+            cnc_core::Fixed16_16::from_f32(y),
+        ))
+    }
+
+    pub fn set_stance(&mut self, stance: Stance) {
+        self.stance = stance;
+        self.infantry_stance = stance;
+        self.is_prone = stance == Stance::Prone;
+    }
+
+    /// Stance-dependent movement speed multiplier.
+    pub fn stance_speed_multiplier(&self) -> f32 {
+        match self.effective_stance() {
+            Stance::Standing | Stance::Firing => 1.0,
+            Stance::Prone | Stance::FiringProne => 0.0,
+            Stance::Crawling => 0.5,
+        }
+    }
+
+    pub fn effective_stance(&self) -> Stance {
+        if self.is_prone {
+            Stance::Prone
+        } else {
+            self.stance
+        }
+    }
+
+    pub fn resolved_speed(&self) -> cnc_core::Fixed16_16 {
+        self.speed * cnc_core::Fixed16_16::from_f32(self.stance_speed_multiplier())
+    }
+
+    pub fn open_door(&mut self) -> bool {
+        if self.is_transport() {
+            self.door_state = DoorState::Open;
+            self.door = DoorState::Open;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn close_door(&mut self) -> bool {
+        if self.is_transport() {
+            self.door_state = DoorState::Closed;
+            self.door = DoorState::Closed;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn effective_door_state(&self) -> DoorState {
+        if self.door_state != DoorState::Closed {
+            self.door_state
+        } else {
+            self.door
+        }
+    }
+
+    pub fn is_door_open(&self) -> bool {
+        matches!(
+            self.effective_door_state(),
+            DoorState::Open | DoorState::Opening
+        )
+    }
+
+    pub fn is_transport(&self) -> bool {
+        matches!(
+            self.unit_type,
+            crate::td_rules::UnitType::APC | crate::td_rules::UnitType::Chinook
+        )
     }
 
     pub fn next_rearm_delay(&self, weapon: &Weapon) -> Fixed16_16 {
