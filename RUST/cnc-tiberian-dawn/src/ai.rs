@@ -373,6 +373,21 @@ const fn base_weight(unit: UnitType) -> u32 {
         // Support infantry are filtered out of the AI roster first, so these
         // arms only keep the match exhaustive.
         UnitType::Engineer | UnitType::Commando => 0,
+        UnitType::APC => 10,
+        UnitType::Artillery => 12,
+        UnitType::MLRS => 12,
+        UnitType::StealthTank => 28,
+        UnitType::FlameTank => 28,
+        UnitType::MobileHQ => 5,
+        UnitType::Grenadier => 8,
+        UnitType::RocketSoldier => 8,
+        UnitType::Flamethrower => 8,
+        UnitType::ChemWarrior => 8,
+        UnitType::Chinook => 3,
+        UnitType::Triceratops => 15,
+        UnitType::Trex => 20,
+        UnitType::Raptor => 15,
+        UnitType::Stegosaurus => 10,
     }
 }
 
