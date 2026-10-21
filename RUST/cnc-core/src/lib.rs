@@ -15,6 +15,7 @@ pub mod serialization;
 pub mod shroud;
 pub mod smart_ptr;
 pub mod trigger_apply;
+pub mod trigger_attach;
 pub mod trigger_records;
 pub mod visibility;
 
@@ -43,5 +44,9 @@ pub use smart_ptr::CCPtr;
 pub use trigger_apply::{
     apply_action_record, apply_actions, events_hold, fire_trigger, special_weapon, ApplyReport,
     TriggerHost,
+};
+pub use trigger_attach::{
+    AttachTarget, AttachmentFiring, AttachmentId, AttachmentSpec, TriggerAttachment,
+    TriggerAttachments, TriggerMode, TriggerSubject,
 };
 pub use visibility::{CellState, FogPolicy, SightSource, Visibility, VISIBILITY_SNAPSHOT_VERSION};
