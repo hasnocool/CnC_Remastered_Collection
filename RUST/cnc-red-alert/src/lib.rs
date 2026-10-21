@@ -26,7 +26,6 @@ pub mod tesla;
 pub use aircraft::{AIRFIELD_CAPACITY, DEFAULT_AMMO, REARM_SECONDS};
 pub use events::{names as event_names, OutcomeKind as EventOutcomeKind, SuperweaponKind};
 pub use game::{
-    ArmorClass, damage_vs_armor, armor_for,
     AiCommander, BuildError, Game, GameCommand, GameStatus, GameStructure, GameUnit,
     ObjectiveState, RunningTrigger, ScenarioOutcome, Shot, TargetRef, UnitRole, WeaponSpec,
 };
