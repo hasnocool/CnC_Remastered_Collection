@@ -93,7 +93,10 @@ const MAX_PARTIAL_CODEBOOK_ENTRIES: u16 = 255;
 /// a partial codebook is active.
 const UNCHANGED_BLOCK: u8 = 0xFF;
 
-/// Sample rate of the VQA audio tracks, in Hz.
+/// Legacy fallback sample rate for VQA audio tracks that carry no header.
+/// The SND1/SND2 chunks now carry their own sample rate in an 8-byte
+/// header; this constant is retained only as a documented fallback and is
+/// no longer used by the decoder.
 pub const VQA_SAMPLE_RATE: u16 = 22050;
 
 /// Decoding / demuxing failures.
@@ -125,6 +128,20 @@ pub enum VqaError {
     CodebookIndexOutOfRange { index: u8, len: usize },
     #[error("delta frame marks block {block} unchanged, but there is no previous frame")]
     DeltaWithoutBase { block: usize },
+    #[error("VQFR delta block index {block} is out of range (have {blocks} blocks)")]
+    DeltaBlockOutOfRange { block: usize, blocks: usize },
+    #[error("SND audio header too short ({len} bytes; need {expected})")]
+    BadAudioHeader { len: usize, expected: usize },
+    #[error("SND sample_rate is 0")]
+    BadAudioSampleRate,
+    #[error("SND channels is {0}; must be 1 or 2")]
+    BadAudioChannels(u16),
+    #[error("SND{tag} requires {expected} channel(s), got {got}")]
+    AudioChannelMismatch {
+        tag: &'static str,
+        expected: u16,
+        got: u16,
+    },
     #[error("format80 decompression failed: {0}")]
     Format80(#[from] crate::format80::Format80Error),
     #[error("compressed frame chunk appeared before the VQHD header")]
@@ -195,6 +212,16 @@ pub fn demux(bytes: &[u8]) -> Result<Vqa, VqaError> {
 /// file is diagnosed without guessing.
 pub fn demux_strict(bytes: &[u8]) -> Result<Vqa, VqaError> {
     demux_inner(bytes, true)
+}
+
+fn decompress_vqfr(data: &[u8], max_len: usize) -> Result<Vec<u8>, VqaError> {
+    match crate::format80::decompress(data, max_len) {
+        Ok(v) => Ok(v),
+        Err(crate::format80::Format80Error::LengthMismatch { actual, .. }) if actual <= max_len => {
+            crate::format80::decompress(data, actual).map_err(VqaError::Format80)
+        }
+        Err(e) => Err(VqaError::Format80(e)),
+    }
 }
 
 fn demux_inner(bytes: &[u8], strict: bool) -> Result<Vqa, VqaError> {
@@ -270,12 +297,19 @@ fn demux_inner(bytes: &[u8], strict: bool) -> Result<Vqa, VqaError> {
                 data: data.to_vec(),
             }),
             TAG_FRAME_FULL_Z => {
-                // Format80-compressed full frame: expands to exactly one
-                // byte per block. Requires the header (block dimensions)
-                // to have been seen, as in every real VQA file.
+                // Format80-compressed frame payload. Historically this was
+                // treated as a full frame (one byte per block); per the
+                // documented delta layout it is now a VQFR delta: a
+                // format80 stream whose decompressed bytes are
+                // `u16le num_changes, u16le reserved, then num_changes x
+                // (u16le block_index, u8 codebook_index)`. The output
+                // length is not known up front, so decompress with the
+                // maximum possible size for this frame and accept the
+                // stream's own terminator.
                 let header = header.as_ref().ok_or(VqaError::FrameBeforeHeader)?;
                 let blocks = header.width_blocks as usize * header.height_blocks as usize;
-                let data = crate::format80::decompress(data, blocks).map_err(VqaError::Format80)?;
+                let max_len = 4 + 3 * blocks;
+                let data = decompress_vqfr(data, max_len)?;
                 chunks.push(VqaChunk::FrameFull { data });
             }
             TAG_AUDIO_RAW => {
@@ -284,16 +318,60 @@ fn demux_inner(bytes: &[u8], strict: bool) -> Result<Vqa, VqaError> {
                 chunks.push(VqaChunk::AudioPcm { samples });
             }
             TAG_AUDIO_ADPCM_MONO => {
-                let samples = adpcm::Decoder::decode(data)?;
+                if data.len() < 8 {
+                    return Err(VqaError::BadAudioHeader {
+                        len: data.len(),
+                        expected: 8,
+                    });
+                }
+                let sample_rate = u16::from_le_bytes([data[0], data[1]]);
+                let channels = u16::from_le_bytes([data[2], data[3]]);
+                let _flags = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+                if sample_rate == 0 {
+                    return Err(VqaError::BadAudioSampleRate);
+                }
+                if !(1..=2).contains(&channels) {
+                    return Err(VqaError::BadAudioChannels(channels));
+                }
+                if channels != 1 {
+                    return Err(VqaError::AudioChannelMismatch {
+                        tag: "1",
+                        expected: 1,
+                        got: channels,
+                    });
+                }
+                let samples = adpcm::Decoder::decode(&data[8..])?;
                 chunks.push(VqaChunk::AudioAdpcm {
-                    sample_rate: VQA_SAMPLE_RATE,
+                    sample_rate,
                     channels: vec![samples],
                 });
             }
             TAG_AUDIO_ADPCM_STEREO => {
-                let (left, right) = adpcm::decode_stereo(data)?;
+                if data.len() < 8 {
+                    return Err(VqaError::BadAudioHeader {
+                        len: data.len(),
+                        expected: 8,
+                    });
+                }
+                let sample_rate = u16::from_le_bytes([data[0], data[1]]);
+                let channels = u16::from_le_bytes([data[2], data[3]]);
+                let _flags = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+                if sample_rate == 0 {
+                    return Err(VqaError::BadAudioSampleRate);
+                }
+                if !(1..=2).contains(&channels) {
+                    return Err(VqaError::BadAudioChannels(channels));
+                }
+                if channels != 2 {
+                    return Err(VqaError::AudioChannelMismatch {
+                        tag: "2",
+                        expected: 2,
+                        got: channels,
+                    });
+                }
+                let (left, right) = adpcm::decode_stereo(&data[8..])?;
                 chunks.push(VqaChunk::AudioAdpcm {
-                    sample_rate: VQA_SAMPLE_RATE,
+                    sample_rate,
                     channels: vec![left, right],
                 });
             }
@@ -446,40 +524,93 @@ pub fn decode_frames(vqa: &Vqa) -> Result<Vec<Vec<u8>>, VqaError> {
                 };
                 pending_partial = None;
 
-                if data.len() != blocks {
-                    return Err(VqaError::DimMismatch {
-                        data: data.len(),
-                        blocks,
-                    });
-                }
                 let entry_count = codebook.len() / CODEBOOK_ENTRY_LEN;
+                // Detect a VQFR delta payload: `u16le num_changes, u16le
+                // reserved, then num_changes x (u16le block_index, u8
+                // codebook_index)`. A plain full frame is one byte per block.
+                let is_delta = data.len() >= 4 && {
+                    let n = u16::from_le_bytes([data[0], data[1]]) as usize;
+                    4 + 3 * n == data.len()
+                };
+
                 let mut plane = vec![0u8; out_width * out_height];
                 if let Some(prev) = &previous {
                     plane.copy_from_slice(prev);
                 }
-                for (block_index, &byte) in data.iter().enumerate() {
-                    if is_partial && byte == UNCHANGED_BLOCK {
-                        if previous.is_none() {
-                            return Err(VqaError::DeltaWithoutBase { block: block_index });
-                        }
-                        continue;
-                    }
-                    if byte as usize >= entry_count {
-                        return Err(VqaError::CodebookIndexOutOfRange {
-                            index: byte,
-                            len: entry_count,
+
+                if is_delta {
+                    let num_changes = u16::from_le_bytes([data[0], data[1]]) as usize;
+                    let reserved = u16::from_le_bytes([data[2], data[3]]);
+                    if reserved != 0 {
+                        return Err(VqaError::ReservedNotZero {
+                            field: "VQFR reserved",
+                            value: reserved,
                         });
                     }
-                    let entry_bytes = &codebook[byte as usize * CODEBOOK_ENTRY_LEN
-                        ..(byte as usize + 1) * CODEBOOK_ENTRY_LEN];
-                    let column = block_index / height_blocks;
-                    let row = block_index % height_blocks;
-                    let base_x = column * 2;
-                    let base_y = row * 2;
-                    for (step, &pixel) in entry_bytes.iter().enumerate() {
-                        let px = base_x + (step % 2);
-                        let py = base_y + (step / 2);
-                        plane[py * out_width + px] = pixel;
+                    if num_changes > 0 && previous.is_none() {
+                        return Err(VqaError::DeltaWithoutBase { block: 0 });
+                    }
+                    let mut pos = 4usize;
+                    for _ in 0..num_changes {
+                        let block_index = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+                        let codebook_index = data[pos + 2];
+                        pos += 3;
+                        if block_index >= blocks {
+                            return Err(VqaError::DeltaBlockOutOfRange {
+                                block: block_index,
+                                blocks,
+                            });
+                        }
+                        if codebook_index as usize >= entry_count {
+                            return Err(VqaError::CodebookIndexOutOfRange {
+                                index: codebook_index,
+                                len: entry_count,
+                            });
+                        }
+                        let entry_bytes = &codebook[codebook_index as usize * CODEBOOK_ENTRY_LEN
+                            ..(codebook_index as usize + 1) * CODEBOOK_ENTRY_LEN];
+                        let column = block_index / height_blocks;
+                        let row = block_index % height_blocks;
+                        let base_x = column * 2;
+                        let base_y = row * 2;
+                        for (step, &pixel) in entry_bytes.iter().enumerate() {
+                            let px = base_x + (step % 2);
+                            let py = base_y + (step / 2);
+                            plane[py * out_width + px] = pixel;
+                        }
+                    }
+                } else {
+                    // Full frame: one byte per block.
+                    if data.len() != blocks {
+                        return Err(VqaError::DimMismatch {
+                            data: data.len(),
+                            blocks,
+                        });
+                    }
+                    for (block_index, &byte) in data.iter().enumerate() {
+                        if is_partial && byte == UNCHANGED_BLOCK {
+                            if previous.is_none() {
+                                return Err(VqaError::DeltaWithoutBase { block: block_index });
+                            }
+                            continue;
+                        }
+                        if byte as usize >= entry_count {
+                            return Err(VqaError::CodebookIndexOutOfRange {
+                                index: byte,
+                                len: entry_count,
+                            });
+                        }
+                        let entry_bytes = &codebook[byte as usize * CODEBOOK_ENTRY_LEN
+                            ..(byte as usize + 1) * CODEBOOK_ENTRY_LEN];
+                        let column = block_index / height_blocks;
+                        let row = block_index % height_blocks;
+                        let base_x = column * 2;
+                        let base_y = row * 2;
+                        for (step, &pixel) in entry_bytes.iter().enumerate() {
+                            let px = base_x + (step % 2);
+                            let py = base_y + (step / 2);
+                            plane[py * out_width + px] = pixel;
+                        }
                     }
                 }
                 previous = Some(plane.clone());
@@ -635,8 +766,13 @@ mod tests {
         let packed = crate::format80::compress(&entries, entries.len()).expect("compress");
         partial.extend_from_slice(&packed);
         bytes.extend_from_slice(&chunk(&TAG_CODEBOOK_PARTIAL_Z, &partial));
-        // Mono ADPCM audio: two bytes -> four samples.
-        bytes.extend_from_slice(&chunk(&TAG_AUDIO_ADPCM_MONO, &[0x00, 0x10]));
+        // Mono ADPCM audio: 8-byte header + two bytes -> four samples.
+        let mut snd = Vec::new();
+        snd.extend_from_slice(&22050u16.to_le_bytes());
+        snd.extend_from_slice(&1u16.to_le_bytes());
+        snd.extend_from_slice(&0u32.to_le_bytes());
+        snd.extend_from_slice(&[0x00, 0x10]);
+        bytes.extend_from_slice(&chunk(&TAG_AUDIO_ADPCM_MONO, &snd));
         let total = (bytes.len() - 8) as u32;
         bytes[4..8].copy_from_slice(&total.to_be_bytes());
 

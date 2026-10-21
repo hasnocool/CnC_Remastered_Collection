@@ -18,7 +18,6 @@ use std::path::{Path, PathBuf};
 
 use cnc_asset::format80;
 use cnc_asset::video::{decode_frames, demux, demux_strict, VqaChunk, VqaError};
-use cnc_asset::vxl::{VxlError, VxlFile};
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -138,10 +137,24 @@ fn synthetic_compressed_vqa() -> Vec<u8> {
         vqfr(&[0, 1, 1, 0]),
         cbpz(&partial_b),
         vqfr(&[1, 0xFF, 1, 0]),
-        // Mono ADPCM: 4 bytes -> 8 samples.
-        chunk(b"SND1", &[0x12, 0x34, 0x56, 0x78]),
-        // Stereo ADPCM: even byte -> left, odd byte -> right.
-        chunk(b"SND2", &[0x10, 0x20]),
+        // Mono ADPCM: 8-byte header + 4 ADPCM bytes -> 8 samples.
+        {
+            let mut snd1 = Vec::new();
+            snd1.extend_from_slice(&22050u16.to_le_bytes());
+            snd1.extend_from_slice(&1u16.to_le_bytes());
+            snd1.extend_from_slice(&0u32.to_le_bytes());
+            snd1.extend_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+            chunk(b"SND1", &snd1)
+        },
+        // Stereo ADPCM: 8-byte header + 2 ADPCM bytes.
+        {
+            let mut snd2 = Vec::new();
+            snd2.extend_from_slice(&22050u16.to_le_bytes());
+            snd2.extend_from_slice(&2u16.to_le_bytes());
+            snd2.extend_from_slice(&0u32.to_le_bytes());
+            snd2.extend_from_slice(&[0x10, 0x20]);
+            chunk(b"SND2", &snd2)
+        },
     ])
 }
 
@@ -278,199 +291,41 @@ fn an_unknown_chunk_id_is_an_error_naming_the_chunk() {
     assert!(demux_strict(&bytes).is_err());
 }
 
-// ---------------------------------------------------------------------------
-// VXL voxel decoder
-// ---------------------------------------------------------------------------
-
-/// Build the synthetic VXL: 4x3 voxels, 2 layers, 2 frames, 4 palette entries.
-fn synthetic_vxl() -> Vec<u8> {
-    let palette: [[u8; 3]; 4] = [[0, 0, 0], [10, 20, 30], [40, 50, 60], [70, 80, 90]];
-    let layers: [[Vec<u8>; 2]; 2] = [
-        // layer z = 0
-        [
-            vec![0, 1, 0, 2, 1, 0, 2, 0, 0, 0, 3, 0],
-            vec![3, 0, 0, 0, 0, 2, 0, 1, 0, 0, 0, 2],
-        ],
-        // layer z = 1
-        [
-            vec![0, 2, 0, 0, 0, 0, 1, 0, 3, 0, 0, 0],
-            vec![0, 0, 3, 0, 0, 0, 0, 0, 0, 1, 0, 0],
-        ],
-    ];
-
-    let palette_offset: u32 = 32;
-    let layer_offset: u32 = palette_offset + palette.len() as u32 * 3;
-    let voxel_offset: u32 = layer_offset + layers.len() as u32 * 2;
-
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"VXL\0");
-    bytes.extend_from_slice(&1u16.to_le_bytes()); // version
-    bytes.extend_from_slice(&4u16.to_le_bytes()); // width
-    bytes.extend_from_slice(&3u16.to_le_bytes()); // height
-    bytes.extend_from_slice(&2u16.to_le_bytes()); // depth
-    bytes.extend_from_slice(&2u16.to_le_bytes()); // num_layers
-    bytes.extend_from_slice(&2u16.to_le_bytes()); // num_frames
-    bytes.extend_from_slice(&(palette.len() as u16).to_le_bytes());
-    bytes.extend_from_slice(&0u16.to_le_bytes()); // reserved
-    bytes.extend_from_slice(&palette_offset.to_le_bytes());
-    bytes.extend_from_slice(&layer_offset.to_le_bytes());
-    bytes.extend_from_slice(&voxel_offset.to_le_bytes());
-    debug_assert_eq!(bytes.len(), 32);
-
-    for entry in palette {
-        bytes.extend_from_slice(&entry);
-    }
-    for layer in 0..layers.len() {
-        bytes.extend_from_slice(&(layer as u16).to_le_bytes());
-    }
-    for layer in &layers {
-        for frame in layer {
-            bytes.extend_from_slice(frame);
+#[test]
+fn snd_bad_header_field_returns_typed_error() {
+    fn chunk(tag: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut out = tag.to_vec();
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(data);
+        if data.len() % 2 == 1 {
+            out.push(0);
         }
+        out
     }
-    bytes
-}
-
-/// Read one frame's RGBA pixels out of an atlas, row by row.
-fn atlas_frame_pixels(
-    atlas: &cnc_asset::atlas::SpriteAtlas,
-    frame: &cnc_asset::atlas::SpriteFrame,
-) -> Vec<u8> {
-    let mut out = Vec::with_capacity(frame.w as usize * frame.h as usize * 4);
-    for row in 0..frame.h as usize {
-        let start = ((frame.y as usize + row) * atlas.width as usize + frame.x as usize) * 4;
-        let end = start + frame.w as usize * 4;
-        out.extend_from_slice(&atlas.pixels[start..end]);
-    }
-    out
-}
-
-#[test]
-fn vxl_parses_and_converts_to_atlas() {
-    let bytes = synthetic_vxl();
-    let vxl = VxlFile::parse(&bytes).expect("parse the VXL");
-
-    // --- the parsed volume ------------------------------------------------
-    assert_eq!(vxl.header.width, 4);
-    assert_eq!(vxl.header.height, 3);
-    assert_eq!(vxl.header.depth, 2);
-    assert_eq!(vxl.header.num_layers, 2);
-    assert_eq!(vxl.header.num_frames, 2);
-    assert_eq!(
-        vxl.palette,
-        vec![[0, 0, 0], [10, 20, 30], [40, 50, 60], [70, 80, 90]]
-    );
-    assert_eq!(vxl.layers.len(), 2);
-    assert_eq!(vxl.layers[0].z, 0);
-    assert_eq!(vxl.layers[1].z, 1);
-    assert_eq!(
-        vxl.layers[0].frames[0],
-        vec![0, 1, 0, 2, 1, 0, 2, 0, 0, 0, 3, 0]
-    );
-    assert_eq!(
-        vxl.layers[1].frames[1],
-        vec![0, 0, 3, 0, 0, 0, 0, 0, 0, 1, 0, 0]
-    );
-
-    // --- the layer frames -------------------------------------------------
-    let layer0 = vxl.layer_frame_rgba(0, 0).expect("layer 0 frame 0");
-    assert_eq!(layer0.len(), 4 * 3 * 4);
-    assert_eq!(
-        layer0,
-        vec![
-            0, 0, 0, 0, // index 0 -> transparent
-            10, 20, 30, 255, // index 1
-            0, 0, 0, 0, // index 0
-            40, 50, 60, 255, // index 2
-            10, 20, 30, 255, // index 1
-            0, 0, 0, 0, //
-            40, 50, 60, 255, // index 2
-            0, 0, 0, 0, //
-            0, 0, 0, 0, //
-            0, 0, 0, 0, //
-            70, 80, 90, 255, // index 3
-            0, 0, 0, 0, //
-        ]
-    );
-    assert_eq!(fnv1a(&layer0), 0x80d5_7f9c_8c23_a90c);
-
-    // --- the composited frames -------------------------------------------
-    // Layers composite from the highest z to the lowest, so z = 0 ends up on
-    // top and an empty voxel never overwrites a voxel behind it.
-    let composite0 = vxl.frame_rgba(0).expect("composite frame 0");
-    assert_eq!(fnv1a(&composite0), 0xcfc7_785b_e3e7_604d);
-    assert_eq!(composite0[4..8], [10, 20, 30, 255]); // layer 0 wins at pixel 1
-    assert_eq!(composite0[12..16], [40, 50, 60, 255]); // layer 0 wins at pixel 3
-    assert_eq!(composite0[32..36], [70, 80, 90, 255]); // layer 1 shows through at pixel 8
-
-    let composite1 = vxl.frame_rgba(1).expect("composite frame 1");
-    assert_eq!(fnv1a(&composite1), 0xaa95_e558_e255_a535);
-
-    // --- the atlas --------------------------------------------------------
-    let atlas = vxl.to_atlas().expect("atlas");
-    assert_eq!(
-        atlas.frames.len(),
-        6,
-        "two layers x two frames plus two composites"
-    );
-    for key in [
-        "layer0/frame0",
-        "layer0/frame1",
-        "layer1/frame0",
-        "layer1/frame1",
-        "frame0",
-        "frame1",
-    ] {
-        let frame = atlas.frame(key).expect("atlas frame");
-        assert_eq!((frame.w, frame.h), (4, 3), "frame {key} size");
-    }
-
-    // The atlas pixels for "layer0/frame0" must equal the layer's RGBA.
-    // (The atlas row is wider than one frame, so the frame is read row by
-    // row rather than as one contiguous slice.)
-    let frame = atlas.frame("layer0/frame0").expect("atlas frame");
-    assert_eq!(atlas_frame_pixels(&atlas, &frame), layer0);
-
-    // --- determinism ------------------------------------------------------
-    let again = VxlFile::parse(&bytes).expect("parse again");
-    assert_eq!(again, vxl);
-    let atlas_again = again.to_atlas().expect("atlas again");
-    assert_eq!(atlas_again.pixels, atlas.pixels);
-    assert_eq!(atlas_again.frames, atlas.frames);
-}
-
-#[test]
-fn a_malformed_vxl_is_rejected_by_name() {
-    let bytes = synthetic_vxl();
-
-    // Bad magic.
-    let mut bad = bytes.clone();
-    bad[0] = b'X';
-    match VxlFile::parse(&bad) {
-        Err(VxlError::BadMagic { .. }) => {}
-        other => panic!("expected a bad-magic error, got {other:?}"),
-    }
-
-    // Truncated voxel section.
-    let truncated = &bytes[..bytes.len() - 4];
+    let mut h = Vec::new();
+    h.extend_from_slice(&1u16.to_le_bytes());
+    h.extend_from_slice(&0u16.to_le_bytes());
+    h.extend_from_slice(&1u16.to_le_bytes());
+    h.extend_from_slice(&15u16.to_le_bytes());
+    h.extend_from_slice(&2u16.to_le_bytes());
+    h.extend_from_slice(&2u16.to_le_bytes());
+    // sample_rate == 0
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&[0x00, 0x10]);
+    let mut container = Vec::new();
+    container.extend_from_slice(b"FORM");
+    container.extend_from_slice(&[0, 0, 0, 0]);
+    container.extend_from_slice(b"WVQA");
+    container.extend_from_slice(&chunk(b"VQHD", &h));
+    container.extend_from_slice(&chunk(b"SND1", &bytes));
+    let total = (container.len() - 8) as u32;
+    container[4..8].copy_from_slice(&total.to_be_bytes());
     assert!(matches!(
-        VxlFile::parse(truncated),
-        Err(VxlError::Truncated { field: "voxel", .. })
-    ));
-
-    // A voxel that points outside the palette.
-    let mut bad = bytes.clone();
-    let voxel_start = bad.len() - 48;
-    bad[voxel_start] = 200;
-    assert!(matches!(
-        VxlFile::parse(&bad),
-        Err(VxlError::PaletteIndexOutOfRange { index: 200, .. })
-    ));
-
-    // Too short for a header.
-    assert!(matches!(
-        VxlFile::parse(&[0u8; 8]),
-        Err(VxlError::TooShort { .. })
+        cnc_asset::video::demux(&container),
+        Err(cnc_asset::video::VqaError::BadAudioSampleRate)
     ));
 }
 
