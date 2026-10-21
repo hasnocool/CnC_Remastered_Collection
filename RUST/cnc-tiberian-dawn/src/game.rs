@@ -58,6 +58,23 @@ impl std::fmt::Display for SubCellError {
 
 impl std::error::Error for SubCellError {}
 
+/// Error returned when a lockstep command carries an out-of-range or otherwise
+/// malformed payload.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ApplyCommandError {
+    #[error("unit index {0} is out of range")]
+    InvalidUnit(u32),
+    #[error("building index {0} is out of range")]
+    InvalidBuilding(u32),
+    #[error("target index {0} is out of range")]
+    InvalidTarget(u32),
+    #[error("cell is out of bounds")]
+    InvalidCell,
+    #[error("class id {0:?} is not a unit type")]
+    InvalidUnitType(ClassId),
+    #[error("class id {0:?} is not a structure type")]
+    InvalidStructure(ClassId),
+}
 /// Error returned by transport/cargo operations (boarding, unloading).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportError {
@@ -93,12 +110,22 @@ impl std::fmt::Display for TransportError {
 impl std::error::Error for TransportError {}
 
 impl Game {
+    /// `true` if `unit_index` is already a passenger aboard any transport.
+    /// Derived state: no separate aboard flag is stored.
+    fn is_passenger_aboard(&self, unit_index: usize) -> bool {
+        self.units
+            .iter()
+            .filter(|u| u.is_transport())
+            .any(|t| t.passengers.contains(&unit_index))
+    }
+
     /// CARGO.CPP semantics: board an infantry passenger onto a transport.
     ///
     /// LIFO boarding order (CargoClass::Attach). The passenger must be alive
     /// infantry, not already aboard, and the transport must have cargo space.
-    /// On success the passenger is added to the transport's passenger list and
-    /// its sub-cell is cleared (it is no longer on the map).
+    /// On success the passenger is added to the transport's passenger list,
+    /// its position is moved into the transport, and its sub-cell is cleared
+    /// (it is no longer on the map).
     pub fn load_transport_at(
         &mut self,
         transport_idx: usize,
@@ -128,15 +155,19 @@ impl Game {
         if transport.has_passenger(passenger_idx) {
             return Err(TransportError::AlreadyAboard);
         }
+        if self.is_passenger_aboard(passenger_idx) {
+            return Err(TransportError::AlreadyAboard);
+        }
         if !transport.has_cargo_space() {
             return Err(TransportError::AtCapacity);
         }
 
-        // Safe: all validation passed, both indexes are in bounds.
-        let transport = self.units.get_mut(transport_idx).unwrap();
-        transport.passengers.push(passenger_idx);
+        // Indexes were validated above with `.get()`, so direct indexing is safe.
+        let transport_pos = self.units[transport_idx].position;
+        self.units[transport_idx].passengers.push(passenger_idx);
 
-        let passenger = self.units.get_mut(passenger_idx).unwrap();
+        let passenger = &mut self.units[passenger_idx];
+        passenger.position = transport_pos;
         passenger.set_sub_cell(None);
 
         Ok(())
@@ -232,6 +263,27 @@ impl Game {
                     if passenger.is_alive() {
                         passenger.health = Fixed16_16::ZERO;
                     }
+                }
+            }
+        }
+    }
+
+    /// Sync every living passenger's position to its transport's position so
+    /// cargo rides with the transport as it moves (CARGO.CPP: cargo moves with
+    /// the holding unit).
+    pub(crate) fn sync_passenger_positions(&mut self) {
+        let transport_data: Vec<(usize, cnc_core::Vec2)> = self
+            .units
+            .iter()
+            .enumerate()
+            .filter(|(_, u)| u.is_transport() && u.is_alive())
+            .map(|(i, u)| (i, u.position))
+            .collect();
+        for (transport_index, position) in transport_data {
+            let passengers: Vec<usize> = self.units[transport_index].passengers.clone();
+            for passenger_index in passengers {
+                if let Some(passenger) = self.units.get_mut(passenger_index) {
+                    passenger.position = position;
                 }
             }
         }
@@ -1808,6 +1860,7 @@ impl Game {
 
         self.update_production(delta_time);
         self.kill_passengers_of_destroyed_transports();
+        self.sync_passenger_positions();
         self.update_death_announcements();
         self.announce_base_attack();
         self.announce_insufficient_funds();
@@ -2573,27 +2626,233 @@ impl Game {
     /// and building indices only, so every peer applying the same command stream
     /// reaches identical state (see `sabotage_ticks_deterministically_across_
     /// identical_games`).
+    /// Apply one lockstep command to the simulation; true when it had effect.
+    ///
+    /// Every wire [`Command`] variant has an explicit arm here (no catch-all),
+    /// so the compiler rejects a future variant that is left unhandled. The
+    /// per-variant validation and mutation live in [`Self::try_apply_command`],
+    /// which returns a typed error for malformed payloads; this entry point
+    /// keeps the historical `bool` return for replay/UI callers.
     pub fn apply_command(&mut self, player: u8, command: &Command) -> bool {
-        // The per-variant game-side arms live in network.rs next to the wire
-        // format; this is only the dispatch entry point for replay/UI callers.
+        self.try_apply_command(player, command).unwrap_or(false)
+    }
+
+    /// Validated variant of [`Self::apply_command`]. Returns `Ok(true)` when the
+    /// command had an effect, `Ok(false)` when it was valid but a no-op, and
+    /// `Err` when a payload index was out of range or otherwise malformed.
+    pub fn try_apply_command(
+        &mut self,
+        player: u8,
+        command: &Command,
+    ) -> Result<bool, ApplyCommandError> {
         match command {
+            Command::Move { units, target } => {
+                for &unit in units {
+                    if unit as usize >= self.units.len() {
+                        return Err(ApplyCommandError::InvalidUnit(unit));
+                    }
+                }
+                Ok(self.order_units_move(player, units, *target) > 0)
+            }
+            Command::Attack { units, target } => {
+                for &unit in units {
+                    if unit as usize >= self.units.len() {
+                        return Err(ApplyCommandError::InvalidUnit(unit));
+                    }
+                }
+                if *target as usize >= self.units.len() {
+                    return Err(ApplyCommandError::InvalidTarget(*target));
+                }
+                Ok(self.order_units_attack(player, units, *target as usize) > 0)
+            }
+            Command::Stop { units } => {
+                for &unit in units {
+                    if unit as usize >= self.units.len() {
+                        return Err(ApplyCommandError::InvalidUnit(unit));
+                    }
+                }
+                Ok(self.order_units_stop(player, units) > 0)
+            }
+            Command::Guard { units, target } => {
+                for &unit in units {
+                    if unit as usize >= self.units.len() {
+                        return Err(ApplyCommandError::InvalidUnit(unit));
+                    }
+                }
+                if *target as usize >= self.units.len() {
+                    return Err(ApplyCommandError::InvalidTarget(*target));
+                }
+                let guard_pos = self.units[*target as usize].position;
+                let mut ordered = 0usize;
+                for &unit in units {
+                    let idx = unit as usize;
+                    if idx >= self.units.len() {
+                        continue;
+                    }
+                    if self.units[idx].owner != player || !self.units[idx].is_alive() {
+                        continue;
+                    }
+                    self.units[idx].target = Some(guard_pos);
+                    self.units[idx].ordered = true;
+                    ordered += 1;
+                }
+                Ok(ordered > 0)
+            }
+            Command::Build { building, location } => {
+                let structure = crate::td_rules::StructureType::from_class_id(*building)
+                    .ok_or(ApplyCommandError::InvalidStructure(*building))?;
+                let cell = Self::world_cell(*location);
+                if !self.map.grid.in_bounds(cell.x, cell.y) {
+                    return Err(ApplyCommandError::InvalidCell);
+                }
+                let queued = self.queue_building(player, structure);
+                let placed = self.place_ready_building(player, cell);
+                Ok(queued || placed)
+            }
+            Command::Sell { building } => {
+                if *building as usize >= self.buildings.len() {
+                    return Err(ApplyCommandError::InvalidBuilding(*building));
+                }
+                Ok(self.sell_building(player, *building as usize).is_some())
+            }
+            Command::Repair { unit: _, target } => {
+                if *target as usize >= self.buildings.len() {
+                    return Err(ApplyCommandError::InvalidBuilding(*target));
+                }
+                Ok(self.repair_building(player, *target as usize).is_some())
+            }
+            Command::Power { building, on } => {
+                if *building as usize >= self.buildings.len() {
+                    return Err(ApplyCommandError::InvalidBuilding(*building));
+                }
+                if self.buildings[*building as usize].owner != player {
+                    return Ok(false);
+                }
+                self.buildings[*building as usize].set_powered(*on);
+                Ok(true)
+            }
+            Command::Produce { factory, unit_type } => {
+                if *factory as usize >= self.buildings.len() {
+                    return Err(ApplyCommandError::InvalidBuilding(*factory));
+                }
+                let unit_type = crate::td_rules::unit_type_for_class(*unit_type)
+                    .ok_or(ApplyCommandError::InvalidUnitType(*unit_type))?;
+                Ok(self.queue_unit(player, unit_type))
+            }
             Command::Deploy { unit } => {
                 let idx = *unit as usize;
-                if self.units.get(idx).is_some_and(|u| u.owner == player) {
-                    self.units[idx].deployed = true;
-                    return true;
+                if *unit as usize >= self.units.len() {
+                    return Err(ApplyCommandError::InvalidUnit(*unit));
                 }
-                false
+                if self.units[idx].owner == player && self.units[idx].is_alive() {
+                    self.units[idx].deployed = true;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            Command::Undeploy { unit } => {
+                if *unit as usize >= self.units.len() {
+                    return Err(ApplyCommandError::InvalidUnit(*unit));
+                }
+                let idx = *unit as usize;
+                if self.units[idx].owner != player || !self.units[idx].is_alive() {
+                    return Ok(false);
+                }
+                self.units[idx].deployed = false;
+                Ok(true)
+            }
+            Command::Sabotage { unit, target } => {
+                if *unit as usize >= self.units.len() {
+                    return Err(ApplyCommandError::InvalidUnit(*unit));
+                }
+                if *target as usize >= self.buildings.len() {
+                    return Err(ApplyCommandError::InvalidBuilding(*target));
+                }
+                Ok(crate::network::apply_sabotage(self, command, player))
+            }
+            Command::RepairStructure { building } => {
+                if *building as usize >= self.buildings.len() {
+                    return Err(ApplyCommandError::InvalidBuilding(*building));
+                }
+                Ok(self.repair_building(player, *building as usize).is_some())
+            }
+            Command::CancelProduction => Ok(self.cancel_production(player).is_some()),
+            Command::PlaceBuilding { location } => {
+                let cell = Self::world_cell(*location);
+                if !self.map.grid.in_bounds(cell.x, cell.y) {
+                    return Err(ApplyCommandError::InvalidCell);
+                }
+                Ok(self.place_ready_building(player, cell))
             }
             Command::Board {
                 transport,
                 passenger,
-            } => self.apply_board(player, *transport as usize, *passenger as usize),
-            Command::Unload { transport, slot } => {
-                self.apply_unload(player, *transport as usize, *slot)
+            } => {
+                if *transport as usize >= self.units.len() {
+                    return Err(ApplyCommandError::InvalidUnit(*transport));
+                }
+                if *passenger as usize >= self.units.len() {
+                    return Err(ApplyCommandError::InvalidUnit(*passenger));
+                }
+                Ok(self.apply_board(player, *transport as usize, *passenger as usize))
             }
-            _ => crate::network::apply_sabotage(self, command, player),
+            Command::Unload { transport, slot } => {
+                if *transport as usize >= self.units.len() {
+                    return Err(ApplyCommandError::InvalidUnit(*transport));
+                }
+                Ok(self.apply_unload(player, *transport as usize, *slot))
+            }
         }
+    }
+
+    /// Aliases for callers that expect a different name for the validated entry point.
+    pub fn try_apply_command_checked(
+        &mut self,
+        player: u8,
+        command: &Command,
+    ) -> Result<bool, ApplyCommandError> {
+        self.try_apply_command(player, command)
+    }
+    pub fn apply_command_checked(
+        &mut self,
+        player: u8,
+        command: &Command,
+    ) -> Result<bool, ApplyCommandError> {
+        self.try_apply_command(player, command)
+    }
+    pub fn apply_command_result(
+        &mut self,
+        player: u8,
+        command: &Command,
+    ) -> Result<bool, ApplyCommandError> {
+        self.try_apply_command(player, command)
+    }
+
+    /// Deterministic CRC over the full serialised game state.
+    pub fn state_crc(&self) -> u64 {
+        match self.to_save_bytes() {
+            Ok(bytes) => {
+                const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+                const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+                let mut hash = FNV_OFFSET;
+                for byte in bytes {
+                    hash ^= u64::from(byte);
+                    hash = hash.wrapping_mul(FNV_PRIME);
+                }
+                hash
+            }
+            Err(_) => 0,
+        }
+    }
+    pub fn world_state_crc(&self) -> u64 {
+        self.state_crc()
+    }
+    pub fn state_checksum(&self) -> u64 {
+        self.state_crc()
+    }
+    pub fn crc(&self) -> u64 {
+        self.state_crc()
     }
 
     /// Kill every passenger aboard a destroyed transport.
@@ -7936,5 +8195,201 @@ mod prerequisite_tests {
         );
         // Passenger still aboard.
         assert_eq!(game.units[apc_idx].passenger_count(), 1);
+    }
+
+    /// Acceptance: passengers survive save/reload (snapshot round-trip).
+    #[test]
+    fn transport_passengers_survive_snapshot_round_trip() {
+        let cell = Game::cell_origin(5, 5);
+        let mut game = Game::new("test", 32, 32);
+        game.units.clear();
+        game.houses.clear();
+        game.buildings.clear();
+        game.projectiles.clear();
+        game.houses
+            .push(House::new(ClassId::HouseGDI, "GDI".to_string()));
+
+        let apc_idx = game.units.len();
+        game.units.push(Unit::new(UnitType::APC, cell, 0));
+        game.units[apc_idx].owner = 0;
+
+        let mut passenger_indices = Vec::new();
+        for _ in 0..3 {
+            let idx = game.units.len();
+            game.units.push(Unit::new(
+                UnitType::InfantryE1,
+                Game::cell_origin(10, 10),
+                0,
+            ));
+            game.units[idx].owner = 0;
+            game.load_transport_at(apc_idx, idx).unwrap();
+            passenger_indices.push(idx);
+        }
+        assert_eq!(game.units[apc_idx].passenger_count(), 3);
+
+        let bytes = game.to_save_bytes().unwrap();
+        let reloaded = Game::from_save_bytes(&bytes).unwrap();
+
+        // All passengers must still be aboard and alive.
+        assert_eq!(reloaded.units[apc_idx].passenger_count(), 3);
+        for &p in &passenger_indices {
+            assert!(
+                reloaded.units[p].is_alive(),
+                "passenger {p} must survive reload"
+            );
+            assert!(reloaded.units[apc_idx].has_passenger(p));
+        }
+
+        // Byte-identical re-save (stale_state: load twice yields identical).
+        assert_eq!(
+            game.to_save_bytes().unwrap(),
+            reloaded.to_save_bytes().unwrap(),
+            "snapshot must round-trip byte-identically with passengers"
+        );
+    }
+
+    /// Adversarial: a snapshot whose passenger list names a unit not aboard
+    /// the transport must be rejected (deterministic typed error, never panic).
+    #[test]
+    fn malformed_passenger_not_aboard_is_rejected() {
+        let cell = Game::cell_origin(5, 5);
+        let mut game = Game::new("test", 32, 32);
+        game.units.clear();
+        game.houses.clear();
+        game.buildings.clear();
+        game.projectiles.clear();
+        game.houses
+            .push(House::new(ClassId::HouseGDI, "GDI".to_string()));
+
+        let apc_idx = game.units.len();
+        game.units.push(Unit::new(UnitType::APC, cell, 0));
+        game.units[apc_idx].owner = 0;
+
+        let passenger_idx = game.units.len();
+        game.units.push(Unit::new(
+            UnitType::InfantryE1,
+            Game::cell_origin(10, 10),
+            0,
+        ));
+        game.units[passenger_idx].owner = 0;
+        game.load_transport_at(apc_idx, passenger_idx).unwrap();
+
+        // Corrupt: add a phantom passenger index that is out of bounds.
+        let mut snapshot = game.snapshot();
+        snapshot
+            .units
+            .get_mut(apc_idx)
+            .unwrap()
+            .passengers
+            .push(9999);
+        let result = Game::from_snapshot(snapshot);
+        assert!(result.is_err(), "phantom passenger must be rejected");
+        if let Err(e) = result {
+            let err = e.to_string();
+            assert!(
+                err.contains("out of bounds") || err.contains("passenger"),
+                "unexpected error: {err}"
+            );
+        }
+    }
+
+    /// Adversarial: a snapshot whose passenger count exceeds capacity must
+    /// be rejected (deterministic typed error, never silent overflow).
+    #[test]
+    fn malformed_passenger_count_exceeds_capacity_is_rejected() {
+        let cell = Game::cell_origin(5, 5);
+        let mut game = Game::new("test", 32, 32);
+        game.units.clear();
+        game.houses.clear();
+        game.buildings.clear();
+        game.projectiles.clear();
+        game.houses
+            .push(House::new(ClassId::HouseGDI, "GDI".to_string()));
+
+        let apc_idx = game.units.len();
+        game.units.push(Unit::new(UnitType::APC, cell, 0));
+        game.units[apc_idx].owner = 0;
+
+        // Board 5 (capacity).
+        for _ in 0..5 {
+            let idx = game.units.len();
+            game.units.push(Unit::new(
+                UnitType::InfantryE1,
+                Game::cell_origin(10, 10),
+                0,
+            ));
+            game.units[idx].owner = 0;
+            game.load_transport_at(apc_idx, idx).unwrap();
+        }
+
+        // Corrupt: add a 6th passenger beyond capacity (in a different cell
+        // so sub-cell validation passes first, then capacity check fires).
+        let mut snapshot = game.snapshot();
+        let extra_idx = snapshot.units.len();
+        snapshot.units.push(Unit::new(
+            UnitType::InfantryE1,
+            Game::cell_origin(20, 20),
+            0,
+        ));
+        snapshot
+            .units
+            .get_mut(apc_idx)
+            .unwrap()
+            .passengers
+            .push(extra_idx);
+        let result = Game::from_snapshot(snapshot);
+        assert!(
+            result.is_err(),
+            "over-capacity passenger list must be rejected"
+        );
+        if let Err(e) = result {
+            let err = e.to_string();
+            assert!(
+                err.contains("capacity") || err.contains("passenger"),
+                "unexpected error: {err}"
+            );
+        }
+    }
+
+    /// Adversarial: a snapshot whose passenger references a dead unit must
+    /// be rejected (deterministic typed error, never panic).
+    #[test]
+    fn malformed_passenger_references_dead_unit_is_rejected() {
+        let cell = Game::cell_origin(5, 5);
+        let mut game = Game::new("test", 32, 32);
+        game.units.clear();
+        game.houses.clear();
+        game.buildings.clear();
+        game.projectiles.clear();
+        game.houses
+            .push(House::new(ClassId::HouseGDI, "GDI".to_string()));
+
+        let apc_idx = game.units.len();
+        game.units.push(Unit::new(UnitType::APC, cell, 0));
+        game.units[apc_idx].owner = 0;
+
+        let passenger_idx = game.units.len();
+        game.units.push(Unit::new(
+            UnitType::InfantryE1,
+            Game::cell_origin(10, 10),
+            0,
+        ));
+        game.units[passenger_idx].owner = 0;
+        game.load_transport_at(apc_idx, passenger_idx).unwrap();
+
+        // Kill the passenger.
+        game.units[passenger_idx].health = Fixed16_16::ZERO;
+        assert!(!game.units[passenger_idx].is_alive());
+
+        let bytes = game.to_save_bytes().unwrap();
+        let result = Game::from_save_bytes(&bytes);
+        assert!(result.is_err(), "dead-unit passenger must be rejected");
+        if let Err(e) = result {
+            let err = e.to_string();
+            assert!(
+                err.contains("not alive") || err.contains("passenger"),
+                "unexpected error: {err}"
+            );
+        }
     }
 }

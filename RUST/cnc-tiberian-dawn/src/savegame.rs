@@ -167,7 +167,6 @@ impl Game {
             event_source: None,
             mission_outcome_emitted: false,
         };
-        game.validate_sub_cells().map_err(|e| anyhow::anyhow!(e))?;
         // Validate all transport passenger lists refer to live, in-bounds,
         // infantry passengers and never exceed capacity.
         for unit in &game.units {
@@ -195,6 +194,7 @@ impl Game {
                 }
             }
         }
+        game.validate_sub_cells().map_err(|e| anyhow::anyhow!(e))?;
         Ok(game)
     }
 
