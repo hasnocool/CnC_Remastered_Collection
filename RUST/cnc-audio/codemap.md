@@ -1,22 +1,40 @@
 # RUST/cnc-audio/
 
 ## Responsibility
+Presentation-only audio engine for the C&C Rust port. Implements Westwood-style channel model (fixed single-voice channels, priority preemption) with modern mixer features (volume buses, crossfade, positional attenuation, panning). Zero game-state mutation - pure output side.
 
-Audio presentation engine for the Rust port: a fixed single-voice channel model (8 numbered SFX channels + Voice + Music) with Westwood-style priority eviction, positional attenuation/pan math, PCM/SoundEffect playback via rodio, and an intensity-driven music player with explore/combat crossfading. Presentation-only — never writes back into game state (lib.rs docs).
+## Design Patterns
+- Channel Model: Fixed channels (SFX 0-8, Voice, Music) with u8 priority (0-255), Westwood-style preemption
+- Volume Buses: Master x Music Bus x Effects Bus x Channel x Voice layered volume control
+- Positional Audio: Distance attenuation (linear), constant-power stereo panning, optional Doppler factor utility
+- Mixer as Singleton: AudioMixer manages all channels, buses, crossfade state
+- Source Abstraction: AudioSource trait for decoded PCM (WAV, OGG, procedural from cnc-sfx)
 
-## Design
+## Data & Control Flow
+1. Init: AudioMixer::new() creates channel array, buses at 1.0 default
+2. Load: AudioSource::from_wav / from_ogg / from_procedural to AudioClip (owned PCM buffer)
+3. Play: mixer.play(channel, clip, priority, volume, pan, distance) to preemption check to channel assignment
+4. Update: mixer.update(dt) advances all playing clips, applies volume buses, mixes to output buffer
+5. Music: mixer.crossfade_music(new_clip, duration) handles music transitions
+6. Shutdown: mixer.shutdown() stops all, releases resources
 
-- Channel model copied from the DOS originals: `Channel::Sfx(u8)` (0..8, `SFX_CHANNEL_COUNT`), `Channel::Voice`, `Channel::Music`; priority is 0-255 u8; `mixer::AudioMixer` rejects a lower/equal-priority request on a busy channel (`ChannelBusy`) and evicts on strict-higher.
-- `mixer::AudioError` (thiserror) as the error type; `FadeSource`/`SharedFade` envelopes for crossfades; `RecordedMusic`/`RecordedPlay` let `headless()` mode record play events instead of using hardware — all tests run headless (CI has no device).
-- Positional SFX without a listener model: `attenuate(distance)` → linear volume, `pan_gains(pan)` → constant-power stereo pair, `doppler_factor()` as an optional caller-applied pitch utility.
-- `music::MusicPlayer` queues `MusicTrack`s and owns a `MusicLayer` explore/combat pair, switched by `set_intensity` with crossfades on alternating music sinks.
+## Public API
+- Channel: Sfx(u8), Voice, Music enum variants
+- AudioMixer: new(), play(), stop(), stop_channel(), update(), crossfade_music(), music_volume(), effects_volume(), master_volume()
+- AudioSource: from_wav(), from_ogg(), from_procedural(), samples(), sample_rate(), channels()
+- mixer module: attenuate(distance), pan_gains(pan), doppler_factor(vel)
+- Error: AudioError::ChannelBusy, AudioError::NoSuchChannel
 
-## Flow
+## Integration Points
+- Dependencies: cnc-core, rodio, parking_lot, once_cell, anyhow, thiserror, serde
+- Consumed by: cnc-tiberian-dawn, cnc-red-alert (game audio), cnc-classic (classic mode audio), cnc-console (event audio)
+- Procedural SFX: Consumes cnc-sfx generated WAV bytes via AudioSource::from_procedural
+- No simulation dependency - purely presentational, safe for deterministic lockstep
 
-Engine/launcher calls `SoundEffect::from_bytes(...).play_on(&mixer, Channel::Sfx(3), priority=200, volume=0.8, pan=-0.25)`; mixer decodes (rodio source), applies `master * channel * voice` volume and pan gains, plays to the default output device (or records in headless mode). Music: intensity changes trigger long crossfades over the two music sinks.
+## Key Files
+- src/lib.rs - Module declarations, channel model, mixer API
+- src/mixer.rs - AudioMixer implementation, channel management, bus mixing
+- src/source.rs - AudioSource trait, WAV/OGG/procedural loaders
+- src/channel.rs - Channel enum, priority logic
+- src/error.rs - AudioError variants
 
-## Integration
-
-- Depends on: `cnc-core` + rodio only; typed errors surface to callers via `AudioError`/`Result`.
-- Consumed by `cnc-tiberian-dawn` and `cnc-red-alert` (playback of EVA/voice/SFX/music events in their game loops) and `cnc-launcher` (menu/game audio wiring).
-- Tests: all unit tests run headless (record-only mixer) using `test_support::wav_bytes`; no external `tests/` directory exists.

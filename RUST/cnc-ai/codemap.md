@@ -1,26 +1,39 @@
 # RUST/cnc-ai/
 
 ## Responsibility
+Deterministic AI agent system for Command & Conquer scenarios. Provides a three-layer architecture: script compilation (AgentScript DSL), deterministic runtime execution, and LLM/vision intent bridge for non-deterministic advice without breaking lockstep simulation.
 
-Deterministic agent-scripting crate for C&C scenarios: a small AgentScript language (`script.rs`), its lockstep-safe execution runtime, an out-of-band LLM/vision intent oracle bridge, and a publish path for AI-only ranked ladders. Description in its Cargo.toml: "Deterministic agent scripting language, runtime and LLM intent bridge for CnC scenarios".
+## Design Patterns
+- **DSL Compilation**: AgentScript language to AST via script module
+- **Deterministic Runtime**: Lockstep-safe AgentRuntime executing against Observation, emitting serializable Commands
+- **Intent Bridge**: Out-of-band LLM/vision advice as pre-recorded IntentValues - non-deterministic models never touch simulation directly
+- **Ladder Registration**: ladder module converts authored agents into registration cards for AI-only ranked ladder
+- **Doctrine System**: Pre-defined DOCTRINES and starter_script for common AI behaviors
 
-## Design
+## Data & Control Flow
+1. **Authoring**: AgentDefinition stores script + metadata
+2. **Compilation**: script::compile() to checked Program AST
+2. **Runtime**: AgentRuntime::new(program) to step(observation) to Vec<Command>
+3. **Intent (optional)**: intent::observation_prompt() to LLM to parse_response() to IntentCache to injected at runtime
+4. **Ladder**: ladder::registration() to AgentLadderCard for directory ranking
 
-Three deliberate layers, all real (see lib.rs docs):
+## Public API (Re-exports from lib.rs)
+- **agent**: AgentDefinition, DOCTRINES, starter_script
+- **intent**: IntentSlot, IntentValue, IntentCache, OracleRequest, OracleResponse, Vision constants, intent_slots, observation_prompt, parse_response
+- **ladder**: AgentLadderCard, AiLadderRegistration, registration
+- **runtime**: AgentRuntime, Command, Contact, Limits, Observation, Pos, Report, RuntimeFault
+- **script**: Diagnostic, Program, compile, class_references
 
-- `script.rs` (1338 lines) — lexer/parser/checker with diagnostics: `Program`, `Handler`, `HandlerKind`, `Stmt`, `Expr`, `ExprKind`, `UnOp`, `BinOp`, `Builtin`/`BuiltinKind` (a static builtin table via `builtin()`), `ClassReference`, `Diagnostic`; entry points `compile(source) -> Result<Program, Vec<Diagnostic>>` and `class_references(program)`.
-- `runtime.rs` — host-driven deterministic execution: `AgentRuntime` with `on_start`/`on_tick`/`on_event`; per-call `Observation` in, `Report` of serializable `Command`s out; `Contact`, `Pos`, `Limits` (step/instruction caps), `RuntimeFault` termination record. No wall clock, no floats, no unbounded loops ⇒ lockstep-safe.
-- `intent.rs` — the only non-determinism inlet, as pre-recorded values: `IntentCache`, `IntentSlot`/`IntentKind`, `IntentValue`, `OracleRequest`/`OracleResponse`/`OracleAnswer`, `intent_slots(program)`, `observation_prompt(request)`, `parse_response(request, json)`, plus a 4×4 `Vision` grid with `VISION_EMPTY/OWN/ENEMY/RESOURCE/BLOCKED` and `ORACLE_PROTOCOL_VERSION = 1`.
-- `agent.rs` — scenario authoring record `AgentDefinition` + `DOCTRINES` (5: Balanced, Aggressive, Defensive, Economy, Advisor) + `starter_script(doctrine)`.
-- `ladder.rs` — directory-bridge card: `AgentLadderCard`, `AiLadderRegistration`, `registration(...)`, fingerprinted by script hash via `sha1`.
-- Tiny dependency footprint on purpose: serde, serde_json, sha1 only.
+## Integration Points
+- **Dependencies**: serde, serde_json, sha1
+- **Consumed by**: Scenario authoring tools, AI ladder directory (cnc-net-directory potential), future campaign AI
+- **No direct game engine dependency** - operates on abstract Observation/Command types suitable for both TD and RA
 
-## Flow
+## Key Files
+- src/lib.rs - Module declarations and public API surface
+- src/agent.rs - AgentDefinition, doctrines, starter scripts
+- src/runtime.rs - AgentRuntime, Observation, Command, lockstep execution
+- src/script.rs - AgentScript parser/compiler, AST, diagnostics
+- src/intent.rs - LLM/vision bridge, intent caching, vision constants
+- src/ladder.rs - Ladder registration cards for ranked AI directory
 
-Host (engine tick loop or editor/launcher test harness) calls `AgentRuntime::on_tick(Observation)` → `Report{Command}` list → commands applied to game state. Oracle path: host builds `OracleRequest` (`observation_prompt`), an external process (e.g. `scripts/ai_oracle.py`) answers, `parse_response` validates JSON into `IntentCache`, runtime reads recorded values — the model itself never touches the simulation.
-
-## Integration
-
-- Workspace consumption: only `cnc-map-editor` depends on it (`MapModel.agents: Vec<AgentDefinition>`, agent add/edit commands); the launcher/editor may then load `ai_oracle_response.json` as IntentCache for play tests.
-- `cnc-net-directory`'s matchmaking (`ai-only ladder`) is the conceptual target of `ladder.rs`; that crate does not depend on cnc-ai, so the card must be carried by a host process.
-- Evidence of real use: 30+ references to AgentDefinition in cnc-map-editor (map.rs, history.rs, app.rs), integration test `authoring_session_roundtrips_through_ini` exercises agents.

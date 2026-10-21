@@ -1,57 +1,37 @@
 # RUST/cnc-bench/
 
 ## Responsibility
+Criterion benchmark suite for C&C simulation performance. Measures cold-start latency and sustained simulation throughput for both Tiberian Dawn and Red Alert engines using deterministic fixtures. No metric functions exposed - all measurements live in criterion bench targets.
 
-Criterion benchmark crate for the C&C Rust port. It measures real engine paths
-from `cnc-tiberian-dawn` and `cnc-red-alert` (and shared types from
-`cnc-core`) — simulation throughput, cold-start boots and pathfinding — with
-fully deterministic setup. It exposes no metric functions of its own: all
-measurement lives in the criterion bench targets, and the library only holds
-the shared fixtures they use.
+## Design Patterns
+- Fixture-Driven: Shared bench_scenario_ini() builds identical 64x64 RA skirmish map for all benches
+- Deterministic Time: frame_delta() returns exact 1/60s as Fixed16_16::from_ratio(1, 60) - no float drift
+- Separation of Concerns: Library (src/lib.rs) holds only fixtures; benches (benches/*.rs) drive real engine code
+- Throughput Protocol: 600 frames (10s sim time) per iteration, RA command injection every 100 frames
 
-## Structure
+## Data & Control Flow
+1. Fixture Build: bench_scenario_ini() to INI string to Scenario::from_ini() to Scenario struct
+2. Cold Start Bench: benches/cold_start.rs times Scenario::new() + first frame
+3. Throughput Bench: benches/sim_throughput.rs runs 600 frames, injects commands at interval, measures frame time
+4. Determinism Assertion: Tests verify frame_delta().to_bits() == 1092 (16.16 fixed 1/60)
 
-- `Cargo.toml` (`cnc-bench`, 0.1.0) — member of the 14-crate workspace
-  (`RUST/Cargo.toml`). Uses `criterion = { workspace = true }` (workspace pin
-  `0.5.1`, already in `Cargo.lock`) as a `[dev-dependencies]`, and declares two
-  `[[bench]]` targets with `harness = false` (criterion provides its own main
-  via `criterion_main!`).
-- `src/lib.rs` — shared deterministic bench fixtures only:
-  `bench_scenario_ini()` (editor-dialect RA scenario text), `bench_scenario()`
-  (parsed via `Scenario::from_ini`), `frame_delta()` (exact 1/60 s in
-  `Fixed16_16` via `from_ratio` — `from_f32` is documented as
-  non-deterministic in `cnc-core`), plus the frame/command-interval constants.
-  Two tests validate the fixtures themselves.
-- `benches/sim_throughput.rs` — group `sim_throughput/td` (`fixed_dt_frames`):
-  `TdGame::new` + N frames of `Game::update` at 60 FPS dt; group
-  `sim_throughput/ra` (`scenario_frames_with_commands`):
-  `RaGame::from_scenario` + frame loop that also applies
-  `GameCommand::Move` at a fixed interval. Setup runs inside
-  `iter_batched` so the measured routine is only the frame loop;
-  throughput is reported in frames per iteration.
-- `benches/cold_start.rs` — group `cold_start` with four benches:
-  `ra_scenario_from_ini` (INI parse), `ra_game_from_scenario` (RA boot),
-  `td_game_new` (TD boot), `td_find_path` (A* on a generated 64x64 `CellGrid`
-  with a deterministic wall).
+## Public API (Library - minimal, fixture-only)
+- BENCH_MAP_SIZE: u32 = 64
+- FRAME_SECS: f64 = 1.0/60.0
+- FRAMES_PER_ITER: usize = 600
+- RA_COMMAND_INTERVAL: usize = 100
+- bench_scenario_ini() -> String - deterministic RA skirmish INI
+- bench_scenario() -> Scenario - parsed scenario fixture
+- frame_delta() -> Fixed16_16 - exact 1/60s fixed-point delta
 
-## Integration
+## Integration Points
+- Dependencies: cnc-core, cnc-tiberian-dawn, cnc-red-alert, criterion (dev)
+- Consumed by: CI performance regression detection, cargo bench runs
+- No runtime dependency - dev-only crate, not linked into game binaries
 
-- Depends on: `cnc-core` (`Fixed16_16`, `Vec2`, `Vec2i`),
-  `cnc-tiberian-dawn` (`game::Game`, `map::CellGrid`, `pathfind::find_path`),
-  `cnc-red-alert` (`game::Game` + `GameCommand`, `scenario::Scenario`), and
-  `criterion` as a dev-dependency.
-- Consumed by: nothing yet; run with `cargo bench -p cnc-bench`
-  (`-- --test` for the one-pass smoke run used by CI-style checks).
+## Key Files
+- src/lib.rs - Shared fixtures, constants, deterministic frame delta
+- benches/cold_start.rs - Cold start latency measurement
+- benches/sim_throughput.rs - Sustained simulation throughput measurement
+- Cargo.toml - harness = false for criterion bench targets
 
-## Notes / drift checklist
-
-- Engine APIs exercised (re-verified at implementation time): TD `Game::new`
-  & `Game::update` (`game.rs`), TD `find_path` (`pathfind.rs`), RA
-  `Game::from_scenario` / `update` / `apply_command` (`game.rs`), RA
-  `Scenario::from_ini` (`scenario.rs`). These crates are edited intermittently
-  by other sessions — if a signature moves, adapt the benches; the fixtures in
-  `src/lib.rs` are the single place to update.
-- The 0.1.0 crate version is pinned locally (no `workspace = true`
-  inheritance). The next release that includes the removed stub API should be
-  cut as `0.2.0` (see CHANGELOG "Removed"); until then the crate is
-  pre-consumer.
