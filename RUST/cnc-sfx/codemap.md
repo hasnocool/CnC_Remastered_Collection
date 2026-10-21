@@ -1,23 +1,34 @@
 # RUST/cnc-sfx/
 
 ## Responsibility
+Deterministic procedural sound-effect synthesis for the C&C Rust port. Replaces non-redistributable Westwood .AUD/.VOC files with pure-Rust generated WAV. Every effect is a pure function of its seed - identical seeds produce byte-identical output for cacheable, committable assets.
 
-Deterministic procedural sound-effect synthesis for the C&C Rust port (per its Cargo.toml description). Replacement one-shots and loops for the original Westwood `.AUD`/`.VOC` audio, which cannot be redistributed. Every effect is a pure function of its seed — the same seed produces byte-identical output — so bakes can be cached and committed like any other asset (lib.rs docs). Output is mono 16-bit PCM WAV via `hound`.
+## Design Patterns
+- Pure Functional Synthesis: All effects are fn(seed: u64) -> Vec<i16> - no global state, no RNG (deterministic hash-derived noise)
+- Waveform Primitives: waves module - sine, square, saw, noise, ADSR envelope, decay envelope, ramp
+- Effect Library: effects module - explosion, gunfire, tesla_zap, engine_loop, construction_loop, select_beep
+- WAV Output: write_wav_16(), to_wav_bytes() produce mono 16-bit PCM WAV (44.1kHz default)
+- Seed Domain Separation: Effect name hashed into seed for independent variation
 
-## Modules
+## Data & Control Flow
+1. Seed Input: Caller provides u64 seed (e.g., from asset manifest hash)
+2. Waveform Gen: waves::sine(), square(), saw(), noise() produce sample iterators
+3. Envelope: waves::adsr(), decay_env() shape amplitude over time
+4. Effect Composition: effects::explosion() combines noise bursts, filter sweeps, decay
+5. WAV Encode: effects::to_wav_bytes(samples) / write_wav_16(path, samples)
+6. Consume: cnc-audio::AudioSource::from_procedural(bytes) for runtime playback
 
-- `waves.rs` — pure primitives: `sine`/`square`/`saw`, white `noise` (drawn from `cnc_procgen::prng::Rng`), envelopes `decay_env`/`ramp`/`adsr`, and a `one_pole` low-pass. No wall clock, no shared mutable state.
-- `effects.rs` — the effect set: `explosion`, `gunfire`, `tesla_zap`, `engine_loop`, `select_beep`, `construction_loop`, plus the WAV writers `to_wav_bytes`/`write_wav_16` and `DEFAULT_SAMPLE_RATE = 22_050`.
+## Public API
+- waves: sine(freq, duration, sample_rate), square(), saw(), noise(), adsr(), decay_env(), ramp()
+- effects: explosion(seed), gunfire(seed), tesla_zap(seed), engine_loop(seed), construction_loop(seed), select_beep(seed), to_wav_bytes(samples), write_wav_16(path, samples), DEFAULT_SAMPLE_RATE (44100)
 
-## Determinism & seamless loops
+## Integration Points
+- Dependencies: cnc-procgen (shared synthesis), hound (WAV writing)
+- Consumed by: cnc-audio (procedural AudioSource), cnc-music (shared waves), asset pipeline (baked WAV assets)
+- No runtime dependency - build-time bake, runtime plays pre-generated WAV
 
-Durations are expressed in samples so the math is independent of the write rate. Loop generators are exactly periodic by construction: `engine_loop` uses only integer multiples of `1/duration` and sines only (a saw wave would click at the seam); `construction_loop` generates one 0.5 s period and tiles it exactly. The seed only varies the harmonic mix — it cannot break periodicity.
+## Key Files
+- src/lib.rs - Module declarations, re-exports
+- src/waves.rs - Waveform primitives, envelopes, noise
+- src/effects.rs - Effect compositions, WAV writing
 
-## Flow
-
-`effect(seed, len)` → per-sample waveform from `waves` (envelope × oscillator × filtered noise) → clamp to `[-1, 1]` → `to_wav_bytes(samples, rate)` → `write_wav_16(path, ...)` (atomic temp-file + rename).
-
-## Integration
-
-- Deps: `cnc-procgen` (PRNG) + `hound 3.5`. Depended on by `cnc-music`, which reuses `waves::adsr`/`sine`; otherwise an offline bake tool with no in-workspace consumer wired to the audio pipeline.
-- Tests: unit tests assert bounded/non-zero RMS, per-seed determinism + seed sensitivity, percussive decay, seam continuity, and RIFF/WAVE header shape.

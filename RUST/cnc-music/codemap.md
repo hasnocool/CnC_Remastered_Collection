@@ -1,24 +1,35 @@
 # RUST/cnc-music/
 
 ## Responsibility
+Deterministic MIDI-to-OGG music recreation for the C&C Rust port. Original Westwood soundtracks cannot be redistributed; this crate parses Standard MIDI Files, renders deterministic sample buffers, and encodes OGG Vorbis for runtime playback. Pure offline baking pipeline - no game state interaction.
 
-Deterministic MIDI-to-OGG music recreation for the C&C Rust port (per its Cargo.toml description). The original Westwood soundtracks cannot be redistributed, so this recreates replacement music from Standard MIDI Files. The pipeline is a pure function of the MIDI bytes, so bakes are reproducible and can be committed like any other asset (lib.rs docs). Offline only; touches no game state.
+## Design Patterns
+- Four-Stage Pipeline: Parse MIDI to Pair Notes to Render Samples to Encode OGG
+- Deterministic Rendering: Identical MIDI input to bit-identical PCM output (container bytes may differ due to Vorbis serial randomization)
+- Tempo Map Honoring: Full MIDI tempo meta events mapped to sample-accurate timing
+- Additive Synthesis: Harmonic rendering with ADSR-ish envelope per note, soft-clipped to [-1, 1]
+- Offline Baking: No runtime dependency - produces asset files consumed by cnc-audio
 
-## Pipeline modules
+## Data & Control Flow
+1. Parse: midi::parse(bytes) to MidiFile (tracks, events, tempo map)
+2. Pair Notes: synth::notes_from(midi_file) to Vec<Note> (onset/offset in seconds, pitch, velocity)
+3. Render: synth::render_score(notes, sample_rate) to Vec<f32> mono PCM buffer
+4. Encode: encode::encode_ogg(samples, sample_rate) to Vec<u8> OGG Vorbis
+5. Write: encode::write_ogg(path, samples, sample_rate) - convenience file write
 
-- `midi::parse` — SMF parsing: header, tracks, delta-VLQ timing, running status, note on/off (velocity-0 note-on treated as note-off), program change, tempo meta; sysex and unknown metas are skipped structurally. Types: `MidiFile`/`MidiTrack`/`MidiEvent`/`EventKind`/`MidiError`, with `DEFAULT_TEMPO_US = 500_000`.
-- `synth::notes_from` — pairs note on/off across all tracks into `Note { start_sec, dur_sec, note, velocity }` (FIFO per channel/note; note-offs ordered before note-ons at equal ticks). `tick_to_secs` walks the full tempo map; `render_score` is an additive harmonic stack (`midi_freq`, equal temperament, A4 = 440 Hz) with an ADSR-ish envelope per note, soft-clipped to `[-1, 1]`.
-- `encode::encode_ogg` / `encode::write_ogg` — mono f32 → OGG Vorbis via `vorbis_rs`; `write_ogg` is atomic (temp file + rename).
+## Public API
+- midi: parse(), MidiFile, MidiTrack, MidiEvent, EventKind, DEFAULT_TEMPO_US, MidiError
+- synth: notes_from(), render_score(), midi_freq(note), tick_to_secs(), Note struct
+- encode: encode_ogg(), write_ogg()
 
-## Determinism note
+## Integration Points
+- Dependencies: cnc-sfx (shared synthesis primitives), cnc-procgen (procedural content), vorbis_rs, anyhow
+- Consumed by: Asset pipeline (bakes music assets), cnc-audio (plays encoded OGG via AudioSource)
+- No runtime link - build-time only, outputs committed assets
 
-Rendered **samples** are bit-identical for identical input. The OGG **container** is not byte-stable: `vorbis_rs` randomizes the stream serial by default, so tests assert structure/size rather than exact bytes (see `encode` docs and its tests).
+## Key Files
+- src/lib.rs - Pipeline overview, module re-exports
+- src/midi.rs - SMF parser (delta-VLQ, running status, tempo meta)
+- src/synth.rs - Note pairing, additive synthesis, ADSR envelope, frequency conversion
+- src/encode.rs - OGG Vorbis encoding via vorbis_rs
 
-## Flow
-
-`.mid` bytes → `midi::parse` → `synth::notes_from` → `synth::render_score` (mono f32 buffer) → `encode::encode_ogg` / `write_ogg` → `.ogg`.
-
-## Integration
-
-- Deps: `cnc-sfx` (reuses `waves::adsr`/`sine`), `cnc-procgen`, `vorbis_rs 0.5`, `anyhow 1.0`. No in-workspace dependents yet — this is the top of the audio bake stack.
-- Cost is O(samples × active notes) — fine for short replacement tracks; the module doc notes large files should be chunked per note.

@@ -1,24 +1,58 @@
 # RUST/cnc-launcher/
 
 ## Responsibility
+Main launcher application for the C&C Remastered Collection Rust port. Provides game selection (TD/RA), skirmish/mission lobby, network matchmaking, options management, and rendering backend selection. Dual binary: library + multiple example binaries for testing.
 
-The workspace's client application frame and largest crate: winit/wgpu window shell, main menu state machine, campaign/local/online game select, sidebar+production UI, network lobby/relay (`cnc-net-lobby` bin), screenshot capture (`cnc-screenshots` bin) and a broad in-game command set (see BUILD_STATUS: 58 tests; menu + campaigns + lobby + migration + production + attacks/sell/deploy + rejoin + minimap/camera/save/replay/chat/control-groups wiring).
+## Design Patterns
+- **Egui/eframe GUI**: Immediate-mode UI for menus, lobby, options, game setup
+- **Renderer Abstraction**: `RendererKind` enum (Wgpu, Software, Headless) with dynamic backend selection
+- **Options Persistence**: `options.rs` - TOML-based config with validation, migration, defaults
+- **Network Lobby**: `lobby.rs`/`lobby_screen.rs` - matchmaking, peer handshake, host migration, mesh relay
+- **Game Launch**: Spawns `cnc-tiberian-dawn` or `cnc-red-alert` game instances via `Game::new`
+- **Event Integration**: `events_subscriber.rs` bridges `cnc-events` to launcher UI
+- **Score Tracking**: `score.rs` - match results, stats, leaderboard sync
+- **Ready State**: `ready.rs` - player ready/check logic for multiplayer
+- **Binaries**: Multiple `[[bin]]` targets for integration testing (`net_lobby`, `screenshots`, `game_screenshots`, `game_view`)
 
-## Design
+## Data & Control Flow
+1. **Startup**: `main.rs` → `LauncherApp::new()` → loads `Options` → initializes `RendererKind`
+2. **Menu**: `menu.rs` - game select (TD/RA), mode (skirmish/mission/multiplayer), options
+3. **Lobby**: `lobby_screen.rs` → `lobby.rs` - matchmaking, player list, ready state, map select
+4. **Network**: `net_lobby` binary tests `LockstepSession`, `UdpTransport`, handshake, migration
+5. **Game Launch**: Selected game crate `Game::new(scenario)` → runs simulation loop
+6. **Options**: `options.rs` - persist/load TOML, validate `RendererKind`, apply at runtime
+7. **Shutdown**: Graceful disconnect, save options, flush logs
 
-- Three binaries + a small library (`lib.rs`: `pub mod lobby; menu; ready; types;`):
-  - `src/main.rs` (10 146 lines) — window, event loop (`RedrawRequested` ≈ 60 FPS), `create_renderer` for `RendererKind::Wgpu|Software`, `Args`/`GameKind` selection, per-engine gameplay (TD sidebar via `Buildable`, RA via `cnc_red_alert::game::GameCommand`), tileset-driven terrain drawing helpers (`TilesetPalette`, `PackTerrain`, `draw_pack_tile_family`, `ra_terrain_tile`), save/replay paths (`ra_save_path_for(slot)`, `default_network_replay_path`), briefing screens (`draw_td_briefing`).
-  - `src/menu.rs` (688 L) — pure state machine, deliberately window/renderer-free so it is unit-testable: `MainMenu`, `Screen` enum, `MenuCommand` requests.
-  - `src/ready.rs` (337 L) — CNCREADY 1 out-of-band ready-up protocol for the host/join lobby (`parse_ready_line`/`format_ready_line`, `ReadyTracker` roster over `lobby::LobbyState` with an `all_ready` start gate), deliberately beside the lockstep stream like chat; poll-loop receive/send hooks are not yet wired in `main.rs`.
-  - `src/bin/net_lobby.rs` (694 L) — standalone UDP harness driving `cnc_tiberian_dawn::network::LiveSession`: per-frame lockstep heartbeats, duplicate-dropping relay, host-migration elections; window is a thin status view.
-  - `src/bin/screenshots.rs` — headless menu screenshot capture.
-- Configuration: `clap` `Args`, `config`, `dotenv`, `tracing/tracing-subscriber` logging; renderer abstraction stays `cnc_renderer::Renderer`-based so wgpu and software paths share gameplay code.
+## Public API
+- **types**: `LauncherApp`, `RaLauncherApp`, `RendererKind`, `DEFAULT_GAME_*`, `GameMode`, `MapInfo`
+- **menu**: `MenuScreen`, `MenuAction`
+- **lobby**: `Lobby`, `LobbyState`, `PlayerInfo`, `LobbyEvent`
+- **lobby_screen**: `LobbyScreen`
+- **ready**: `ReadyState`, `ReadyEvent`
+- **options**: `Options`, `OptionsError`, `load_options`, `save_options`
+- **events_subscriber**: `EventsSubscriber`
+- **score**: `ScoreTracker`, `MatchResult`
+- **Binaries**: `net_lobby`, `screenshots`, `game_screenshots`, `game_view`
 
-## Flow
+## Integration Points
+- **Dependencies**: cnc-core, cnc-tiberian-dawn, cnc-red-alert, cnc-renderer, cnc-events, cnc-logs, cnc-console, eframe, egui, winit, tokio, serde, toml, anyhow, thiserror, clap, config, dotenv, ctrlc, parking_lot, once_cell, chrono, uuid, crossbeam-channel
+- **Consumes**: Both game engines, renderer, events, logs
+- **Network**: `cnc-net-directory` for matchmaking (planned)
+- **Config**: `Launcher.toml` in config dir
 
-winit events → win event loop → `MainMenu` screens → start campaign/skirmish/online → instantiate `cnc_tiberian_dawn::game::Game` or `cnc_red_alert::game::Game` → per-frame simulation + `Renderer` draw + `cnc_audio` playback; network games run through `LiveSession`/`CommandQueue` (UTC UDP peer traffic relayed by the net-lobby binary or in-process).
+## Key Files
+- src/main.rs - Application entry, eframe bootstrap, LauncherApp
+- src/lib.rs - Module declarations, re-exports
+- src/menu.rs - Main menu, game/mode selection
+- src/lobby.rs - Network lobby logic, matchmaking, handshake
+- src/lobby_screen.rs - Lobby UI screen
+- src/options.rs - Options persistence (TOML), validation, migration
+- src/ready.rs - Player ready state management
+- src/events_subscriber.rs - cnc-events bridge to UI
+- src/score.rs - Match scoring, stats
+- src/types.rs - Shared types (RendererKind, GameMode, MapInfo)
+- src/bin/net_lobby.rs - Network lobby integration test
+- src/bin/screenshots.rs - Screenshot test binary
+- src/bin/game_screenshots.rs - In-game screenshot test
+- src/bin/game_view.rs - Game view test binary
 
-## Integration
-
-- Depends on workspace crates: core, both engines, renderer, audio, asset. Notably it does **not** depend on `cnc-net-directory` (lobby browsing/matchmaking is a separate service not wired into launcher code yet — evidence: launcher Cargo.toml deps list).
-- Consumer of assets (`assets/atlas.png`, tileset packs) and mission/scenario INIs under `assets/missions`/campaign listing; integration test `tests/cli_campaign.rs` pins the campaign-CLI contract.

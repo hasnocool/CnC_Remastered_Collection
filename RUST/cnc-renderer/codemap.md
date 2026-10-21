@@ -1,22 +1,45 @@
 # RUST/cnc-renderer/
 
 ## Responsibility
+WGPU-based renderer for the C&C Rust port. Implements palette-indexed sprite rendering (faithful to Westwood 8-bit palette model), software fallback renderer, camera system, sprite batching, and immediate-mode UI primitives. Dual backend: WGPU (GPU) and pixels (CPU software).
 
-2D rendering crate: a `Renderer` abstraction with a wgpu implementation and a software fallback, instanced sprite batching over a 2D texture array (slot 0 = procedural unit/building atlas, slot `TILESET_TEXTURE_ID` = RTS tileset pack), palette-index shader with player remaps, an orthographic camera, and font8x8 text drawing (BUILD_STATUS Phase 3 complete: 3 camera/sprite-batch unit tests + 2 GPU smoke tests).
+## Design Patterns
+- Palette-Indexed Rendering: Sprites store 8-bit palette indices; PaletteShader resolves to RGBA at draw time (supports remap, shadow, transparency flags)
+- Dual Backend: WgpuRenderer (GPU) and SoftwareRenderer (CPU) implement common Renderer trait
+- Sprite Batching: SpriteBatch accumulates SpriteInstance (pos, size, palette_id, flags) to single draw call
+- Camera: Orthographic camera with zoom, pan, world<->screen transforms
+- Immediate UI: ui module provides button, panel, console, widget_at for debug/tools UI
+- Texture Atlas: Single TILESET_TEXTURE_ID atlas binds all terrain/unit sprites
 
-## Design
+## Data & Control Flow
+1. Init: Renderer::new() / WgpuRenderer::new() / SoftwareRenderer::new() to creates pipeline, atlas texture
+2. Load Assets: renderer.load_atlas(atlas_data) uploads palette + sprite sheets to GPU
+3. Frame Begin: renderer.begin_frame(camera) - clears, sets view/projection
+4. Batch Submit: sprite_batch.add(SpriteInstance) - accumulates sprites
+5. Draw: renderer.draw_batch(&sprite_batch) - single indexed draw call
+6. UI Overlay: ui::button(), ui::console(), ui::panel() - immediate mode, drawn last
+7. Present: renderer.end_frame() - swap/present
 
-- `Renderer` trait (`renderer.rs`, 729 L): `Send + Sync` object-safe drawing surface; implementations `WgpuRenderer` (async device creation, `set_atlas`, texture-array uploads) and `SoftwareRenderer` (offscreen u32 buffer, used headless). `Sprite { texture_id, ... }` selects the atlas slot; `SpriteBatch`/`SpriteInstance` (`sprite_batch.rs`, 899 L) use instanced quads — 10k instance capacity, z-order + texture sorting, six vertices per sprite generated in the vertex shader; `draw_text_block` helper over `font8x8`.
-- WGSL `shaders/sprite_batch.wgsl`: 256-colour palette remapping + alpha blending (per BUILD_STATUS); dev-dep `naga` validates WGSL in tests.
-- `camera.rs` (113 L): `Camera` view/projection, world↔screen transforms, zoom/pan.
-- `ui.rs`/`palette_shader.rs`: six-line placeholder modules, intentionally empty (evidence: 6 lines each).
-- Tileset contract: `TILESET_TEXTURE_ID: u32 = 1`; `../../assets/packs/rts_16x16_tileset` loads via `cnc_asset::tileset_pack::TilesetPack` then uploads here.
+## Public API
+- Camera: Camera::new(), world_to_screen(), screen_to_world(), zoom, pan
+- Renderer Trait: begin_frame(), draw_batch(), load_atlas(), end_frame()
+- WgpuRenderer: new(), GPU pipeline, bind groups
+- SoftwareRenderer: new(), CPU rasterization via pixels crate
+- PaletteShader: PALETTE_SHADER_WGSL, MODE_FLAG_REMAP, MODE_FLAG_SHADOW, MODE_FLAG_TRANSPARENT, sample_palette_cpu()
+- SpriteBatch: new(), add(instance), clear(), len()
+- SpriteInstance: position, size, palette_id, flags, texture_id
+- UI: button(), panel(), console(), widget_at()
 
-## Flow
+## Integration Points
+- Dependencies: cnc-core, wgpu, winit, pixels, image, bytemuck, bitflags, ahash, parking_lot, once_cell, font8x8, naga (dev), pollster (dev), criterion (dev)
+- Consumed by: cnc-tiberian-dawn, cnc-red-alert (game rendering), cnc-classic (classic mode), cnc-map-editor (editor viewport), cnc-console (UI)
+- Asset Pipeline: Consumes atlases from cnc-asset, palettes from cnc-core
 
-Caller builds `Sprite`s (entity or tile layer) → `SpriteBatch::queue` → sort by z/texture → one instanced draw per slot through the WGSL pipeline → GPU present (wgpu) or CPU pixel buffer (software). Camera transforms map between world coordinates and the render target.
+## Key Files
+- src/lib.rs - Trait definitions, re-exports
+- src/renderer.rs - Renderer trait, WgpuRenderer, SoftwareRenderer
+- src/sprite_batch.rs - SpriteBatch, SpriteInstance, batching logic
+- src/camera.rs - Camera, transform math
+- src/palette_shader.rs - WGSL shader, palette sampling, mode flags
+- src/ui.rs - Immediate-mode UI primitives
 
-## Integration
-
-- Depends on: `cnc-core` + wgpu/winit/pixels/image/bytemuck/ahash; `wgpu 22` pinned workspace-wide.
-- Consumed by `cnc-tiberian-dawn`, `cnc-red-alert`, `cnc-map-editor` (interactive + headless presenter) and `cnc-launcher` (window shell + screenshots); `tests/gpu_smoke.rs` verifies real-device behaviour when an adapter is present (otherwise ignored).
