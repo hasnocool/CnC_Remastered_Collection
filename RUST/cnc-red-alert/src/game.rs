@@ -3085,7 +3085,7 @@ impl Game {
     ///
     /// RA has no blast helper; scripted superweapons need one. Uses the same
     /// armour scaling as direct fire so a nuke is not magically unblockable.
-    fn apply_radius_damage(
+    pub fn apply_radius_damage(
         &mut self,
         centre: Vec2,
         radius: f32,
@@ -3148,7 +3148,7 @@ impl Game {
         self.apply_damage(hits);
     }
 
-    fn apply_damage(&mut self, damage: Vec<(TargetRef, Fixed16_16, Option<String>)>) {
+    pub fn apply_damage(&mut self, damage: Vec<(TargetRef, Fixed16_16, Option<String>)>) {
         let elapsed = self.elapsed;
         // Resolve warhead rows up front to avoid borrowing `self.rules` while
         // mutating units/structures.
@@ -4785,6 +4785,7 @@ Briefing=Hold the line.\n\
     #[test]
     fn ra_discovering_a_cell_is_recorded() {
         let mut game = Game::new(40, 40);
+        game.deflect_chance_percent = 0;
         game.units.clear();
         game.structures.clear();
         game.spawn_structure(0, ClassId::ConstructionYard, Vec2i::new(20, 20));
@@ -4811,6 +4812,7 @@ Briefing=Hold the line.\n\
     #[test]
     fn ra_discovered_condition_matches_a_discovery() {
         let mut game = Game::new(40, 40);
+        game.deflect_chance_percent = 0;
         game.units.clear();
         game.structures.clear();
         game.spawn_structure(0, ClassId::ConstructionYard, Vec2i::new(20, 20));
@@ -5307,6 +5309,7 @@ Briefing=Hold the line.\n\
     #[test]
     fn structures_and_units_reveal_their_surroundings() {
         let mut game = Game::new(40, 40);
+        game.deflect_chance_percent = 0;
         game.units.clear();
         game.structures.clear();
         let cell = Vec2i::new(20, 20);
@@ -5326,6 +5329,7 @@ Briefing=Hold the line.\n\
     #[test]
     fn ra_visibility_is_per_house() {
         let mut game = Game::new(40, 40);
+        game.deflect_chance_percent = 0;
         game.units.clear();
         game.structures.clear();
         game.spawn_structure(0, ClassId::ConstructionYard, Vec2i::new(10, 10));
@@ -5340,6 +5344,7 @@ Briefing=Hold the line.\n\
     #[test]
     fn ra_units_in_unseen_cells_are_not_drawn() {
         let mut game = Game::new(40, 40);
+        game.deflect_chance_percent = 0;
         game.units.clear();
         game.structures.clear();
         game.spawn_unit(1, ClassId::VehicleE2, Vec2i::new(35, 35));
@@ -6730,7 +6735,7 @@ Player=Allies
 
     #[test]
     fn empty_rules_reproduce_the_builtin_profile() {
-        let mut empty = cnc_core::RulesDatabase::default();
+        let empty = cnc_core::RulesDatabase::default();
         for class_id in [ClassId::VehicleE1, ClassId::InfantryE1, ClassId::ShipE4] {
             assert_eq!(
                 unit_profile_with_rules(class_id, &empty),
@@ -6742,7 +6747,7 @@ Player=Allies
 
     #[test]
     fn rules_strength_and_speed_override_the_builtin_profile() {
-        let mut rules = rules_with("[LTNK]\nStrength=1234\nSpeed=100\n");
+        let rules = rules_with("[LTNK]\nStrength=1234\nSpeed=100\n");
         let (_, health, speed, _) = unit_profile_with_rules(ClassId::VehicleE1, &rules);
         assert_eq!(health, 1234.0, "Strength= wins over the built-in table");
         assert_eq!(speed, MAX_UNIT_SPEED_PX, "Speed=100 maps to the top speed");
@@ -6751,7 +6756,7 @@ Player=Allies
     #[test]
     fn missing_rules_fields_keep_builtin_values() {
         // Only Strength is present; speed must stay as the built-in value.
-        let mut rules = rules_with("[LTNK]\nStrength=999\n");
+        let rules = rules_with("[LTNK]\nStrength=999\n");
         let (_, health, speed, _) = unit_profile_with_rules(ClassId::VehicleE1, &rules);
         let (_, base_health, base_speed, _) = unit_profile(ClassId::VehicleE1);
         assert_eq!(health, 999.0);
@@ -6826,5 +6831,99 @@ Player=Allies
     fn rules_armor_overrides_the_role_default() {
         let mut rules = rules_with("[LTNK]\nArmor=light\n");
         assert_eq!(armor_for(ClassId::VehicleE1, &mut rules), ArmorClass::Light);
+    }
+
+    #[test]
+    fn rifle_verses_heavy_armor_below_rifle_verses_infantry() {
+        let warhead = warhead("SA", "100,80,60,40,20");
+        let base = Fixed16_16::from_int(100);
+        let to_infantry = damage_vs_armor(base, ArmorClass::None, Some(&warhead));
+        let to_heavy = damage_vs_armor(base, ArmorClass::Heavy, Some(&warhead));
+        assert!(to_heavy < to_infantry, "heavy armour shrugs rifle fire");
+        assert_eq!(to_infantry, base, "infantry takes full damage");
+        assert_eq!(to_heavy, Fixed16_16::from_int(40), "heavy takes 40%");
+    }
+
+    #[test]
+    fn splash_damages_adjacent_cells() {
+        let mut game = Game::new(40, 40);
+        game.deflect_chance_percent = 0;
+        game.units.clear();
+        game.structures.clear();
+        let centre_cell = Vec2i::new(20, 20);
+        let centre_unit = game.spawn_unit(1, ClassId::VehicleE2, centre_cell);
+        let adj_unit = game.spawn_unit(1, ClassId::VehicleE2, Vec2i::new(21, 20));
+        let far_unit = game.spawn_unit(1, ClassId::VehicleE2, Vec2i::new(30, 30));
+        let centre = cell_center(centre_cell);
+        let before_c = game.unit(centre_unit).unwrap().health;
+        let before_a = game.unit(adj_unit).unwrap().health;
+        let before_f = game.unit(far_unit).unwrap().health;
+        game.apply_radius_damage(centre, TILE_SIZE * 2.0, 300, Some("AP"));
+        let after_c = game.unit(centre_unit).unwrap().health;
+        let after_a = game.unit(adj_unit).unwrap().health;
+        let after_f = game.unit(far_unit).unwrap().health;
+        assert!(after_c < before_c, "centre damaged");
+        assert!(after_a < before_a, "adjacent damaged");
+        assert_eq!(after_f, before_f, "far untouched");
+        assert!(
+            before_c - after_c > before_a - after_a,
+            "centre takes more than adjacent"
+        );
+    }
+
+    #[test]
+    fn unknown_armor_type_passthrough_and_one_warning() {
+        let mut rules = rules_with("[LTNK]\nArmor=Unobtainium\n");
+        let armor = armor_for(ClassId::VehicleE1, &mut rules);
+        assert_eq!(armor, ArmorClass::Unknown);
+        let base = Fixed16_16::from_int(100);
+        let warhead = warhead("SA", "100,80,60,40,20");
+        assert_eq!(damage_vs_armor(base, armor, Some(&warhead)), base);
+        assert_eq!(rules.warnings.len(), 1);
+        let mut rules2 = rules.clone();
+        let _ = armor_for(ClassId::VehicleE1, &mut rules2);
+        assert_eq!(rules2.warnings.len(), 1);
+    }
+
+    #[test]
+    fn miss_roll_is_deterministic_and_journaled() {
+        // Same seed + identical damage stream => identical miss/deflection
+        // outcome and identical RNG journal; the roll draws from the shared
+        // SimRng cursor that is part of the saved state.
+        let mut first = Game::new_with_seed(32, 32, 0xCAFE_F00D);
+        let mut second = Game::new_with_seed(32, 32, 0xCAFE_F00D);
+        first.deflect_chance_percent = 50;
+        second.deflect_chance_percent = 50;
+        let id1 = first.spawn_unit(0, ClassId::VehicleE1, Vec2i::new(5, 5));
+        let id2 = second.spawn_unit(0, ClassId::VehicleE1, Vec2i::new(5, 5));
+        let base = Fixed16_16::from_int(100);
+        first.rules = rules_with("[Warheads]\n1=SA\n[SA]\nVerses=100,80,60,40,20\n");
+        second.rules = first.rules.clone();
+        let hits = |id: u32| {
+            vec![
+                (TargetRef::Unit(id), base, Some("SA".to_string())),
+                (TargetRef::Unit(id), base, Some("SA".to_string())),
+                (TargetRef::Unit(id), base, Some("SA".to_string())),
+            ]
+        };
+        first.apply_damage(hits(id1));
+        second.apply_damage(hits(id2));
+        // Identical draws advance the shared cursor identically.
+        assert_eq!(first.rng.state(), second.rng.state());
+        assert_eq!(
+            first.unit(id1).unwrap().health,
+            second.unit(id2).unwrap().health,
+            "same seed and stream => same damage outcome"
+        );
+        let first_save = first.to_save_string();
+        let second_save = second.to_save_string();
+        assert_eq!(first_save, second_save, "saves are byte-identical");
+        // The roll is journaled; a change in draw count would show here.
+        assert!(
+            first_save.contains(&format!("rng\t{}\t", first.sim_seed())),
+            "RNG seed/cursor are part of the save: {first_save}"
+        );
+        // Three damage events consumed exactly three draws.
+        assert_ne!(first.rng.state(), first.sim_seed());
     }
 }
