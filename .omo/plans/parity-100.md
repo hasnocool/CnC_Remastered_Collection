@@ -126,77 +126,77 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
 ## Todos
 > Implementation + Test = ONE todo. Never separate.
 <!-- APPEND TASK BATCHES BELOW THIS LINE WITH edit/apply_patch - never rewrite the headers above. -->
-- [ ] 1. Baseline reconciliation + anchor refresh
+- [x] 1. Baseline reconciliation + anchor refresh
   What to do / Must NOT do: Inventory the dirty tree (`git status --porcelain` at repo root; **live 211 entries / 381 with `-uall`** — the "192 at planning" figure was stale); map every dirty/untracked source path to its owning feature (scenario_loader → TD-content lane; lobby/ready/score/menu/options → launcher lane; format80/video/classic_pack → asset lane; entity.rs → team/trigger lane; workspace `RUST/Cargo.toml` → infra/membership lane; `cnc-events/` → events lane; `cnc-logs/` → logs lane; `cnc-console/` → console lane). Produce an owner-labeled commit plan, then LAND the tree as per-owner feature commits — one commit per owner feature, commit message labels the owner lane, NOTHING pushed, no feature mixing in one commit. Do NOT revert or restage. Re-verify stale audit claims against live source: France→GrandCannon in `cnc-red-alert/src/house.rs` (verified fixed), workspace membership + cnc-console compile (live-verified BROKEN at review rr2: three crates untracked, absent from members, `cnc-console/src` lacks `lib.rs` — REPAIR in this todo: add the three members to `RUST/Cargo.toml`, restore/recreate `cnc-console/src/lib.rs` from `.bak` remnants, landed as owner-labeled infra commits), actual fmt-failure locations (**live: one violation at `cnc-tiberian-dawn/src/scenario_loader.rs:201`** — the classic_pack.rs:314,351 claim was stale), TD `scenario_loader.rs` TODOs (**live: none; 1468 lines, 0 TODO/todo! markers — those anchors were stale**) — and REWRITE any stale numbers cited in this plan file (doc-only edits allowed here). Record baseline: test count, fmt/clippy status.
   Parallelization: Wave 0 | Blocked by: none (runs ALONE) | Blocks: 2–53
   References (executor has NO interview context - be exhaustive): `git status --porcelain` (**211 entries / 381 with `-uall`**, verified at todo 1 — the "192" figure was stale); RUST/docs/PARITY_AUDIT_2026-10-20.md §8; RUST/docs/PARITY.md §5; RUST/cnc-tiberian-dawn/src/scenario_loader.rs (**no TODO markers remain**); Metis review findings 1–4,13 (recorded in .omo/drafts/parity-100.md D5); review round 1 findings 5/10/11 (commit entanglement, anchor drift).
   Acceptance criteria (agent-executable): `.omo/evidence/baseline-report.md` maps every dirty path → owner AND lists the landed per-owner commits (hash + message); `cd RUST && cargo test --workspace 2>&1 | tail -3` recorded verbatim; every anchor cited in this plan grep-verified and stale in-plan numbers rewritten (scripted check, output in evidence log).
   QA scenarios (name the exact tool + invocation): happy — gates run and recorded even if red (report states actuals); failure — a cited anchor is missing → correct the citing plan row in this same todo (doc-only edit allowed), Evidence .omo/evidence/task-1-parity-100.log
   Commit: Y | chore(baseline): land dirty tree as owner-labeled per-feature commits
-- [ ] 2. Workspace fmt + clippy green
+- [x] 2. Workspace fmt + clippy green
   What to do / Must NOT do: `cd RUST && cargo fmt`, then fix remaining `cargo fmt --check` violations (**live: none — fmt was already clean at todo-1 close**; the classic_pack.rs:314,351 anchor was stale); `cargo clippy --workspace --all-targets` clean (no blanket allow-attributes; justify any local allow). Do NOT touch unrelated dirty files beyond rustfmt scope.
   Parallelization: Wave 0 | Blocked by: 1 | Blocks: all (wave gate)
   References: Metis findings 2/13; RUST/BUILD_STATUS.md Formatting section; pre-push CI policy (AGENTS §17.5).
   Acceptance criteria (agent-executable): `cd RUST && cargo fmt --check && cargo clippy --workspace --all-targets` both exit 0.
   QA scenarios: happy — both exit 0; failure — each violation listed then fixed before close, Evidence .omo/evidence/task-2-parity-100.log
   Commit: Y | style(workspace): make fmt and clippy gates green
-- [ ] 3. Wire cnc-net-directory + ready-up into launcher
+- [x] 3. Wire cnc-net-directory + ready-up into launcher
   What to do / Must NOT do: Add `cnc-net-directory` dep to `cnc-launcher/Cargo.toml`; lobby screen invoking DirectoryClient (LAN multicast discovery minimum, LFG optional); wire `ready.rs` ReadyTracker poll/send hooks into the launcher UDP poll loops. Do NOT alter LiveSession protocol semantics.
   Parallelization: Wave 0 | Blocked by: 1 | Blocks: 43
   References: RUST/cnc-net-directory/src/ (Distributor, matchmaking.rs, discovery/); RUST/cnc-launcher/Cargo.toml:22–27 (dep absent); cnc-launcher/src/codemap.md "READY hooks not wired"; RUST/cnc-launcher/src/main.rs UDP poll loops (~5902–6454); AUDIT §3.9/§7.
-  Acceptance criteria (agent-executable): `grep -n "cnc_net_directory" RUST/cnc-launcher/Cargo.toml` matches; tests `lobby_lists_directory_services` and `ready_tracker_polls_in_udp_loop` pass.
+  Acceptance criteria (agent-executable): `grep -n "cnc-net-directory" RUST/cnc-launcher/Cargo.toml` matches (re-verified 2026-10-20: Cargo dependency keys use the hyphen spelling; the original `cnc_net_directory` grep was stale); tests `lobby_lists_directory_services` and `ready_tracker_polls_in_udp_loop` pass.
   QA scenarios: happy — two local instances discover each other via directory in integration test; failure — directory timeout → direct-connect fallback without panic, Evidence .omo/evidence/task-3-parity-100.log
   Commit: Y | feat(launcher): wire net-directory lobby and ready-up hooks
-- [ ] 4. Give cnc-events real consumers
+- [x] 4. Give cnc-events real consumers
   What to do / Must NOT do: Emit typed game events (unit produced/lost, structure captured, superweapon fired, mission outcome) through the existing EventBus from both engines' update paths; launcher subscribes for HUD/log. Precondition: cnc-events must be a workspace member (todo 1's infra commit lands this if still missing). Do NOT restructure the EventBus API.
   Parallelization: Wave 0 | Blocked by: 1 | Blocks: 44
   References: RUST/cnc-events/src/ (bus, definitions, emission); AUDIT §7 "orphaned" row (27 tests, zero consumers).
   Acceptance criteria (agent-executable): ≥3 publish call sites across cnc-tiberian-dawn/cnc-red-alert/cnc-launcher (grep evidence); test `engine_events_reach_launcher_subscriber` passes.
   QA scenarios: happy — scripted tick publishes ≥5 event types, subscriber receives in order; failure — dropped subscriber → engine continues, no panic, Evidence .omo/evidence/task-4-parity-100.log
   Commit: Y | feat(events): plumb game events from engines to launcher
-- [ ] 5. Give cnc-logs a real consumer
+- [x] 5. Give cnc-logs a real consumer
   What to do / Must NOT do: Initialize the LogBuffer tracing layer in launcher + engines with per-target filters and bounded memory. Init + subscriber only; no wholesale rewrite of log call sites. Precondition: cnc-logs must be a workspace member (todo 1's infra commit lands this if still missing).
   Parallelization: Wave 0 | Blocked by: 1 | Blocks: none
   References: RUST/cnc-logs/src/ (buffer, init, layer, rotation); AUDIT §7.
   Acceptance criteria (agent-executable): `grep -n "cnc_logs::init" RUST/cnc-launcher/src/main.rs` matches; test `log_buffer_bounded_under_flood` passes; launcher boot writes ≥1 structured entry.
   QA scenarios: happy — boot emits structured logs into buffer; failure — flood path → rotation drops oldest, no panic, Evidence .omo/evidence/task-5-parity-100.log
   Commit: Y | feat(logs): initialize structured logging in launcher
-- [ ] 6. Documentation reconciliation pass
+- [x] 6. Documentation reconciliation pass
   What to do / Must NOT do: Re-verify and correct PARITY.md vs PARITY_AUDIT_2026-10-20.md contradictions (fmt "RESOLVED" claim, France "FIXED", loader status, AI/combat over-claims) with dated "re-verified" notes; fix TD codemap test-count claim ("154 unit" → actual) and renderer codemap stub claims; add Steam-divergence note to cnc-map-editor/README.md; mark cnc-classic as roadmap placeholder. Do NOT delete either doc.
   Parallelization: Wave 0 | Blocked by: 1 | Blocks: none
   References: RUST/docs/PARITY.md (Metis finding 4); RUST/cnc-tiberian-dawn/codemap.md; RUST/cnc-renderer/src/codemap.md; RUST/cnc-map-editor/README.md; RUST/cnc-classic/README.md; RUST/codemap.md + RUST/scripts/sync-docs.sh (stale 552-test figure — fix already applied in working tree 2026-10-20; verify it survived todo 1's commit landing, update if re-baselined).
   Acceptance criteria (agent-executable): every corrected claim carries "re-verified 2026-10-20" + evidence path; `grep -i steam RUST/cnc-map-editor/README.md` matches divergence note.
   QA scenarios: happy — every doc claim traced to a live grep; failure — contradiction found → corrected in place with evidence, Evidence .omo/evidence/task-6-parity-100.log
   Commit: Y | docs: reconcile parity docs with live-tree verification
-- [ ] 7. LCW codec in cnc-asset
+- [x] 7. LCW codec in cnc-asset
   What to do / Must NOT do: New `cnc-asset/src/lcw.rs` — Westwood LCW decode + encode (mode-byte semantics per the C# reference); round-trip property tests; known-vector decode test against a hand-built MapPack-style fixture. Reuse `format80.rs` module/test patterns. Do NOT reimplement Format80 — it exists; do NOT wire consumers yet (that is todos 8/9/12).
   Parallelization: Wave 1 | Blocked by: 1 | Blocks: 8,9,12,45,52 | Parallel with: 10,11
   References (executor has NO interview context - be exhaustive): CnCTDRAMapEditor/Utility/WWCompression.cs:1–688 (LCW reference implementation); RUST/cnc-asset/src/format80.rs (**decompress :46 / compress :270, 11 tests — this IS the LCW codec; verify and extend it rather than re-adding it**); Metis finding 5 (**REFUTED at todo 1: LCW is present in format80.rs**).
   Acceptance criteria (agent-executable): `cd RUST && cargo test -p cnc-asset lcw` green with ≥8 tests incl. `lcw_round_trips_random_buffers` and `lcw_decode_known_vector`.
   QA scenarios (name the exact tool + invocation): happy — `lcw_decode(fixture) == expected plaintext bytes`; failure — 10k fuzzed corrupt buffers → Err, no panic/UB, Evidence .omo/evidence/task-7-parity-100.log
   Commit: Y | feat(asset): LCW decode/encode codec
-- [ ] 8. Finish TD original-scenario loader + wire launcher
+- [x] 8. Finish TD original-scenario loader + wire launcher
   What to do / Must NOT do: Complete `cnc-tiberian-dawn/src/scenario_loader.rs`: apply LCW `.bin` terrain/overlay (**done — no TODOs remain**), finish unit/structure/trigger/house instantiation (**done**), add `Game::from_original_scenario` (**present**); **live: `scenario_loader.rs` is 1468 lines, 0 TODO markers**; launcher loads original campaign files when `CNC_ORIGINAL_DATA_DIR` set (skip + warn when unset). Do NOT break the 9 authored-dialect maps (`RUST/maps/td_campaign/`, tests/campaign_missions.rs must stay green).
   Parallelization: Wave 1 | Blocked by: 7,10,11 | Blocks: 12,13,34,35 | Parallel with: 9
   References: RUST/cnc-tiberian-dawn/src/scenario_loader.rs:1–776 (section parsing, inline tests); TIBERIANDAWN/SCENARIO.CPP (original dialect semantics); AUDIT §3.1 TD half, §4 scenario row; Metis finding 3 (loader exists, unwired).
   Acceptance criteria (agent-executable): `cargo test -p cnc-tiberian-dawn scenario_loader` green incl. new `original_td_scenario_builds_game_with_terrain_overlay_units` (todo-11 fixture — 11 lands before this todo's acceptance runs); existing campaign_missions tests stay green; env-gated integration test discovers real campaign dir when provided.
   QA scenarios: happy — todo-11 fixture loads with non-empty TERRAIN/OVERLAY cells + units with correct house/health; failure — malformed section → error list returned (never panic), Evidence .omo/evidence/task-8-parity-100.log
   Commit: Y | feat(td): complete original scenario loading
-- [ ] 9. RA original .MPR/SCENARIO.INI loader
+- [x] 9. RA original .MPR/SCENARIO.INI loader
   What to do / Must NOT do: New `cnc-red-alert/src/scenario_mpr.rs`: parse [Basic]/[MapPack](LCW)/[OverlayPack](LCW)/[Houses]/[Infantry]/[Structures]/[Units]/[Aircraft]/[Ships]/[Waypoints]/[Trigs]/[TeamTypes]/[Base]/[SMUDGE]/[TERRAIN]; build Game. Keep existing new-dialect `scenario.rs` untouched and green.
   Parallelization: Wave 1 | Blocked by: 7,10,11 | Blocks: 12,13,34,35 | Parallel with: 8
   References: CnCTDRAMapEditor/RedAlert/GamePlugin.cs:226–268,1152–1523 (section layout + LCW usage); REDALERT/SCENARIO.CPP; RUST/cnc-red-alert/src/scenario.rs (existing dialect, keep intact); AUDIT §3.1 RA half.
   Acceptance criteria (agent-executable): `cargo test -p cnc-red-alert scenario_mpr` green incl. `original_ra_mpr_builds_game` (houses/waypoints/triggers populated from todo-11 fixture).
   QA scenarios: happy — todo-11 fixture .MPR loads with expected entity counts (11 lands first); failure — bad MapPack checksum → Err naming the section, Evidence .omo/evidence/task-9-parity-100.log
   Commit: Y | feat(ra): original MPR scenario loader
-- [ ] 10. Original TEVENT/TACTION record parser (cnc-core)
+- [x] 10. Original TEVENT/TACTION record parser (cnc-core)
   What to do / Must NOT do: New `cnc-core/src/trigger_records.rs`: parse original trigger record strings (`<event>,<params>` / `<action>,<params>` incl. house/unit/trigger references) into typed payloads; handle ALL ~30 event + ~31 action record codes with `Unknown(code)` passthrough for not-yet-enum'd ones (full enums land in todo 32). Do NOT wire into engines yet.
   Parallelization: Wave 1 | Blocked by: 1 | Blocks: 8,9,32,33 | Parallel with: 7,11
   References: REDALERT/TEVENT.H, TACTION.H; TIBERIANDAWN/TRIGGER.H:38–104 (record formats); AUDIT §3.7.
   Acceptance criteria (agent-executable): `cargo test -p cnc-core trigger_records` green with ≥6 tests round-tripping each record shape family.
   QA scenarios: happy — every record code parses or passes through as Unknown(code); failure — truncated record → Err with record code, Evidence .omo/evidence/task-10-parity-100.log
   Commit: Y | feat(core): original trigger record parser
-- [ ] 11. Golden fixture set (synthetic in-repo, real data env-gated)
+- [x] 11. Golden fixture set (synthetic in-repo, real data env-gated)
   What to do / Must NOT do: Commit license-clean synthetic original-format fixtures under `RUST/fixtures/`: TD .INI+.BIN pair and RA .MPR with hand-verified contents (terrain counts, entity lists, trigger records); loader tests optionally read real game data via `CNC_ORIGINAL_DATA_DIR` (skipped when unset). NEVER commit original game data (non-redistributable).
   Parallelization: Wave 1 | Blocked by: 1 | Blocks: 8,9,12,13 | Parallel with: 7,10
   References: Metis finding 5 (zero game data in TIBERIANDAWN//REDALERT — verified); RUST/scripts/download_openra_assets.py (license-clean precedent); AUDIT §3.1.
@@ -273,7 +273,7 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): unit paths around long wall lines without corner-cutting (`long_detour_succeeds`); water blocks infantry, allows boat; no stall on unreachable → deterministic no-move.
   QA scenarios: happy — 40-cell detour completes; failure — unreachable target → unit holds position, no spin, Evidence .omo/evidence/task-21-parity-100.log
   Commit: Y | feat(td): zone-based pathfinding
-- [ ] 22. RA seeded RNG policy + integration
+- [x] 22. RA seeded RNG policy + integration
   What to do / Must NOT do: Per-frame deterministic combat rolls via `cnc-procgen::prng` (SplitMix64); seed sourced from replay/scenario header; RNG state serialized in snapshot + included in CRC + the two-identical-games gate; replay format version bump with pre-RNG replays explicitly invalidated (documented in the module). Closes the no-RNG determinism-contract change deliberately (Metis finding 6).
   Parallelization: Wave 2 (RA chain head) | Blocked by: 1 | Blocks: 23 | Parallel with: 14–21 (TD chain)
   References: REDALERT/RANDOM.CPP (successive-resolution roll semantics); RUST/cnc-procgen/src/prng.rs (pinned SplitMix64); RUST/cnc-red-alert/src/game.rs (zero RNG today — verified); AUDIT §1 core-determinism row (audit has no §-subsections; anchor re-verified at todo 1); Metis finding 6.
@@ -343,14 +343,14 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): `ra_mission_carry_preserves_credits_and_units`; `ra_replay_reproduces_identical_state` (seeded); cnc-replayer is a workspace member hosting the replay module with its tests passing.
   QA scenarios: happy — replay of recorded RA match ends in identical CRC; failure — corrupt replay → rejected with header error, Evidence .omo/evidence/task-31-parity-100.log
   Commit: Y | feat(ra): carry-over + replay recording
-- [ ] 32. Full TEVENT/TACTION enums + apply arms
+- [x] 32. Full TEVENT/TACTION enums + apply arms
   What to do / Must NOT do: Complete event (~30) and action (~31) enums with typed payloads in cnc-core (extends todo-10 parser); apply arms in BOTH engines including superweapon actions ACTION_AIRSTRIKE/NUKE/ION/DZ (campaigns script superweapons), ALL_TO_HUNT, AUTOCREATE, REVEAL_MAP, CREDITS_TRANSFER, EVAC_CIVILIAN, WIN/LOSE/ALLOWWIN. Exhaustive match = compile-enforced. Closes AUDIT §3.7, §4/§5 trigger rows.
   Parallelization: Wave 3 (C4 chain head) | Blocked by: 10 | Blocks: 33 | Parallel with: 37 (C5 chain)
   References: REDALERT/TEVENT.H, TACTION.H (full enumerations); TIBERIANDAWN/TRIGGER.H:38–104; AUDIT §3.7 (5/5 vs ~30/~31 today); RUST/cnc-core/src/trigger_records.rs (from todo 10).
   Acceptance criteria (agent-executable): every enum variant parses (todo-10 records) + has an apply arm in both engines; fixture trigger fires airstrike strike event (`trigger_airstrike_fires`).
   QA scenarios (name the exact tool + invocation): happy — scripted campaign trigger executes nuke action deterministically; failure — future unknown action code → Unknown(code) + warning, mission continues, Evidence .omo/evidence/task-32-parity-100.log
   Commit: Y | feat(core): full trigger event/action vocabulary
-- [ ] 33. Trigger attachment model
+- [x] 33. Trigger attachment model
   What to do / Must NOT do: Attach triggers to cells, houses, and units (EVENT_DISCOVERED/ATTACKED/DESTROYED/ANY + house-filtered conditions); re-evaluation only on attachment events, not global polling. Do NOT regress elapsed/count triggers (mission tests stay green).
   Parallelization: Wave 3 (C4 chain) | Blocked by: 32 | Blocks: 34 | Parallel with: 37 (C5 chain)
   References: TIBERIANDAWN/TRIGGER.CPP (attachment semantics); REDALERT/TEVENT.CPP; AUDIT §3.7 (no cell binding today).
@@ -378,7 +378,7 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): easy AI never builds above tech threshold (`iq_gates_advanced_behavior`); special flags (build threshold, one-tick strikes) change behavior in test game. (Shroud-off acceptance lives in todo 38.)
   QA scenarios: happy — hard vs easy AI produce measurably different build orders; failure — unknown difficulty key → default + warning, Evidence .omo/evidence/task-36-parity-100.log
   Commit: Y | feat: IQ, difficulty, special flags
-- [ ] 37. Shroud primitive (C5)
+- [x] 37. Shroud primitive (C5)
   What to do / Must NOT do: New `cnc-core/src/visibility.rs`: per-house shroud/fog grid (unsighted/shrouded/revealed states), reveal-on-sight-range integration seams into both engines' maps, snapshot-serialized. TD = permanent reveal on sight; RA = fog re-covers (per-engine flag). FILE OWNERSHIP: this lane owns visibility.rs + map seams ONLY (Metis finding 9) — ai.rs/house.rs belong to the C4 lane this wave.
   Parallelization: Wave 3 (C5 chain head) | Blocked by: 1 | Blocks: 38,40 | Parallel with: 32–36 (C4 chain)
   References: REDALERT/CELL.CPP (per-side shroud semantics); RUST/cnc-red-alert/src/map.rs, RUST/cnc-tiberian-dawn/src/map.rs (seams); AUDIT §3.3 (zero shroud — grep-verified); Metis findings 7,9.
@@ -392,7 +392,7 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): `shrouded_enemy_not_targeted` (negative test); GPS charge → map reveal once; paradrop delivers team at waypoint; `special_shroud_off_disables_fog` (moved from todo 36).
   QA scenarios: happy — gap generator hides base from AI targeting; failure — GPS without full charge → no-op + EVA warning, Evidence .omo/evidence/task-38-parity-100.log
   Commit: Y | feat: vision consumers, GPS, paradrops
-- [ ] 39. EVA/VOX speech pipeline + CSF
+- [x] 39. EVA/VOX speech pipeline + CSF
   What to do / Must NOT do: Full CSF string-table parsing in cnc-asset (replace the 17-line stub that ignores `_data` — Metis finding 11); speech channel + queue in cnc-audio; EVA event strings ("Construction complete", "Unit ready", "Radar online", "Our base is under attack", objective deltas) with `Speak`/`Speak_AI` call sites in both engines (TIBERIANDAWN/AUDIO.CPP:33–42 pattern). Speech output routes through the existing mixer.
   Parallelization: Wave 4 (C6 chain head) | Blocked by: 1 | Blocks: 40 | Parallel with: editor chain, 45
   References: RUST/cnc-asset/src/string_table.rs (17-line stub — verified); RUST/cnc-audio/src/mixer.rs (channel/priority infrastructure); TIBERIANDAWN/AUDIO.CPP:33–42, 269–273, 532–535 (Speak/Speak_AI semantics); AUDIT §3.8 (VOX absent workspace-wide).
@@ -434,7 +434,7 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): scripted mission produces full stat report (`mission_stats_complete`); counters survive snapshot round-trip.
   QA scenarios: happy — every counter increments exactly once per event; failure — dropped event → counter unchanged, never corrupt, Evidence .omo/evidence/task-44-parity-100.log
   Commit: Y | feat: mission stats pipeline
-- [ ] 45. VQA compressed-chunk + VXL voxel decoders
+- [x] 45. VQA compressed-chunk + VXL voxel decoders
   What to do / Must NOT do: CBPZ/CBFZ/VQFR/SND1/SND2 decoders in `cnc-asset/src/video.rs` building on the existing format80 codec (video.rs:182 currently refuses these variants); VXL voxel parsing + conversion to sprite-atlas frames (audit §7 VXL row); synthetic compressed fixture test + env-gated real-file golden test (CNC_ORIGINAL_DATA_DIR). Do NOT implement Adlib (divergence).
   Parallelization: Wave 4 (C7) | Blocked by: 7 | Blocks: 46 | Parallel with: editor chain, C6 chain
   References: RUST/cnc-asset/src/video.rs:182,369 ("compressed_variants_report_the_missing_codec"); RUST/cnc-asset/src/format80.rs; RUST/docs/PARITY.md §3.1 (remaining true gap); AUDIT §7 (VXL voxels unsupported).
@@ -448,7 +448,7 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): scripted campaign plays a synthetic .VQA end-to-end (`campaign_plays_movie_flow`); missing movie → procgen fallback without error dialog.
   QA scenarios: happy — frame pacing deterministic, audio synced within a frame; failure — decode error mid-movie → skip to briefing with log, Evidence .omo/evidence/task-46-parity-100.log
   Commit: Y | feat(launcher): movie playback flow
-- [ ] 47. Waypoints tool + [Waypoints] I/O
+- [x] 47. Waypoints tool + [Waypoints] I/O
   What to do / Must NOT do: Waypoint placement/erase tool with letter assignment (A–…), [Waypoints] INI section read/write matching RA plugin layout; undo/redo-safe via existing History commands. Loaders (todos 8/9) already parse the section.
   Parallelization: Wave 4 (C9 serial chain head) | Blocked by: 1 | Blocks: 48 | Parallel with: C6 chain, 45
   References: CnCTDRAMapEditor/Tools/WaypointsTool.cs; CnCTDRAMapEditor/RedAlert/GamePlugin.cs:1459 ([Waypoints] layout); AUDIT §6 (waypoints MISSING).
@@ -476,7 +476,7 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): catalog size derived from fixture rules sections (`catalog_from_rules_matches_fixture`); prerequisite chains render in placement validation.
   QA scenarios: happy — fixture rules yield expected per-class catalog counts; failure — malformed rules section → partial catalog + error list, Evidence .omo/evidence/task-50-parity-100.log
   Commit: Y | feat(editor): rules-driven type registries
-- [ ] 51. Tools completion + MIX tilesets + team colors
+- [x] 51. Tools completion + MIX tilesets + team colors
   What to do / Must NOT do: Port remaining brushes: TemplateTool (base-terrain ribbon painting), smudge layer, walls brush, resources brush with brush size (TemplateTool.cs 1008L, SmudgeTool.cs 337L, WallsTool.cs 384L, ResourcesTool.cs:364); theater tilesets loaded from MIX archives via cnc-asset archive.rs (parser exists, unwired from editor); team colors via palette PlayerRemap in rendering; renderer icon-cache + theater-blit equivalents of GBUFFER/ICONSET (audit §7 renderer sub-items) in cnc-renderer and the editor tileset path.
   Parallelization: Wave 4 (C9 serial chain) | Blocked by: 50 | Blocks: 52 | Parallel with: C6 chain, 45
   References: RUST/cnc-asset/src/archive.rs:25 (MixArchive); RUST/cnc-core/src/palette.rs (PlayerRemap); CnCTDRAMapEditor/Utility/TeamColor.cs; AUDIT §6 (tools/theaters/palette rows) + §7 (renderer icon-cache/theater-blit sub-items).
