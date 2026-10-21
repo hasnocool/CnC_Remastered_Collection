@@ -1,5 +1,6 @@
 //! C&C Asset - asset loading and parsing
 
+pub mod adpcm;
 pub mod anim;
 pub mod animation;
 pub mod archive;
@@ -17,6 +18,9 @@ pub mod shape;
 pub mod string_table;
 pub mod tileset_pack;
 pub mod video;
+pub mod vxl;
+
+pub use adpcm::{AdpcmError, Decoder as AdpcmDecoder};
 
 pub use anim::{
     AnimationEvent, AnimationInstance, AnimationSpec, FrameEvent, LoopMode, PaletteId,
@@ -34,3 +38,7 @@ pub use registry::{AssetHandle, AssetRegistry, PreloadResult, PreloadTask, Prelo
 pub use shape::{ShpFile, ShpFrame};
 pub use string_table::CsfFile;
 pub use tileset_pack::TilesetPack;
+pub use video::{
+    decode_frame, decode_frames, demux, demux_strict, Vqa, VqaChunk, VqaError, VqaHeader,
+};
+pub use vxl::{VxlError, VxlFile, VxlHeader, VxlLayer};

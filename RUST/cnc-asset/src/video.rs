@@ -2,20 +2,58 @@
 //! briefing/cutscene playback (`INTRO.CPP`/`ENDING.CPP` drove Windows MCI in
 //! `MCIMOVIE.CPP`; the data format is the Westwood VQA 1.0 IFF container).
 //!
-//! **Verified scope (v1, synthetic-tested):** container walk, `VQHD` header,
-//! full codebooks (`CBF0`), full frames (`VQFL`, column-major 2×2 blocks),
-//! raw PCM audio (`SND`). Compressed variants (`CBP0`/`CBPZ`/`CBFZ` partial
-//! or format80/LZW codebooks, `VQFR` delta frames, `SND1`/`SND2` ADPCM) are
-//! detected and reported as [`VqaError::UnsupportedVariant`] — they need a
-//! Westwood format80 decoder, which the asset pipeline does not ship yet
-//! (it consumes OpenRA-preprocessed atlases; see `convert.rs`).
+//! **Verified scope (v2):** container walk, `VQHD` header, full codebooks
+//! (`CBF0`), compressed full codebooks (`CBFZ`, format80), full frames
+//! (`VQFL`, column-major 2×2 blocks), compressed frames (`VQFR`, format80),
+//! partial codebooks (`CBP0` raw / `CBPZ` format80), raw PCM audio (`SND0`)
+//! and Westwood ADPCM audio (`SND1` mono / `SND2` stereo).
+//!
+//! Every compressed payload goes through the crate's existing format80/LCW
+//! codec ([`crate::format80`]) — this module never re-implements LCW.
+//! The ADPCM decoder ([`crate::adpcm`]) is a direct port of the original
+//! engine's `REDALERT/ADPCM.CPP` with the engine's own lookup tables.
+//!
+//! # Container layout (verified against the crate's existing v1 contract)
+//!
+//! ```text
+//! "FORM" | u32be size | "WVQA" | chunk*
+//! chunk  := tag[4] | u32le size | payload | pad byte when size is odd
+//! ```
 //!
 //! `VQHD` layout (v1 contract, ≥ 12 bytes): `version: u16le`, `flags: u16le`,
 //! `num_frames: u16le`, `frame_rate: u16le`, `width_blocks: u16le`,
 //! `height_blocks: u16le`. Width/height are block counts; pixel size is
 //! `2 × blocks` per axis.
+//!
+//! # Partial codebooks and delta frames (INFERRED — see the notes below)
+//!
+//! Westwood's own VQA tool chain is not present in this repository (the
+//! original games played VQA through Windows MCI, so the codec lived in a
+//! closed-source driver), and no original `.VQA` file is available here.
+//! The partial-codebook / delta-frame contract is therefore **documented
+//! here rather than verified against an original file**:
+//!
+//! * `CBP0` / `CBPZ` payload: `u16le count` (1..=255 entries), `u16le
+//!   reserved` (must be 0), then the codebook entries. `CBP0` stores the
+//!   `count * 4` entry bytes raw; `CBPZ` stores them as a format80 stream
+//!   that decompresses to exactly `count * 4` bytes.
+//! * A partial codebook applies to the **frame chunk that immediately
+//!   follows it**. While it is active, a frame's block byte is an index
+//!   into the partial codebook, and the reserved value `0xFF` means "this
+//!   block is unchanged from the previous frame" — that is how a delta
+//!   frame is expressed.
+//! * Deltas are composed at *pixel* level: the previous frame's pixels are
+//!   kept and only the changed blocks are overwritten. That is what lets a
+//!   per-frame partial codebook work at all — unchanged blocks keep the
+//!   pixels the previous codebook produced, not an index into the new one.
+//!
+//! A reviewer double-checking this against a real `.VQA` should verify the
+//! `CBP0`/`CBPZ` header (count + reserved) and the `0xFF` unchanged marker;
+//! those are the two places most likely to disagree with Westwood.
 
 use thiserror::Error;
+
+use crate::adpcm::{self, AdpcmError};
 
 /// Header chunk tag.
 const TAG_HEADER: [u8; 4] = *b"VQHD";
@@ -23,12 +61,20 @@ const TAG_HEADER: [u8; 4] = *b"VQHD";
 const TAG_CODEBOOK_FULL: [u8; 4] = *b"CBF0";
 /// Full codebook, format80-compressed.
 const TAG_CODEBOOK_FULL_Z: [u8; 4] = *b"CBFZ";
+/// Partial codebook (raw bytes).
+const TAG_CODEBOOK_PARTIAL: [u8; 4] = *b"CBP0";
+/// Partial codebook, format80-compressed.
+const TAG_CODEBOOK_PARTIAL_Z: [u8; 4] = *b"CBPZ";
 /// Full frame, raw vector-pointer data.
 const TAG_FRAME_FULL: [u8; 4] = *b"VQFL";
 /// Full frame, format80-compressed vector-pointer data.
 const TAG_FRAME_FULL_Z: [u8; 4] = *b"VQFR";
 /// Raw PCM audio (`SND0`).
 const TAG_AUDIO_RAW: [u8; 4] = *b"SND0";
+/// ADPCM audio, mono (`SND1`).
+const TAG_AUDIO_ADPCM_MONO: [u8; 4] = *b"SND1";
+/// ADPCM audio, stereo (`SND2`).
+const TAG_AUDIO_ADPCM_STEREO: [u8; 4] = *b"SND2";
 
 /// Minimum bytes for a valid container prefix (`FORM` + size + `WVQA`).
 const FORM_PREFIX_LEN: usize = 12;
@@ -38,6 +84,17 @@ const VQHD_LEN: usize = 12;
 const CODEBOOK_ENTRY_LEN: usize = 4;
 const CODEBOOK_ENTRIES: usize = 256;
 const CODEBOOK_LEN: usize = CODEBOOK_ENTRIES * CODEBOOK_ENTRY_LEN;
+/// Bytes of a partial-codebook header (`count` + `reserved`).
+const PARTIAL_CODEBOOK_HEADER_LEN: usize = 4;
+/// A partial codebook may hold at most this many entries. The cap keeps
+/// `0xFF` free to mean "block unchanged" inside a partial frame.
+const MAX_PARTIAL_CODEBOOK_ENTRIES: u16 = 255;
+/// Block byte meaning "unchanged from the previous frame"; only valid while
+/// a partial codebook is active.
+const UNCHANGED_BLOCK: u8 = 0xFF;
+
+/// Sample rate of the VQA audio tracks, in Hz.
+pub const VQA_SAMPLE_RATE: u16 = 22050;
 
 /// Decoding / demuxing failures.
 #[derive(Debug, Error)]
@@ -48,6 +105,8 @@ pub enum VqaError {
     BadMagic(usize),
     #[error("chunk {tag:?} overruns its container")]
     ChunkOverrun { tag: [u8; 4] },
+    #[error("unknown chunk {tag:?} in the VQA container")]
+    UnknownChunk { tag: [u8; 4] },
     #[error("VQHD too short ({0} bytes; need {1})")]
     BadHeader(usize, usize),
     #[error("chunk {0:?} uses a compressed variant this decoder does not support yet")]
@@ -56,10 +115,24 @@ pub enum VqaError {
     DimMismatch { data: usize, blocks: usize },
     #[error("codebook is {len} bytes; need {expected}")]
     BadCodebook { len: usize, expected: usize },
+    #[error("partial codebook chunk is {len} bytes; need {expected}")]
+    BadPartialCodebook { len: usize, expected: usize },
+    #[error("partial codebook declares {count} entries; need 1..={MAX_PARTIAL_CODEBOOK_ENTRIES}")]
+    BadPartialCodebookCount { count: u16 },
+    #[error("partial codebook {field} field is {value}; must be 0")]
+    ReservedNotZero { field: &'static str, value: u16 },
+    #[error("frame block references codebook entry {index}, but the codebook holds {len}")]
+    CodebookIndexOutOfRange { index: u8, len: usize },
+    #[error("delta frame marks block {block} unchanged, but there is no previous frame")]
+    DeltaWithoutBase { block: usize },
     #[error("format80 decompression failed: {0}")]
     Format80(#[from] crate::format80::Format80Error),
     #[error("compressed frame chunk appeared before the VQHD header")]
     FrameBeforeHeader,
+    #[error("frame appeared before any codebook")]
+    FrameBeforeCodebook,
+    #[error("ADPCM decoding failed: {0}")]
+    Adpcm(#[from] AdpcmError),
 }
 
 /// Parsed `VQHD` fields.
@@ -76,13 +149,22 @@ pub struct VqaHeader {
 /// One demuxed top-level chunk (video frames, codebooks, audio, unknown).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VqaChunk {
-    /// `VQFL` full frame: `data` holds one codebook index per block,
-    /// column-major (Westwood layout).
-    FrameFull { data: Vec<u8> },
-    /// `CBF0` full codebook: exactly [`CODEBOOK_LEN`] bytes.
+    /// `CBF0`/`CBFZ` full codebook: exactly [`CODEBOOK_LEN`] bytes.
     CodebookFull { data: Vec<u8> },
+    /// `CBP0`/`CBPZ` partial codebook: `entries` holds
+    /// `num_entries * 4` bytes of 2×2 palette-index blocks.
+    CodebookPartial { entries: Vec<u8> },
+    /// `VQFL`/`VQFR` full frame: `data` holds one codebook index per block,
+    /// column-major (Westwood layout). While a partial codebook is active
+    /// the byte `0xFF` means "unchanged from the previous frame".
+    FrameFull { data: Vec<u8> },
     /// `SND` raw little-endian i16 PCM samples.
     AudioPcm { samples: Vec<i16> },
+    /// `SND1`/`SND2` Westwood ADPCM audio, one vector per channel.
+    AudioAdpcm {
+        sample_rate: u16,
+        channels: Vec<Vec<i16>>,
+    },
     /// Any other chunk, kept for forward compatibility.
     Other { tag: [u8; 4], data: Vec<u8> },
 }
@@ -96,9 +178,26 @@ pub struct Vqa {
 
 /// Walk the IFF container and demux every supported chunk.
 ///
+/// Unknown chunk tags are kept as [`VqaChunk::Other`] so a file with an
+/// extra chunk still plays (this is what the launcher's briefing-video
+/// loader relies on). Use [`demux_strict`] when an unknown chunk must be an
+/// error instead.
+///
 /// Pure function of the input bytes; allocation-bounded by the input size
 /// (each chunk's output is derived from its own length).
 pub fn demux(bytes: &[u8]) -> Result<Vqa, VqaError> {
+    demux_inner(bytes, false)
+}
+
+/// Walk the IFF container and reject any chunk this decoder does not know.
+///
+/// The error names the offending chunk tag, so a malformed or unexpected
+/// file is diagnosed without guessing.
+pub fn demux_strict(bytes: &[u8]) -> Result<Vqa, VqaError> {
+    demux_inner(bytes, true)
+}
+
+fn demux_inner(bytes: &[u8], strict: bool) -> Result<Vqa, VqaError> {
     if bytes.len() < FORM_PREFIX_LEN {
         return Err(VqaError::TooShort);
     }
@@ -159,6 +258,14 @@ pub fn demux(bytes: &[u8]) -> Result<Vqa, VqaError> {
                     crate::format80::decompress(data, CODEBOOK_LEN).map_err(VqaError::Format80)?;
                 chunks.push(VqaChunk::CodebookFull { data: codebook });
             }
+            TAG_CODEBOOK_PARTIAL => {
+                let entries = parse_partial_codebook(data, false)?;
+                chunks.push(VqaChunk::CodebookPartial { entries });
+            }
+            TAG_CODEBOOK_PARTIAL_Z => {
+                let entries = parse_partial_codebook(data, true)?;
+                chunks.push(VqaChunk::CodebookPartial { entries });
+            }
             TAG_FRAME_FULL => chunks.push(VqaChunk::FrameFull {
                 data: data.to_vec(),
             }),
@@ -172,24 +279,32 @@ pub fn demux(bytes: &[u8]) -> Result<Vqa, VqaError> {
                 chunks.push(VqaChunk::FrameFull { data });
             }
             TAG_AUDIO_RAW => {
-                let samples = data
-                    .chunks_exact(2)
-                    .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
-                    .collect();
+                let (pairs, _odd_byte) = data.as_chunks::<2>();
+                let samples = pairs.iter().map(|pair| i16::from_le_bytes(*pair)).collect();
                 chunks.push(VqaChunk::AudioPcm { samples });
             }
+            TAG_AUDIO_ADPCM_MONO => {
+                let samples = adpcm::Decoder::decode(data)?;
+                chunks.push(VqaChunk::AudioAdpcm {
+                    sample_rate: VQA_SAMPLE_RATE,
+                    channels: vec![samples],
+                });
+            }
+            TAG_AUDIO_ADPCM_STEREO => {
+                let (left, right) = adpcm::decode_stereo(data)?;
+                chunks.push(VqaChunk::AudioAdpcm {
+                    sample_rate: VQA_SAMPLE_RATE,
+                    channels: vec![left, right],
+                });
+            }
             _ => {
-                // Remaining Westwood variants stay unsupported (partial
-                // codebooks and Westwood ADPCM audio).
-                match &tag {
-                    b"CBP0" => return Err(VqaError::UnsupportedVariant("CBP0")),
-                    b"CBPZ" => return Err(VqaError::UnsupportedVariant("CBPZ")),
-                    b"SND1" | b"SND2" => return Err(VqaError::UnsupportedVariant("SND1/SND2")),
-                    _ => chunks.push(VqaChunk::Other {
-                        tag,
-                        data: data.to_vec(),
-                    }),
+                if strict {
+                    return Err(VqaError::UnknownChunk { tag });
                 }
+                chunks.push(VqaChunk::Other {
+                    tag,
+                    data: data.to_vec(),
+                });
             }
         }
 
@@ -199,6 +314,47 @@ pub fn demux(bytes: &[u8]) -> Result<Vqa, VqaError> {
 
     let header = header.ok_or(VqaError::BadHeader(0, VQHD_LEN))?;
     Ok(Vqa { header, chunks })
+}
+
+/// Parse a partial codebook chunk.
+///
+/// Layout (INFERRED — see the module docs): `u16le count`, `u16le reserved`
+/// (must be 0), then `count * 4` entry bytes. `CBP0` stores those bytes
+/// raw; `CBPZ` stores them as a format80 stream of exactly that length.
+fn parse_partial_codebook(data: &[u8], compressed: bool) -> Result<Vec<u8>, VqaError> {
+    if data.len() < PARTIAL_CODEBOOK_HEADER_LEN {
+        return Err(VqaError::BadPartialCodebook {
+            len: data.len(),
+            expected: PARTIAL_CODEBOOK_HEADER_LEN,
+        });
+    }
+    let count = u16::from_le_bytes([data[0], data[1]]);
+    let reserved = u16::from_le_bytes([data[2], data[3]]);
+    if reserved != 0 {
+        return Err(VqaError::ReservedNotZero {
+            field: "partial codebook reserved",
+            value: reserved,
+        });
+    }
+    if count == 0 || count > MAX_PARTIAL_CODEBOOK_ENTRIES {
+        return Err(VqaError::BadPartialCodebookCount { count });
+    }
+    let entries_len = count as usize * CODEBOOK_ENTRY_LEN;
+    if compressed {
+        // The format80 decoder needs the exact output length, which the
+        // header's count provides.
+        crate::format80::decompress(&data[PARTIAL_CODEBOOK_HEADER_LEN..], entries_len)
+            .map_err(VqaError::Format80)
+    } else {
+        let expected = PARTIAL_CODEBOOK_HEADER_LEN + entries_len;
+        if data.len() != expected {
+            return Err(VqaError::BadPartialCodebook {
+                len: data.len(),
+                expected,
+            });
+        }
+        Ok(data[PARTIAL_CODEBOOK_HEADER_LEN..].to_vec())
+    }
 }
 
 /// Expand one full frame through the codebook into 8-bit palette indices.
@@ -240,12 +396,100 @@ pub fn decode_frame(
         // Row-major inside the 2×2 block: top-left, top-right, bottom-left,
         // bottom-right, then the repeated second row pair.
         for (step, &pixel) in entry_bytes.iter().enumerate() {
-            let px = base_x + (step % 2) as usize;
-            let py = base_y + (step / 2) as usize;
+            let px = base_x + (step % 2);
+            let py = base_y + (step / 2);
             out[py * out_width + px] = pixel;
         }
     }
     Ok(out)
+}
+
+/// Decode every frame of a demuxed container into 8-bit palette-index
+/// planes.
+///
+/// Each returned plane is `(2·width_blocks) × (2·height_blocks)` palette
+/// indices, row-major. Frames are produced in file order.
+///
+/// The decoder tracks the active codebook: a [`VqaChunk::CodebookFull`]
+/// chunk sets the 256-entry full codebook, and a
+/// [`VqaChunk::CodebookPartial`] chunk overrides it for the frame that
+/// immediately follows. While a partial codebook is active, the block byte
+/// `0xFF` means "unchanged from the previous frame" and the previous frame's
+/// pixels are kept.
+pub fn decode_frames(vqa: &Vqa) -> Result<Vec<Vec<u8>>, VqaError> {
+    let width_blocks = vqa.header.width_blocks as usize;
+    let height_blocks = vqa.header.height_blocks as usize;
+    let blocks = width_blocks * height_blocks;
+    let out_width = width_blocks * 2;
+    let out_height = height_blocks * 2;
+
+    let mut full_codebook: Option<Vec<u8>> = None;
+    let mut pending_partial: Option<Vec<u8>> = None;
+    let mut previous: Option<Vec<u8>> = None;
+    let mut frames: Vec<Vec<u8>> = Vec::new();
+
+    for chunk in &vqa.chunks {
+        match chunk {
+            VqaChunk::CodebookFull { data } => {
+                full_codebook = Some(data.clone());
+            }
+            VqaChunk::CodebookPartial { entries } => {
+                pending_partial = Some(entries.clone());
+            }
+            VqaChunk::FrameFull { data } => {
+                let (codebook, is_partial) = match &pending_partial {
+                    Some(partial) => (partial.clone(), true),
+                    None => match &full_codebook {
+                        Some(full) => (full.clone(), false),
+                        None => return Err(VqaError::FrameBeforeCodebook),
+                    },
+                };
+                pending_partial = None;
+
+                if data.len() != blocks {
+                    return Err(VqaError::DimMismatch {
+                        data: data.len(),
+                        blocks,
+                    });
+                }
+                let entry_count = codebook.len() / CODEBOOK_ENTRY_LEN;
+                let mut plane = vec![0u8; out_width * out_height];
+                if let Some(prev) = &previous {
+                    plane.copy_from_slice(prev);
+                }
+                for (block_index, &byte) in data.iter().enumerate() {
+                    if is_partial && byte == UNCHANGED_BLOCK {
+                        if previous.is_none() {
+                            return Err(VqaError::DeltaWithoutBase { block: block_index });
+                        }
+                        continue;
+                    }
+                    if byte as usize >= entry_count {
+                        return Err(VqaError::CodebookIndexOutOfRange {
+                            index: byte,
+                            len: entry_count,
+                        });
+                    }
+                    let entry_bytes = &codebook[byte as usize * CODEBOOK_ENTRY_LEN
+                        ..(byte as usize + 1) * CODEBOOK_ENTRY_LEN];
+                    let column = block_index / height_blocks;
+                    let row = block_index % height_blocks;
+                    let base_x = column * 2;
+                    let base_y = row * 2;
+                    for (step, &pixel) in entry_bytes.iter().enumerate() {
+                        let px = base_x + (step % 2);
+                        let py = base_y + (step / 2);
+                        plane[py * out_width + px] = pixel;
+                    }
+                }
+                previous = Some(plane.clone());
+                frames.push(plane);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(frames)
 }
 
 #[cfg(test)]
@@ -365,20 +609,54 @@ mod tests {
         ));
     }
 
+    /// Renamed from `compressed_variants_report_the_missing_codec`.
+    ///
+    /// That test asserted the *absence* of a codec (`Err(UnsupportedVariant)`),
+    /// which is exactly the behaviour this change removes: the compressed
+    /// variants now decode through the crate's format80/LCW codec and the
+    /// Westwood ADPCM decoder. The replacement asserts the new behaviour —
+    /// a `CBPZ` partial codebook and an `SND1` ADPCM track are demuxed
+    /// into their decoded payloads.
     #[test]
-    fn compressed_variants_report_the_missing_codec() {
+    fn compressed_variants_decode_through_the_format80_codec() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"FORM");
         bytes.extend_from_slice(&[0, 0, 0, 0]);
         bytes.extend_from_slice(b"WVQA");
         bytes.extend_from_slice(&chunk(&TAG_HEADER, &[1, 0, 0, 0, 0, 0, 2, 0, 2, 0, 3, 0]));
-        bytes.extend_from_slice(&chunk(b"CBPZ", &[1, 2, 3, 4]));
+        // Partial codebook with two entries, format80-compressed.
+        let mut partial = Vec::new();
+        partial.extend_from_slice(&2u16.to_le_bytes());
+        partial.extend_from_slice(&0u16.to_le_bytes());
+        let entries = [
+            0u8, 1, 2, 3, // entry 0
+            4, 5, 6, 7, // entry 1
+        ];
+        let packed = crate::format80::compress(&entries, entries.len()).expect("compress");
+        partial.extend_from_slice(&packed);
+        bytes.extend_from_slice(&chunk(&TAG_CODEBOOK_PARTIAL_Z, &partial));
+        // Mono ADPCM audio: two bytes -> four samples.
+        bytes.extend_from_slice(&chunk(&TAG_AUDIO_ADPCM_MONO, &[0x00, 0x10]));
         let total = (bytes.len() - 8) as u32;
         bytes[4..8].copy_from_slice(&total.to_be_bytes());
-        assert!(matches!(
-            demux(&bytes),
-            Err(VqaError::UnsupportedVariant("CBPZ"))
-        ));
+
+        let vqa = demux(&bytes).expect("demux");
+        assert_eq!(vqa.chunks.len(), 2);
+        match &vqa.chunks[0] {
+            VqaChunk::CodebookPartial { entries } => assert_eq!(entries, &entries[..]),
+            other => panic!("expected a partial codebook, got {other:?}"),
+        }
+        match &vqa.chunks[1] {
+            VqaChunk::AudioAdpcm {
+                sample_rate,
+                channels,
+            } => {
+                assert_eq!(*sample_rate, VQA_SAMPLE_RATE);
+                assert_eq!(channels.len(), 1);
+                assert_eq!(channels[0], vec![0, 0, 0, 1]);
+            }
+            other => panic!("expected ADPCM audio, got {other:?}"),
+        }
     }
 
     #[test]
@@ -398,5 +676,25 @@ mod tests {
                 expected: 1024
             })
         ));
+    }
+
+    #[test]
+    fn an_unknown_chunk_is_named_by_the_strict_demuxer() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"FORM");
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes.extend_from_slice(b"WVQA");
+        bytes.extend_from_slice(&chunk(&TAG_HEADER, &[1, 0, 0, 0, 0, 0, 2, 0, 2, 0, 3, 0]));
+        bytes.extend_from_slice(&chunk(b"ZZZZ", &[1, 2, 3, 4]));
+        let total = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&total.to_be_bytes());
+
+        match demux_strict(&bytes) {
+            Err(VqaError::UnknownChunk { tag }) => assert_eq!(&tag, b"ZZZZ"),
+            other => panic!("expected a named unknown-chunk error, got {other:?}"),
+        }
+        // The lenient demuxer keeps the chunk instead of failing.
+        let lenient = demux(&bytes).expect("lenient demux");
+        assert!(matches!(lenient.chunks[0], VqaChunk::Other { .. }));
     }
 }
