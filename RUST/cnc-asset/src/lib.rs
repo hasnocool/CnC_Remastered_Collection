@@ -1,3 +1,4 @@
+#![allow(clippy::manual_is_multiple_of)]
 //! C&C Asset - asset loading and parsing
 
 pub mod adpcm;

@@ -100,6 +100,21 @@ fn push_triggers(game: &mut Game, scenario: &OriginalScenario) {
     }
 }
 
+impl RunningTrigger {
+    /// Container this trigger binds to in the shared attachment model
+    /// (`cnc_core::trigger_attach`): a `[CellTriggers]` entry binds to its
+    /// cell, every other running trigger is scenario-global.
+    ///
+    /// Kept beside [`push_triggers`] (which produces both bindings) so the
+    /// runtime type stays free of scenario-format knowledge.
+    pub fn attach_target(&self) -> cnc_core::trigger_attach::AttachTarget {
+        match self.cell {
+            Some(cell) => cnc_core::trigger_attach::AttachTarget::Cell(cell),
+            None => cnc_core::trigger_attach::AttachTarget::Global,
+        }
+    }
+}
+
 /// Translate a retail event token into the port's condition mini-language.
 ///
 /// `Time` is the one event the port evaluates directly (`elapsed:<seconds>`
@@ -142,6 +157,30 @@ mod tests {
 
     fn fixture() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/ra/FIXTURE.MPR")
+    }
+
+    #[test]
+    fn running_trigger_attachment_target_reflects_its_binding() {
+        let cell = Vec2i::new(15, 15);
+        let mut trigger = RunningTrigger {
+            id: 1,
+            name: "CELL1".to_string(),
+            condition: "never".to_string(),
+            action: "win".to_string(),
+            fired: false,
+            cell: Some(cell),
+        };
+        assert_eq!(
+            trigger.attach_target(),
+            cnc_core::trigger_attach::AttachTarget::Cell(cell),
+            "a [CellTriggers] binding maps to a cell attachment"
+        );
+        trigger.cell = None;
+        assert_eq!(
+            trigger.attach_target(),
+            cnc_core::trigger_attach::AttachTarget::Global,
+            "an unbound running trigger is scenario-global"
+        );
     }
 
     #[test]

@@ -1347,3 +1347,17 @@ Headless smoke: --headless --seed 42 --screenshot → exit 0,
 
 Flag matrix verified: `--no-tileset` flat path OK; valid `--tileset` override OK;
 nonexistent `--tileset` warns + flat fallback; `--tileset-palette` fails as unknown arg (documented removal).
+
+---
+
+## Visual QA — map editor cnc32 switch (2026-10-20, NVIDIA VL pinned subagent, 5 passes)
+
+Two-pass loop (review → ground → fix → regenerate → re-review by same session):
+- **Pass 1** (legacy-pipeline `tileset_render` harness + headless smoke): 3 text items flagged → all grounded as intentional non-defects; 1 clipping finding → grounded as by-construction (rock ridge to map edge).
+- **Code-level grounded defect** from pass-1 grounding: `"Players {}"` caption double-drawn in `app.rs draw_panel` → duplicate removed.
+- **Pass 2** (cnc32 harness, ported example): concrete patch rendered **black** → grounded: harness skipped `cell_draw == None` fallback → fixed by painting `app::terrain_color` fallback.
+- **Pass 3** (closure, both artifacts): **PASS, 0 major / 0 minor** — grey fallback confirmed; single caption confirmed; all semantic checks hold (blob scallops, shoreline orientation, decor-on-base layering, grid alignment, no seams/halos).
+- **Passes 4/4b/4c** (LIVE window captures `/tmp/editor_live{,2,3,4}.png`; first two honestly ABSENT/BLOCKED due to focus races with the user's own desktop windows, then a fresh instance captured with focus verified pre-grab): live **wgpu** render — **PASS, 0 defects**. UI chrome clean (single Players caption holds), grid intact, no washout/blur/alpha artifacts in the GPU path.
+
+Harness port: `examples/tileset_render.rs` now uses `pack_tileset::cell_draw`/`sprite_rect` (32px cnc32 pipeline; SCALE=1 == legacy 16px/×2 canvas 2616×1312) with `CNC_TILESET_QA_DUMP` ported. Fixture known-good artifacts: `/tmp/opencode/tileset_qa.png`, `/tmp/cnc32_editor_smoke.png`, `/tmp/editor_live4.png`.
+
