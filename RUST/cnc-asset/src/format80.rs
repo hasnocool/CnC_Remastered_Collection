@@ -164,7 +164,7 @@ pub fn decompress(input: &[u8], expected_len: usize) -> Result<Vec<u8>, Format80
                     expected: expected_len,
                 });
             }
-            out.extend(std::iter::repeat(fill).take(count));
+            out.extend(std::iter::repeat_n(fill, count));
             continue;
         }
 

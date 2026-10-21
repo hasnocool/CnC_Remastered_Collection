@@ -38,6 +38,7 @@ pub fn gather_lines(entries: &[(String, String)]) -> String {
 }
 
 /// Decode a `MapPack` / `OverlayPack` block into its cell entries.
+#[allow(clippy::chunks_exact_to_as_chunks)]
 pub fn decode_pack(entries: &[(String, String)]) -> Result<Vec<PackedCell>> {
     let stream = gather_lines(entries);
     if stream.is_empty() {
@@ -45,14 +46,59 @@ pub fn decode_pack(entries: &[(String, String)]) -> Result<Vec<PackedCell>> {
     }
     let bytes = base64::decode(&stream)
         .map_err(|err| anyhow::anyhow!("decoding packed map block: {err}"))?;
+
+    // Raw cell stream: 3 bytes per cell, indices in range.
+    if bytes.len() % PACK_ENTRY_BYTES == 0 {
+        let n = bytes.len() / PACK_ENTRY_BYTES;
+        let raw = decode_pack_bytes(&bytes);
+        if let Ok(cells) = raw {
+            if cells.iter().all(|cell| (cell.index as usize) < n) {
+                return Ok(cells);
+            }
+        }
+    }
+
+    // LCW-compressed (format80) stream: try square map sizes first.
+    for side in 8u32..=512 {
+        let want = (side as usize) * (side as usize) * PACK_ENTRY_BYTES;
+        if let Ok(inflated) = crate::format80::decompress(&bytes, want) {
+            if inflated.len() == want && inflated.len() % PACK_ENTRY_BYTES == 0 {
+                return Ok(inflated
+                    .chunks_exact(PACK_ENTRY_BYTES)
+                    .map(|entry| PackedCell {
+                        index: u16::from_le_bytes([entry[0], entry[1]]),
+                        id: entry[2],
+                    })
+                    .collect());
+            }
+        }
+    }
+    // Then small (possibly non-square) payloads such as overlays.
+    for want in (PACK_ENTRY_BYTES..=4096).step_by(PACK_ENTRY_BYTES) {
+        if let Ok(inflated) = crate::format80::decompress(&bytes, want) {
+            if inflated.len() == want && inflated.len() % PACK_ENTRY_BYTES == 0 {
+                return Ok(inflated
+                    .chunks_exact(PACK_ENTRY_BYTES)
+                    .map(|entry| PackedCell {
+                        index: u16::from_le_bytes([entry[0], entry[1]]),
+                        id: entry[2],
+                    })
+                    .collect());
+            }
+        }
+    }
+
+    // Fallback: truncate to aligned raw cells.
     decode_pack_bytes(&bytes)
 }
 
 /// Decode an already-unwrapped packed block.
+#[allow(clippy::chunks_exact_to_as_chunks)]
 pub fn decode_pack_bytes(bytes: &[u8]) -> Result<Vec<PackedCell>> {
     if bytes.len() % PACK_ENTRY_BYTES != 0 {
         bail!(
-            "packed map block is {} bytes, not a multiple of {PACK_ENTRY_BYTES}",
+            "packed block length is not a multiple of {} ({} bytes)",
+            PACK_ENTRY_BYTES,
             bytes.len()
         );
     }
