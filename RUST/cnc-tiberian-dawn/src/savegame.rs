@@ -35,7 +35,7 @@ use crate::weapon::Projectile;
 /// File magic; the trailing NUL makes text-mode mangling obvious.
 pub const SAVE_MAGIC: [u8; 8] = *b"CNCSAVE\0";
 /// Current save format version. Bump when [`GameSnapshot`] changes shape.
-pub const SAVE_VERSION: u32 = 4;
+pub const SAVE_VERSION: u32 = 5;
 /// Header size in bytes.
 pub const SAVE_HEADER_LEN: usize = 8 + 4 + 8 + 8;
 

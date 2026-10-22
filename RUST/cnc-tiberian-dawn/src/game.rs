@@ -1738,6 +1738,73 @@ impl Game {
     }
 
     /// Advance production queues and spawn completed units at a factory.
+    // --- Alliance helpers (todo 19) ---
+    pub fn ally_houses(&mut self, a: u8, b: u8) -> bool {
+        let ai = a as usize;
+        let bi = b as usize;
+        if ai >= self.houses.len() || bi >= self.houses.len() {
+            return false;
+        }
+        if ai == bi {
+            return false;
+        }
+        self.houses[ai].make_ally(b);
+        self.houses[bi].make_ally(a);
+        true
+    }
+    pub fn make_alliance(&mut self, a: u8, b: u8) -> bool {
+        self.ally_houses(a, b)
+    }
+    pub fn set_alliance(&mut self, a: u8, b: u8) -> bool {
+        self.ally_houses(a, b)
+    }
+    pub fn apply_ally_event(&mut self, emitter: u8, recipient: u8) -> bool {
+        let ei = emitter as usize;
+        let ri = recipient as usize;
+        if ei >= self.houses.len() || ri >= self.houses.len() {
+            return false;
+        }
+        if ei == ri {
+            return false;
+        }
+        if self.houses[ei].is_ally(recipient) {
+            self.houses[ei].make_enemy(recipient);
+            self.houses[ri].make_enemy(emitter);
+        } else {
+            self.houses[ei].make_ally(recipient);
+            self.houses[ri].make_ally(emitter);
+        }
+        true
+    }
+    pub fn ally_event(&mut self, emitter: u8, recipient: u8) -> bool {
+        self.apply_ally_event(emitter, recipient)
+    }
+    pub fn handle_ally_event(&mut self, emitter: u8, recipient: u8) -> bool {
+        self.apply_ally_event(emitter, recipient)
+    }
+
+    /// Advance credit display roll-up for all houses.
+    pub fn tick_credits(&mut self) {
+        for h in self.houses.iter_mut() {
+            h.tick_credits();
+        }
+    }
+    pub fn credit_tick(&mut self) {
+        self.tick_credits();
+    }
+    pub fn update_credit_display(&mut self) {
+        self.tick_credits();
+    }
+    pub fn tick_credit_display(&mut self) {
+        self.tick_credits();
+    }
+    pub fn advance_credits(&mut self) {
+        self.tick_credits();
+    }
+    pub fn tick_all_credits(&mut self) {
+        self.tick_credits();
+    }
+
     pub fn update_production(&mut self, delta_time: Fixed16_16) {
         let mut completed = Vec::new();
         for (owner, house) in self.houses.iter_mut().enumerate() {

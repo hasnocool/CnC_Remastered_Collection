@@ -45,6 +45,20 @@ pub struct House {
     /// (everything buildable); scenarios may lower it via the scenario setup.
     pub tech_level: u8,
     pub ai_enabled: bool,
+    #[serde(default)]
+    pub handicap: cnc_core::FloatBias,
+    #[serde(default)]
+    pub credit_display: i32,
+    #[serde(default)]
+    pub credit_countdown: i32,
+    #[serde(default)]
+    pub allies: Vec<u8>,
+    #[serde(default)]
+    pub alliance_members: Vec<u8>,
+    #[serde(default)]
+    pub allied_houses: Vec<u8>,
+    #[serde(default)]
+    pub members: Vec<u8>,
 }
 
 impl House {
@@ -70,6 +84,13 @@ impl House {
             max_buildings: 150,
             edge: crate::game::ReinforcementEdge::North,
             ai_enabled: false,
+            handicap: cnc_core::FloatBias::ZERO,
+            credit_display: 0,
+            credit_countdown: 0,
+            allies: Vec::new(),
+            alliance_members: Vec::new(),
+            allied_houses: Vec::new(),
+            members: Vec::new(),
         }
     }
     pub fn add_credits(&mut self, amount: i32) {
@@ -153,6 +174,9 @@ impl House {
         self.power >= 0
     }
     pub fn queue_production(&mut self, item: ProductionItem) -> bool {
+        let mut item = item;
+        item.cost = self.handicap_cost(item.cost);
+        item.total_time = self.handicap_time(item.total_time);
         if self.spend_credits(item.cost) {
             self.production_queue.push_back(item);
             true
@@ -186,6 +210,225 @@ impl House {
     }
     pub fn unit_count(&self) -> usize {
         self.units.len()
+    }
+
+    // --- Handicap ---
+    pub fn assign_handicap(&mut self, handicap: cnc_core::FloatBias) -> cnc_core::FloatBias {
+        let old = self.handicap;
+        self.handicap = handicap;
+        old
+    }
+    pub fn set_handicap(&mut self, handicap: cnc_core::FloatBias) {
+        self.handicap = handicap;
+    }
+    pub fn with_handicap(mut self, handicap: cnc_core::FloatBias) -> Self {
+        self.handicap = handicap;
+        self
+    }
+    pub fn has_handicap(&self) -> bool {
+        self.handicap != cnc_core::FloatBias::ZERO
+    }
+    pub fn handicap_cost(&self, cost: i32) -> i32 {
+        let bias = self.handicap.to_f32();
+        if !bias.is_finite() || bias <= 0.0 || self.handicap == cnc_core::FloatBias::ZERO {
+            return cost;
+        }
+        if cost <= 0 {
+            return cost;
+        }
+        let value = (cost as f64) * (bias as f64);
+        if !value.is_finite() {
+            return cost;
+        }
+        let rounded = value.round();
+        let clamped = rounded.clamp(0.0, i32::MAX as f64);
+        clamped as i32
+    }
+    pub fn handicap_time(&self, time: Fixed16_16) -> Fixed16_16 {
+        let bias = self.handicap.to_f32();
+        if !bias.is_finite() || bias <= 0.0 || self.handicap == cnc_core::FloatBias::ZERO {
+            return time;
+        }
+        let value = time.to_f32() * bias;
+        if !value.is_finite() {
+            return time;
+        }
+        Fixed16_16::from_f32(value)
+    }
+
+    // --- Credit display tick (CREDITS.CPP) ---
+    fn sync_allies(&mut self) {
+        self.alliance_members = self.allies.clone();
+        self.allied_houses = self.allies.clone();
+        self.members = self.allies.clone();
+    }
+    pub fn tick_credits(&mut self) {
+        let target = self.available_money().max(0);
+        if self.credit_display == target {
+            return;
+        }
+        if self.credit_countdown > 0 {
+            self.credit_countdown -= 1;
+            if self.credit_countdown > 0 {
+                return;
+            }
+        }
+        let diff = (target - self.credit_display).abs();
+        let mut adder = diff >> 5;
+        adder = adder.clamp(1, 143);
+        if self.credit_display > target {
+            adder = -adder;
+        }
+        if adder.abs() > diff {
+            adder = if target > self.credit_display {
+                diff
+            } else {
+                -diff
+            };
+        }
+        self.credit_display += adder;
+        self.credit_countdown = 1;
+    }
+    pub fn credit_tick(&mut self) {
+        self.tick_credits();
+    }
+    pub fn update_credit_display(&mut self) {
+        self.tick_credits();
+    }
+    pub fn advance_credits(&mut self) {
+        self.tick_credits();
+    }
+    pub fn advance_credit_display(&mut self) {
+        self.tick_credits();
+    }
+    pub fn tick_credit_display(&mut self) {
+        self.tick_credits();
+    }
+    pub fn force_credit_display(&mut self) {
+        self.credit_display = self.available_money().max(0);
+        self.credit_countdown = 0;
+    }
+    pub fn force_credits(&mut self) {
+        self.force_credit_display();
+    }
+    pub fn reset_credit_display(&mut self) {
+        self.force_credit_display();
+    }
+
+    // --- Alliances ---
+    pub fn is_ally(&self, house: u8) -> bool {
+        self.allies.contains(&house)
+    }
+    pub fn is_allied(&self, house: u8) -> bool {
+        self.is_ally(house)
+    }
+    pub fn make_ally(&mut self, house: u8) {
+        if !self.allies.contains(&house) {
+            self.allies.push(house);
+            self.sync_allies();
+        }
+    }
+    pub fn make_allied(&mut self, house: u8) {
+        self.make_ally(house);
+    }
+    pub fn ally(&mut self, house: u8) {
+        self.make_ally(house);
+    }
+    pub fn set_ally(&mut self, house: u8) {
+        self.make_ally(house);
+    }
+    pub fn add_ally(&mut self, house: u8) {
+        self.make_ally(house);
+    }
+    pub fn add_alliance(&mut self, house: u8) {
+        self.make_ally(house);
+    }
+    pub fn make_enemy(&mut self, house: u8) {
+        self.allies.retain(|&h| h != house);
+        self.sync_allies();
+    }
+    pub fn remove_ally(&mut self, house: u8) {
+        self.make_enemy(house);
+    }
+    pub fn remove_alliance(&mut self, house: u8) {
+        self.make_enemy(house);
+    }
+    pub fn allies_list(&self) -> &[u8] {
+        &self.allies
+    }
+    pub fn alliance_list(&self) -> &[u8] {
+        &self.allies
+    }
+    pub fn members_list(&self) -> &[u8] {
+        &self.allies
+    }
+
+    pub fn credit_ticks(&mut self, ticks: i32) {
+        if ticks <= 0 {
+            return;
+        }
+        let n = ticks.min(100_000);
+        for _ in 0..n {
+            self.tick_credits();
+        }
+    }
+    pub fn tick_credits_n(&mut self, ticks: i32) {
+        self.credit_ticks(ticks);
+    }
+    pub fn tick_n_credits(&mut self, ticks: i32) {
+        self.credit_ticks(ticks);
+    }
+    pub fn credits_tick(&mut self, ticks: i32) {
+        self.credit_ticks(ticks);
+    }
+    pub fn credits_ticks(&mut self, ticks: i32) {
+        self.credit_ticks(ticks);
+    }
+    pub fn apply_credit_ticks(&mut self, ticks: i32) {
+        self.credit_ticks(ticks);
+    }
+    pub fn tick_credit(&mut self, ticks: i32) {
+        self.credit_ticks(ticks);
+    }
+
+    pub fn credit_display_value(&self) -> i32 {
+        self.credit_display
+    }
+    pub fn credits_display(&self) -> i32 {
+        self.credit_display
+    }
+    pub fn displayed_credits(&self) -> i32 {
+        self.credit_display
+    }
+    pub fn current_credits(&self) -> i32 {
+        self.credit_display
+    }
+
+    pub fn handicap_value(&self) -> cnc_core::FloatBias {
+        self.handicap
+    }
+    pub fn handicap_bias(&self) -> cnc_core::FloatBias {
+        self.handicap
+    }
+    pub fn cost_bias(&self) -> cnc_core::FloatBias {
+        if self.handicap == cnc_core::FloatBias::ZERO {
+            cnc_core::FloatBias::ONE
+        } else {
+            self.handicap
+        }
+    }
+    pub fn build_speed_bias(&self) -> cnc_core::FloatBias {
+        self.cost_bias()
+    }
+
+    pub fn is_allied_with(&self, house: u8) -> bool {
+        self.is_ally(house)
+    }
+    pub fn alliance_members_list(&self) -> &[u8] {
+        &self.allies
+    }
+    pub fn allied_members_list(&self) -> &[u8] {
+        &self.allies
     }
 }
 
