@@ -26,8 +26,9 @@ pub mod tesla;
 pub use aircraft::{AIRFIELD_CAPACITY, DEFAULT_AMMO, REARM_SECONDS};
 pub use events::{names as event_names, OutcomeKind as EventOutcomeKind, SuperweaponKind};
 pub use game::{
-    AiCommander, BuildError, Game, GameCommand, GameStatus, GameStructure, GameUnit,
-    ObjectiveState, RunningTrigger, ScenarioOutcome, Shot, TargetRef, UnitRole, WeaponSpec,
+    armor_for, damage_vs_armor, AiCommander, ArmorClass, BuildError, Game, GameCommand, GameStatus,
+    GameStructure, GameUnit, ObjectiveState, RunningTrigger, ScenarioOutcome, Shot, TargetRef,
+    UnitRole, WeaponSpec,
 };
 pub use gapgen::GapGenerator;
 pub use house::{Country, Faction, House, ProductionItem};

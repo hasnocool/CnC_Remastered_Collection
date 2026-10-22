@@ -451,6 +451,41 @@ impl ArmorClass {
     }
 }
 
+/// Damage at `distance` pixels from a blast of `raw` strength and `radius`.
+///
+/// Falls off linearly from full at ground zero to zero at the radius, so the
+/// centre always takes the most and an adjacent cell always takes less. A
+/// non-positive radius degenerates to "only the centre is hit" (COMBAT.CPP
+/// `Explosion_Damage` never spills beyond the centre cell) instead of dividing
+/// by zero.
+pub fn splash_scaled_amount(distance: f32, radius: f32, raw: i32) -> Fixed16_16 {
+    let factor = if radius <= 0.0 {
+        if distance <= 0.0 {
+            1.0
+        } else {
+            0.0
+        }
+    } else {
+        (1.0 - distance / radius).max(0.0)
+    };
+    if factor <= 0.0 {
+        return Fixed16_16::ZERO;
+    }
+    Fixed16_16::from_f32(Fixed16_16::from_int(raw.max(0)).to_f32() * factor)
+}
+
+/// Falloff factor in `0.0..=1.0` for `distance` against a `radius`.
+pub fn splash_falloff(distance: f32, radius: f32) -> Fixed16_16 {
+    if radius <= 0.0 {
+        return if distance <= 0.0 {
+            Fixed16_16::ONE
+        } else {
+            Fixed16_16::ZERO
+        };
+    }
+    Fixed16_16::from_f32((1.0 - distance / radius).clamp(0.0, 1.0))
+}
+
 /// Scale `base` damage by a warhead's `Verses` percentage against `armor`.
 ///
 /// A missing warhead keeps 100% (the engine default), so an empty Rules.ini
@@ -3079,13 +3114,13 @@ impl Game {
         self.apply_damage(damage);
     }
 
-    /// Apply queued damage, scaling each hit by the target's armor through the
-    /// warhead's Rules.ini `Verses` row.
     /// Damage everything within `radius` pixels of `centre`.
     ///
     /// RA has no blast helper; scripted superweapons need one. Uses the same
-    /// armour scaling as direct fire so a nuke is not magically unblockable.
-    fn apply_radius_damage(
+    /// armour scaling as direct fire so a nuke is not magically unblockable,
+    /// and the shared [`splash_falloff`] so a cluster centred on ground zero
+    /// takes more than one a tile away.
+    pub fn apply_radius_damage(
         &mut self,
         centre: Vec2,
         radius: f32,
@@ -3097,58 +3132,34 @@ impl Game {
             if !unit.is_alive() {
                 continue;
             }
-            let dist = unit.position.distance(centre).to_f32();
-            if dist <= radius {
-                let factor = if radius <= 0.0 {
-                    if dist <= 0.0 {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                } else {
-                    (1.0 - dist / radius).max(0.0)
-                };
-                if factor > 0.0 {
-                    let scaled_amount =
-                        Fixed16_16::from_f32(Fixed16_16::from_int(damage.max(0)).to_f32() * factor);
-                    hits.push((
-                        TargetRef::Unit(unit.id),
-                        scaled_amount,
-                        warhead.map(str::to_string),
-                    ));
-                }
+            let scaled =
+                splash_scaled_amount(unit.position.distance(centre).to_f32(), radius, damage);
+            if scaled > Fixed16_16::ZERO {
+                hits.push((
+                    TargetRef::Unit(unit.id),
+                    scaled,
+                    warhead.map(str::to_string),
+                ));
             }
         }
         for structure in &self.structures {
             if !structure.is_alive() {
                 continue;
             }
-            let dist = structure.position.distance(centre).to_f32();
-            if dist <= radius {
-                let factor = if radius <= 0.0 {
-                    if dist <= 0.0 {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                } else {
-                    (1.0 - dist / radius).max(0.0)
-                };
-                if factor > 0.0 {
-                    let scaled_amount =
-                        Fixed16_16::from_f32(Fixed16_16::from_int(damage.max(0)).to_f32() * factor);
-                    hits.push((
-                        TargetRef::Structure(structure.id),
-                        scaled_amount,
-                        warhead.map(str::to_string),
-                    ));
-                }
+            let scaled =
+                splash_scaled_amount(structure.position.distance(centre).to_f32(), radius, damage);
+            if scaled > Fixed16_16::ZERO {
+                hits.push((
+                    TargetRef::Structure(structure.id),
+                    scaled,
+                    warhead.map(str::to_string),
+                ));
             }
         }
         self.apply_damage(hits);
     }
 
-    fn apply_damage(&mut self, damage: Vec<(TargetRef, Fixed16_16, Option<String>)>) {
+    pub fn apply_damage(&mut self, damage: Vec<(TargetRef, Fixed16_16, Option<String>)>) {
         let elapsed = self.elapsed;
         // Resolve warhead rows up front to avoid borrowing `self.rules` while
         // mutating units/structures.
@@ -3454,15 +3465,20 @@ pub fn unit_profile_with_rules(
         .map(|value| (value as f32 / 100.0) * MAX_UNIT_SPEED_PX)
         .unwrap_or(speed);
 
-    // A Primary= override replaces the default weapon's damage and range;
-    // units with no built-in weapon stay unarmed.
+    // A Primary= override replaces the default weapon's damage, range, reload
+    // and warhead. The Rules.ini weapon's own `Warhead=` wins when present
+    // (that is what makes a `Verses` row reach combat at all); otherwise the
+    // built-in association, if any, is kept. Units with no built-in weapon and
+    // no Primary= entry stay unarmed.
     let weapon = match rule.primary.as_deref().and_then(|p| rules.weapons.get(p)) {
         Some(entry) => {
-            let default = weapon;
+            let warhead = entry
+                .warhead
+                .clone()
+                .or_else(|| weapon.as_ref().and_then(|spec| spec.warhead.clone()));
             Some(
                 WeaponSpec::new(entry.damage as f32, entry.range as f32, entry.rof as f32)
-                    // Keep the built-in warhead association, if any.
-                    .with_optional_warhead(default.and_then(|spec| spec.warhead)),
+                    .with_optional_warhead(warhead),
             )
         }
         None => weapon,
@@ -6730,7 +6746,7 @@ Player=Allies
 
     #[test]
     fn empty_rules_reproduce_the_builtin_profile() {
-        let mut empty = cnc_core::RulesDatabase::default();
+        let empty = cnc_core::RulesDatabase::default();
         for class_id in [ClassId::VehicleE1, ClassId::InfantryE1, ClassId::ShipE4] {
             assert_eq!(
                 unit_profile_with_rules(class_id, &empty),
@@ -6742,7 +6758,7 @@ Player=Allies
 
     #[test]
     fn rules_strength_and_speed_override_the_builtin_profile() {
-        let mut rules = rules_with("[LTNK]\nStrength=1234\nSpeed=100\n");
+        let rules = rules_with("[LTNK]\nStrength=1234\nSpeed=100\n");
         let (_, health, speed, _) = unit_profile_with_rules(ClassId::VehicleE1, &rules);
         assert_eq!(health, 1234.0, "Strength= wins over the built-in table");
         assert_eq!(speed, MAX_UNIT_SPEED_PX, "Speed=100 maps to the top speed");
@@ -6751,7 +6767,7 @@ Player=Allies
     #[test]
     fn missing_rules_fields_keep_builtin_values() {
         // Only Strength is present; speed must stay as the built-in value.
-        let mut rules = rules_with("[LTNK]\nStrength=999\n");
+        let rules = rules_with("[LTNK]\nStrength=999\n");
         let (_, health, speed, _) = unit_profile_with_rules(ClassId::VehicleE1, &rules);
         let (_, base_health, base_speed, _) = unit_profile(ClassId::VehicleE1);
         assert_eq!(health, 999.0);
@@ -6815,6 +6831,49 @@ Player=Allies
     }
 
     #[test]
+    fn rules_weapon_warhead_reaches_the_unit_weapon() {
+        // The [Weapons] entry's Warhead= must reach combat, otherwise a whole
+        // Verses row is dead data. It wins over any built-in association.
+        let rules = rules_with(
+            "[E1]\nPrimary=RIFLE\n[Weapons]\n1=RIFLE\n[RIFLE]\nDamage=75\nROF=60\nRange=384\nWarhead=SA\n",
+        );
+        let (_, _, _, weapon) = unit_profile_with_rules(ClassId::InfantryE1, &rules);
+        let weapon = weapon.expect("an armed infantry unit");
+        assert_eq!(
+            weapon.damage,
+            Fixed16_16::from_f32(75.0),
+            "Primary= still drives damage"
+        );
+        assert_eq!(
+            weapon.warhead.as_deref(),
+            Some("SA"),
+            "the rules warhead reaches the unit's weapon"
+        );
+    }
+
+    #[test]
+    fn rules_weapon_without_warhead_keeps_the_builtin_one() {
+        // A Primary= entry that omits Warhead= must not erase what is there.
+        let rules = rules_with(
+            "[E1]\nPrimary=RIFLE\n[Weapons]\n1=RIFLE\n[RIFLE]\nDamage=75\nROF=60\nRange=384\n",
+        );
+        let (_, _, _, weapon) = unit_profile_with_rules(ClassId::InfantryE1, &rules);
+        let weapon = weapon.expect("an armed infantry unit");
+        assert_eq!(weapon.warhead, None);
+        assert_eq!(weapon.damage, Fixed16_16::from_f32(75.0));
+    }
+
+    #[test]
+    fn an_empty_primary_entry_leaves_the_builtin_profile_alone() {
+        // No [Weapons] row for the named Primary= means the built-in stats and
+        // warhead survive; an unknown name must not change anything.
+        let builtin = unit_profile(ClassId::InfantryE1);
+        let rules = rules_with("[E1]\nPrimary=NOPE\n");
+        let with_rules = unit_profile_with_rules(ClassId::InfantryE1, &rules);
+        assert_eq!(with_rules, builtin, "an unresolvable Primary= is a no-op");
+    }
+
+    #[test]
     fn default_armor_comes_from_role_when_rules_are_absent() {
         let mut empty = cnc_core::RulesDatabase::default();
         assert_eq!(armor_for(ClassId::VehicleE1, &mut empty), ArmorClass::Heavy);
@@ -6826,5 +6885,99 @@ Player=Allies
     fn rules_armor_overrides_the_role_default() {
         let mut rules = rules_with("[LTNK]\nArmor=light\n");
         assert_eq!(armor_for(ClassId::VehicleE1, &mut rules), ArmorClass::Light);
+    }
+
+    #[test]
+    fn rifle_verses_heavy_armor_below_rifle_verses_infantry() {
+        let warhead = warhead("SA", "100,80,60,40,20");
+        let base = Fixed16_16::from_int(100);
+        let to_infantry = damage_vs_armor(base, ArmorClass::None, Some(&warhead));
+        let to_heavy = damage_vs_armor(base, ArmorClass::Heavy, Some(&warhead));
+        assert!(to_heavy < to_infantry, "heavy armour shrugs rifle fire");
+        assert_eq!(to_infantry, base, "infantry takes full damage");
+        assert_eq!(to_heavy, Fixed16_16::from_int(40), "heavy takes 40%");
+    }
+
+    #[test]
+    fn splash_damages_adjacent_cells() {
+        let mut game = Game::new(40, 40);
+        game.deflect_chance_percent = 0;
+        game.units.clear();
+        game.structures.clear();
+        let centre_cell = Vec2i::new(20, 20);
+        let centre_unit = game.spawn_unit(1, ClassId::VehicleE2, centre_cell);
+        let adj_unit = game.spawn_unit(1, ClassId::VehicleE2, Vec2i::new(21, 20));
+        let far_unit = game.spawn_unit(1, ClassId::VehicleE2, Vec2i::new(30, 30));
+        let centre = cell_center(centre_cell);
+        let before_c = game.unit(centre_unit).unwrap().health;
+        let before_a = game.unit(adj_unit).unwrap().health;
+        let before_f = game.unit(far_unit).unwrap().health;
+        game.apply_radius_damage(centre, TILE_SIZE * 2.0, 300, Some("AP"));
+        let after_c = game.unit(centre_unit).unwrap().health;
+        let after_a = game.unit(adj_unit).unwrap().health;
+        let after_f = game.unit(far_unit).unwrap().health;
+        assert!(after_c < before_c, "centre damaged");
+        assert!(after_a < before_a, "adjacent damaged");
+        assert_eq!(after_f, before_f, "far untouched");
+        assert!(
+            before_c - after_c > before_a - after_a,
+            "centre takes more than adjacent"
+        );
+    }
+
+    #[test]
+    fn unknown_armor_type_passthrough_and_one_warning() {
+        let mut rules = rules_with("[LTNK]\nArmor=Unobtainium\n");
+        let armor = armor_for(ClassId::VehicleE1, &mut rules);
+        assert_eq!(armor, ArmorClass::Unknown);
+        let base = Fixed16_16::from_int(100);
+        let warhead = warhead("SA", "100,80,60,40,20");
+        assert_eq!(damage_vs_armor(base, armor, Some(&warhead)), base);
+        assert_eq!(rules.warnings.len(), 1);
+        let mut rules2 = rules.clone();
+        let _ = armor_for(ClassId::VehicleE1, &mut rules2);
+        assert_eq!(rules2.warnings.len(), 1);
+    }
+
+    #[test]
+    fn miss_roll_is_deterministic_and_journaled() {
+        // Same seed + identical damage stream => identical miss/deflection
+        // outcome and identical RNG journal; the roll draws from the shared
+        // SimRng cursor that is part of the saved state.
+        let mut first = Game::new_with_seed(32, 32, 0xCAFE_F00D);
+        let mut second = Game::new_with_seed(32, 32, 0xCAFE_F00D);
+        first.deflect_chance_percent = 50;
+        second.deflect_chance_percent = 50;
+        let id1 = first.spawn_unit(0, ClassId::VehicleE1, Vec2i::new(5, 5));
+        let id2 = second.spawn_unit(0, ClassId::VehicleE1, Vec2i::new(5, 5));
+        let base = Fixed16_16::from_int(100);
+        first.rules = rules_with("[Warheads]\n1=SA\n[SA]\nVerses=100,80,60,40,20\n");
+        second.rules = first.rules.clone();
+        let hits = |id: u32| {
+            vec![
+                (TargetRef::Unit(id), base, Some("SA".to_string())),
+                (TargetRef::Unit(id), base, Some("SA".to_string())),
+                (TargetRef::Unit(id), base, Some("SA".to_string())),
+            ]
+        };
+        first.apply_damage(hits(id1));
+        second.apply_damage(hits(id2));
+        // Identical draws advance the shared cursor identically.
+        assert_eq!(first.rng.state(), second.rng.state());
+        assert_eq!(
+            first.unit(id1).unwrap().health,
+            second.unit(id2).unwrap().health,
+            "same seed and stream => same damage outcome"
+        );
+        let first_save = first.to_save_string();
+        let second_save = second.to_save_string();
+        assert_eq!(first_save, second_save, "saves are byte-identical");
+        // The roll is journaled; a change in draw count would show here.
+        assert!(
+            first_save.contains(&format!("rng\t{}\t", first.sim_seed())),
+            "RNG seed/cursor are part of the save: {first_save}"
+        );
+        // Three damage events consumed exactly three draws.
+        assert_ne!(first.rng.state(), first.sim_seed());
     }
 }

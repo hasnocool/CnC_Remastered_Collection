@@ -9,11 +9,11 @@
 
 use std::process::Command;
 
-use cnc_core::{ClassId, Fixed16_16, Vec2};
+use cnc_core::{ClassId, Fixed16_16, Vec2, Vec2i};
 use cnc_red_alert::replay::{
     DesyncError, DesyncKind, Replay, ReplayBuilder, ReplayError, REPLAY_MAGIC, REPLAY_VERSION,
 };
-use cnc_red_alert::{Game, GameCommand, SimRng, DEFAULT_SEED};
+use cnc_red_alert::{Game, GameCommand, SimRng, TargetRef, DEFAULT_SEED};
 
 /// One simulation step (the crate's tests advance in whole seconds).
 const TICK: Fixed16_16 = Fixed16_16::from_int(1);
@@ -86,12 +86,16 @@ fn ra_sim_rng_is_seeded_and_reproducible() {
         class_id: ClassId::InfantryE1,
         seconds: 2,
     });
-    // Replay the 600-tick combat loop so deflection draws consume RNG.
+    // Replay the same 600-tick combat loop so the deflection draws (todo 23)
+    // consume the shared cursor in exactly the same order.
     for _ in 0..600 {
-        assert!(first.contains(&format!("rng\t{}\t", seed)));
+        game.update(TICK);
     }
     // RNG state after scatter + produce + combat draws; deterministic per-seed.
-    assert!(first.contains(&format!("rng\t{}\t{}", seed, game.rng.state())));
+    assert!(
+        first.contains(&format!("rng\t{}\t{}", seed, game.rng.state())),
+        "the serialised cursor must match a full replay of the same stream"
+    );
 
     // The crate default is an explicit constant, not a clock or thread RNG.
     assert_eq!(Game::new(16, 16).sim_seed(), DEFAULT_SEED);
@@ -115,7 +119,10 @@ fn ra_rng_state_round_trips_through_save() {
 
     let text = game.to_save_string();
     assert!(
-        text.starts_with("RA_SAVE\t2\n"),
+        text.starts_with(
+            "RA_SAVE\t2
+"
+        ),
         "the format version was bumped in the same change as the rng line"
     );
     assert!(text.contains(&format!("rng\t{SEED}\t{}", game.rng.state())));
@@ -511,4 +518,179 @@ fn seeded_rolls_identical_across_processes() {
     // seed must produce a different journal.
     let third = child_journal(OTHER_SEED);
     assert_ne!(first, third, "a different seed must change the outcome");
+}
+
+fn todo23_make_rules(lines: &[&str]) -> cnc_core::RulesDatabase {
+    let mut s = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            s.push(char::from(10));
+        }
+        s.push_str(line);
+    }
+    cnc_core::RulesDatabase::from_str(&s).expect("rules parse")
+}
+
+fn todo23_warhead(name: &str, verses: &str) -> cnc_core::WarheadRule {
+    let section = format!("[{}]", name);
+    let rules = todo23_make_rules(&[section.as_str(), &format!("Verses={}", verses)]);
+    rules.warheads.get(name).expect("warhead present").clone()
+}
+
+#[test]
+fn rifle_verses_heavy_armor_below_rifle_verses_infantry() {
+    let rifle = todo23_warhead("SA", "100,80,60,40,20");
+    let base = Fixed16_16::from_int(100);
+
+    let vs_infantry =
+        cnc_red_alert::damage_vs_armor(base, cnc_red_alert::ArmorClass::None, Some(&rifle));
+    let vs_heavy =
+        cnc_red_alert::damage_vs_armor(base, cnc_red_alert::ArmorClass::Heavy, Some(&rifle));
+    assert_eq!(vs_infantry, base, "rifle vs infantry keeps full damage");
+    assert_eq!(vs_heavy, Fixed16_16::from_int(40), "rifle vs heavy is 40%");
+    assert!(vs_heavy < vs_infantry, "heavy armour shrugs rifle fire");
+
+    let mut game = Game::new(32, 32);
+    game.deflect_chance_percent = 0;
+    game.rules = todo23_make_rules(&["[Warheads]", "1=SA", "[SA]", "Verses=100,80,60,40,20"]);
+    let infantry = game.spawn_unit(0, ClassId::InfantryE1, Vec2i::new(8, 8));
+    let tank = game.spawn_unit(1, ClassId::VehicleE1, Vec2i::new(10, 8));
+    assert_eq!(
+        game.unit(infantry).unwrap().armor,
+        cnc_red_alert::ArmorClass::None
+    );
+    assert_eq!(
+        game.unit(tank).unwrap().armor,
+        cnc_red_alert::ArmorClass::Heavy
+    );
+    game.apply_damage(vec![
+        (TargetRef::Unit(infantry), base, Some("SA".to_string())),
+        (TargetRef::Unit(tank), base, Some("SA".to_string())),
+    ]);
+    let infantry_lost = Fixed16_16::from_int(100) - game.unit(infantry).unwrap().health;
+    let tank_lost = Fixed16_16::from_int(350) - game.unit(tank).unwrap().health;
+    assert_eq!(infantry_lost, base, "infantry took the full hit");
+    assert_eq!(tank_lost, Fixed16_16::from_int(40), "heavy tank took 40%");
+}
+
+#[test]
+fn splash_damages_adjacent_cells() {
+    let mut game = Game::new(40, 40);
+    game.deflect_chance_percent = 0;
+    game.units.clear();
+    game.structures.clear();
+    let centre_cell = Vec2i::new(20, 20);
+    let centre_unit = game.spawn_unit(1, ClassId::VehicleE2, centre_cell);
+    let adj_unit = game.spawn_unit(1, ClassId::VehicleE2, Vec2i::new(21, 20));
+    let far_unit = game.spawn_unit(1, ClassId::VehicleE2, Vec2i::new(30, 30));
+    let centre = cnc_core::Vec2::new(
+        Fixed16_16::from_f32(
+            centre_cell.x as f32 * cnc_red_alert::TILE_SIZE + cnc_red_alert::TILE_SIZE * 0.5,
+        ),
+        Fixed16_16::from_f32(
+            centre_cell.y as f32 * cnc_red_alert::TILE_SIZE + cnc_red_alert::TILE_SIZE * 0.5,
+        ),
+    );
+    let before_c = game.unit(centre_unit).unwrap().health;
+    let before_a = game.unit(adj_unit).unwrap().health;
+    let before_f = game.unit(far_unit).unwrap().health;
+    game.apply_radius_damage(centre, cnc_red_alert::TILE_SIZE * 2.0, 300, Some("AP"));
+    let after_c = game.unit(centre_unit).unwrap().health;
+    let after_a = game.unit(adj_unit).unwrap().health;
+    let after_f = game.unit(far_unit).unwrap().health;
+    assert!(after_c < before_c, "centre damaged");
+    assert!(after_a < before_a, "adjacent damaged");
+    assert_eq!(after_f, before_f, "far untouched");
+    assert!(
+        before_c - after_c > before_a - after_a,
+        "centre takes more than adjacent"
+    );
+}
+
+#[test]
+fn unknown_armor_type_passthrough_and_one_warning() {
+    let mut rules = todo23_make_rules(&["[LTNK]", "Armor=Unobtainium"]);
+    let base = Fixed16_16::from_int(100);
+    let rifle = todo23_warhead("SA", "100,80,60,40,20");
+
+    let first = cnc_red_alert::armor_for(ClassId::VehicleE1, &mut rules);
+    assert_eq!(first, cnc_red_alert::ArmorClass::Unknown);
+    assert_eq!(
+        rules
+            .warnings
+            .iter()
+            .filter(|w| w.contains("Unobtainium"))
+            .count(),
+        1
+    );
+    let mut rules2 = rules.clone();
+    let _ = cnc_red_alert::armor_for(ClassId::VehicleE1, &mut rules2);
+    assert_eq!(
+        rules2
+            .warnings
+            .iter()
+            .filter(|w| w.contains("Unobtainium"))
+            .count(),
+        1
+    );
+    let mut other = todo23_make_rules(&["[E1]", "Armor=Sequins"]);
+    let _ = cnc_red_alert::armor_for(ClassId::InfantryE1, &mut other);
+    assert_eq!(
+        other
+            .warnings
+            .iter()
+            .filter(|w| w.contains("Sequins"))
+            .count(),
+        1
+    );
+
+    assert_eq!(
+        cnc_red_alert::damage_vs_armor(base, cnc_red_alert::ArmorClass::Unknown, Some(&rifle)),
+        base
+    );
+}
+
+#[test]
+fn miss_roll_is_deterministic_and_journaled() {
+    let seed = 0xCAFE_F00D_u64;
+    let base = Fixed16_16::from_int(100);
+    let hits = |id: u32| {
+        vec![
+            (TargetRef::Unit(id), base, Some("SA".to_string())),
+            (TargetRef::Unit(id), base, Some("SA".to_string())),
+            (TargetRef::Unit(id), base, Some("SA".to_string())),
+        ]
+    };
+
+    let mut first = Game::new_with_seed(32, 32, seed);
+    let mut second = Game::new_with_seed(32, 32, seed);
+    first.deflect_chance_percent = 50;
+    second.deflect_chance_percent = 50;
+    let id1 = first.spawn_unit(0, ClassId::VehicleE1, Vec2i::new(5, 5));
+    let id2 = second.spawn_unit(0, ClassId::VehicleE1, Vec2i::new(5, 5));
+    first.rules = todo23_make_rules(&["[Warheads]", "1=SA", "[SA]", "Verses=100,80,60,40,20"]);
+    second.rules = first.rules.clone();
+    first.apply_damage(hits(id1));
+    second.apply_damage(hits(id2));
+
+    assert_eq!(first.rng.state(), second.rng.state());
+    assert_eq!(
+        first.unit(id1).unwrap().health,
+        second.unit(id2).unwrap().health
+    );
+    let first_save = first.to_save_string();
+    let second_save = second.to_save_string();
+    assert_eq!(first_save, second_save);
+    let mut needle = String::from("rng");
+    needle.push(char::from(9));
+    needle.push_str(&first.sim_seed().to_string());
+    needle.push(char::from(9));
+    assert!(first_save.contains(&needle));
+    assert_ne!(first.rng.state(), first.sim_seed());
+
+    let mut cursor = SimRng::new(seed);
+    for _ in 0..3 {
+        let _ = cursor.percent(50);
+    }
+    assert_eq!(first.rng.state(), cursor.state());
 }
