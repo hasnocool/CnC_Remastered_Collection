@@ -342,6 +342,7 @@ mod tests {
             class_id: ClassId::InfantryE1,
             position: Vec2i::new(1, 1),
             owner: Some(ClassId::HouseGDI),
+            ..Default::default()
         };
         assert!(plugin.validate_object(&model, &object));
         object.owner = Some(ClassId::InfantryE1);

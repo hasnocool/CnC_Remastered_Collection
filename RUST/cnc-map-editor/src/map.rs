@@ -12,12 +12,15 @@ use std::collections::HashMap;
 pub const TILE_SIZE: f32 = 24.0;
 
 /// One placed unit/structure.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct MapObject {
     pub id: u32,
     pub class_id: ClassId,
     pub position: Vec2i,
     pub owner: Option<ClassId>,
+    pub facing: u8,
+    pub strength: Option<u16>,
+    pub sub_cell: Option<u8>,
 }
 
 impl MapObject {
@@ -833,6 +836,7 @@ impl MapModel {
                     class_id,
                     position: Vec2i::new(x, y),
                     owner,
+                    ..Default::default()
                 });
             }
         }
@@ -951,6 +955,7 @@ impl MapModel {
                         class_id,
                         position: Vec2i::new(x, y),
                         owner,
+                        ..Default::default()
                     });
                     continue;
                 }
@@ -985,6 +990,7 @@ impl MapModel {
                     class_id,
                     position: Vec2i::new(x, y),
                     owner,
+                    ..Default::default()
                 });
             }
         }
@@ -1162,6 +1168,7 @@ impl MapModel {
                     class_id,
                     position,
                     owner,
+                    ..Default::default()
                 });
             }
         }
@@ -1501,12 +1508,14 @@ mod tests {
             class_id: ClassId::InfantryE1,
             position: Vec2i::new(2, 3),
             owner: None,
+            ..Default::default()
         });
         let second = model.insert_object(MapObject {
             id: 0,
             class_id: ClassId::VehicleE1,
             position: Vec2i::new(4, 5),
             owner: Some(ClassId::HouseGDI),
+            ..Default::default()
         });
         assert_ne!(first, second);
         assert_eq!(model.object_at(Vec2i::new(2, 3)).unwrap().id, first);
@@ -1534,6 +1543,7 @@ mod tests {
             class_id: ClassId::ConstructionYard,
             position: Vec2i::new(2, 2),
             owner: Some(ClassId::HouseGDI),
+            ..Default::default()
         });
         model.add_trigger(Trigger {
             id: 1,
@@ -1626,6 +1636,7 @@ mod tests {
             class_id: ClassId::InfantryE1,
             position: Vec2i::new(99, 99),
             owner: None,
+            ..Default::default()
         });
         let issues = model.validate();
         assert!(issues.iter().any(|issue| issue.contains("out of bounds")));

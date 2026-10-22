@@ -395,6 +395,7 @@ fn run_headless(options: Options) -> Result<(), Box<dyn std::error::Error>> {
             class_id: cnc_core::ClassId::InfantryE1,
             position: probe,
             owner: None,
+            ..Default::default()
         });
         state.editor.delete_at(&mut state.map, probe);
         state.editor.undo(&mut state.map);

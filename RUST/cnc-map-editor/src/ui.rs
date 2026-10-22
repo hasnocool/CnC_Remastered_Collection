@@ -333,6 +333,7 @@ mod tests {
             class_id: cnc_core::ClassId::VehicleE1,
             position: Vec2i::new(2, 2),
             owner: None,
+            ..Default::default()
         });
         let mut ui = EditorUI::new();
         assert!(ui.delete_at(&mut model, Vec2i::new(2, 2)));
@@ -349,6 +350,7 @@ mod tests {
             class_id: cnc_core::ClassId::ConstructionYard,
             position: Vec2i::new(1, 1),
             owner: None,
+            ..Default::default()
         });
         let mut ui = EditorUI::new();
         ui.status = "ready".to_string();

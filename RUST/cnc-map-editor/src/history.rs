@@ -437,6 +437,69 @@ impl EditCommand for SetObjectOwner {
     }
 }
 
+/// Change facing, strength and sub-cell of an object as a single undo step.
+pub struct SetObjectProperties {
+    pub id: u32,
+    pub before_facing: u8,
+    pub before_strength: Option<u16>,
+    pub before_sub_cell: Option<u8>,
+    pub after_facing: u8,
+    pub after_strength: Option<u16>,
+    pub after_sub_cell: Option<u8>,
+}
+
+impl SetObjectProperties {
+    pub fn new(
+        model: &MapModel,
+        id: u32,
+        after_facing: u8,
+        after_strength: Option<u16>,
+        after_sub_cell: Option<u8>,
+    ) -> Option<Self> {
+        let object = model.objects.get(&id)?;
+        let before_facing = object.facing;
+        let before_strength = object.strength;
+        let before_sub_cell = object.sub_cell;
+        if before_facing == after_facing
+            && before_strength == after_strength
+            && before_sub_cell == after_sub_cell
+        {
+            return None;
+        }
+        Some(Self {
+            id,
+            before_facing,
+            before_strength,
+            before_sub_cell,
+            after_facing,
+            after_strength,
+            after_sub_cell,
+        })
+    }
+}
+
+impl EditCommand for SetObjectProperties {
+    fn label(&self) -> String {
+        "Edit object properties".to_string()
+    }
+
+    fn apply(&mut self, model: &mut MapModel) {
+        if let Some(object) = model.objects.get_mut(&self.id) {
+            object.facing = self.after_facing;
+            object.strength = self.after_strength;
+            object.sub_cell = self.after_sub_cell;
+        }
+    }
+
+    fn undo(&mut self, model: &mut MapModel) {
+        if let Some(object) = model.objects.get_mut(&self.id) {
+            object.facing = self.before_facing;
+            object.strength = self.before_strength;
+            object.sub_cell = self.before_sub_cell;
+        }
+    }
+}
+
 /// Add a trigger.
 pub struct AddTrigger {
     pub trigger: Trigger,
@@ -926,6 +989,7 @@ mod tests {
                 class_id: ClassId::InfantryE1,
                 position: Vec2i::new(2, 2),
                 owner: None,
+                ..Default::default()
             })),
         );
         assert_eq!(model.objects.len(), 1);
@@ -1008,6 +1072,7 @@ mod tests {
             class_id: ClassId::InfantryE1,
             position: Vec2i::new(1, 1),
             owner: None,
+            ..Default::default()
         });
         let mut history = History::new(8);
         let command = Box::new(SetObjectOwner::new(&model, id, Some(ClassId::HouseGDI)).unwrap());

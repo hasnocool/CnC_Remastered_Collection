@@ -80,6 +80,62 @@ impl Tool for TerrainTool {
     }
 }
 
+fn is_infantry_class(class_id: ClassId) -> bool {
+    matches!(
+        class_id,
+        ClassId::Infantry
+            | ClassId::InfantryE1
+            | ClassId::InfantryE2
+            | ClassId::InfantryE3
+            | ClassId::InfantryE4
+            | ClassId::InfantryE5
+            | ClassId::InfantryE6
+            | ClassId::InfantryE7
+            | ClassId::InfantryE8
+            | ClassId::InfantryE9
+            | ClassId::InfantryE10
+            | ClassId::InfantryE11
+    )
+}
+
+fn building_footprint(class_id: ClassId) -> (usize, usize, bool) {
+    match class_id {
+        ClassId::ConstructionYard
+        | ClassId::WarFactory
+        | ClassId::Barracks
+        | ClassId::Refinery
+        | ClassId::PowerPlant
+        | ClassId::Silo
+        | ClassId::Radar => (2, 2, true),
+        _ if class_id.is_building() => (1, 1, false),
+        _ => (1, 1, false),
+    }
+}
+
+fn footprint_cells(origin: Vec2i, w: usize, h: usize, has_bib: bool) -> Vec<Vec2i> {
+    let mut cells = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            cells.push(Vec2i::new(origin.x + x as i32, origin.y + y as i32));
+        }
+    }
+    if has_bib {
+        for x in 0..w {
+            cells.push(Vec2i::new(origin.x + x as i32, origin.y + h as i32));
+        }
+    }
+    cells
+}
+
+fn object_footprint_cells(object: &crate::map::MapObject) -> Vec<Vec2i> {
+    if object.class_id.is_building() {
+        let (w, h, has_bib) = building_footprint(object.class_id);
+        footprint_cells(object.position, w, h, has_bib)
+    } else {
+        Vec::new()
+    }
+}
+
 /// Brush that places a new unit or structure.
 pub struct ObjectTool {
     pub class_id: ClassId,
@@ -108,15 +164,85 @@ impl Tool for ObjectTool {
     }
 
     fn click(&mut self, model: &MapModel, cell: Vec2i) -> Option<Box<dyn EditCommand>> {
-        if !model.in_bounds(cell) || model.object_at(cell).is_some() {
+        if !model.in_bounds(cell) {
             return None;
         }
-        Some(Box::new(PlaceObject::new(MapObject {
-            id: 0,
-            class_id: self.class_id,
-            position: cell,
-            owner: self.owner,
-        })))
+        if self.class_id.is_building() {
+            let (w, h, has_bib) = building_footprint(self.class_id);
+            let cells = footprint_cells(cell, w, h, has_bib);
+            for c in &cells {
+                if !model.in_bounds(*c) {
+                    return None;
+                }
+            }
+            for obj in model.objects.values() {
+                let existing = object_footprint_cells(obj);
+                for ec in &existing {
+                    if cells.contains(ec) {
+                        return None;
+                    }
+                }
+            }
+            for c in &cells {
+                if model.object_at(*c).is_some() {
+                    return None;
+                }
+            }
+            Some(Box::new(PlaceObject::new(MapObject {
+                id: 0,
+                class_id: self.class_id,
+                position: cell,
+                owner: self.owner,
+                ..Default::default()
+            })))
+        } else if is_infantry_class(self.class_id) {
+            for obj in model.objects.values() {
+                let existing = object_footprint_cells(obj);
+                if existing.contains(&cell) {
+                    return None;
+                }
+            }
+            let infantry_count = model
+                .objects
+                .values()
+                .filter(|o| o.position == cell && is_infantry_class(o.class_id))
+                .count();
+            if infantry_count >= 5 {
+                return None;
+            }
+            let used: std::collections::BTreeSet<u8> = model
+                .objects
+                .values()
+                .filter(|o| o.position == cell && is_infantry_class(o.class_id))
+                .filter_map(|o| o.sub_cell)
+                .collect();
+            let slot = (0..5u8).find(|s| !used.contains(s))?;
+            Some(Box::new(PlaceObject::new(MapObject {
+                id: 0,
+                class_id: self.class_id,
+                position: cell,
+                owner: self.owner,
+                sub_cell: Some(slot),
+                ..Default::default()
+            })))
+        } else {
+            for obj in model.objects.values() {
+                let existing = object_footprint_cells(obj);
+                if existing.contains(&cell) {
+                    return None;
+                }
+            }
+            if model.object_at(cell).is_some() {
+                return None;
+            }
+            Some(Box::new(PlaceObject::new(MapObject {
+                id: 0,
+                class_id: self.class_id,
+                position: cell,
+                owner: self.owner,
+                ..Default::default()
+            })))
+        }
     }
 }
 

@@ -464,6 +464,7 @@ fn place_player_starts(model: &mut MapModel, settings: &MapGenSettings) {
             class_id: ClassId::VehicleE7,
             position: *start,
             owner: Some(houses[index % houses.len()]),
+            ..Default::default()
         });
     }
 }

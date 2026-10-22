@@ -1274,6 +1274,7 @@ impl EditorState {
                 class_id: template.class_id,
                 position: target,
                 owner: template.owner,
+                ..Default::default()
             });
             self.editor
                 .history
@@ -1326,6 +1327,7 @@ impl EditorState {
                 class_id: template.class_id,
                 position: target,
                 owner: template.owner,
+                ..Default::default()
             });
             self.editor
                 .history
@@ -5300,6 +5302,7 @@ mod tests {
                 class_id: ClassId::VehicleE1,
                 position: Vec2i::new(index, 0),
                 owner: None,
+                ..Default::default()
             });
         }
         for tab in [
@@ -5432,6 +5435,7 @@ mod tests {
                 class_id: ClassId::InfantryE1,
                 position: Vec2i::new(cell.0, cell.1),
                 owner: None,
+                ..Default::default()
             });
         }
         state.select_all_objects();
@@ -5451,12 +5455,14 @@ mod tests {
             class_id: ClassId::VehicleE1,
             position: Vec2i::new(2, 2),
             owner: Some(ClassId::HouseGDI),
+            ..Default::default()
         });
         let second = state.map.insert_object(MapObject {
             id: 0,
             class_id: ClassId::VehicleE1,
             position: Vec2i::new(4, 4),
             owner: Some(ClassId::HouseNod),
+            ..Default::default()
         });
         state.editor.selected_objects = vec![first, second];
         state.replace_selected_class(ClassId::VehicleE2);
@@ -5478,6 +5484,7 @@ mod tests {
             class_id: ClassId::VehicleE1,
             position: Vec2i::new(2, 3),
             owner: Some(ClassId::HouseGDI),
+            ..Default::default()
         });
         state.editor.selected_objects = vec![id];
         state.editor.selected_object = Some(id);
@@ -5509,6 +5516,7 @@ mod tests {
                 class_id: ClassId::InfantryE1,
                 position: Vec2i::new(cell.0, cell.1),
                 owner: None,
+                ..Default::default()
             }));
             let _ = index;
         }
@@ -5683,6 +5691,7 @@ mod tests {
             class_id: ClassId::VehicleE1,
             position: Vec2i::new(2, 2),
             owner: None,
+            ..Default::default()
         });
         state.set_select_tool();
 
@@ -5719,12 +5728,14 @@ mod tests {
             class_id: ClassId::VehicleE1,
             position: Vec2i::new(1, 1),
             owner: None,
+            ..Default::default()
         });
         state.map.insert_object(MapObject {
             id: 0,
             class_id: ClassId::InfantryE1,
             position: Vec2i::new(4, 1),
             owner: None,
+            ..Default::default()
         });
         state.set_select_tool();
         let (sx, sy) = state.cell_screen(Vec2i::new(1, 1));
@@ -5873,6 +5884,7 @@ mod tests {
                 class_id: ClassId::InfantryE1,
                 position: Vec2i::new(index as i32, 1),
                 owner,
+                ..Default::default()
             });
         }
         assert_eq!(state.object_ids().len(), 3);
@@ -5906,12 +5918,14 @@ mod tests {
             class_id: ClassId::InfantryE1,
             position: Vec2i::new(1, 1),
             owner: None,
+            ..Default::default()
         });
         state.map.insert_object(MapObject {
             id: 0,
             class_id: ClassId::VehicleE2,
             position: Vec2i::new(2, 2),
             owner: None,
+            ..Default::default()
         });
         assert_eq!(state.object_ids().len(), 2);
         state.focus = Focus::PlacedSearch;
@@ -6048,18 +6062,21 @@ mod tests {
             class_id: ClassId::InfantryE1,
             position: Vec2i::new(2, 2),
             owner: None,
+            ..Default::default()
         });
         let second = state.map.insert_object(MapObject {
             id: 0,
             class_id: ClassId::VehicleE1,
             position: Vec2i::new(3, 3),
             owner: None,
+            ..Default::default()
         });
         let outside = state.map.insert_object(MapObject {
             id: 0,
             class_id: ClassId::VehicleE2,
             position: Vec2i::new(8, 8),
             owner: None,
+            ..Default::default()
         });
         state.set_select_tool();
 
@@ -6119,6 +6136,7 @@ mod tests {
             class_id: ClassId::VehicleE1,
             position: Vec2i::new(2, 2),
             owner: Some(ClassId::HouseGDI),
+            ..Default::default()
         });
         state.editor.selected_object = Some(source);
 
@@ -6154,12 +6172,14 @@ mod tests {
             class_id: ClassId::InfantryE1,
             position: Vec2i::new(2, 2),
             owner: None,
+            ..Default::default()
         });
         let second = state.map.insert_object(MapObject {
             id: 0,
             class_id: ClassId::VehicleE1,
             position: Vec2i::new(4, 3),
             owner: Some(ClassId::HouseGDI),
+            ..Default::default()
         });
         state.editor.selected_objects = vec![first, second];
         state.editor.selected_object = Some(first);
@@ -6212,6 +6232,7 @@ mod tests {
             class_id: ClassId::VehicleE1,
             position: Vec2i::new(2, 2),
             owner: Some(ClassId::InfantryE1),
+            ..Default::default()
         });
         let issues = state.validation_issues();
         assert!(
@@ -6264,6 +6285,7 @@ mod tests {
             class_id: ClassId::VehicleE1,
             position: Vec2i::new(5, 5),
             owner: None,
+            ..Default::default()
         });
         state.editor.selected_object = Some(id);
         state.editor.selected_objects = vec![id];
@@ -6286,6 +6308,7 @@ mod tests {
             class_id: ClassId::InfantryE1,
             position: Vec2i::new(6, 5),
             owner: None,
+            ..Default::default()
         });
         let before = state.editor.history.undo_len();
         state.nudge_selected_object(1, 0);
@@ -6329,6 +6352,7 @@ mod tests {
             class_id: ClassId::InfantryE1,
             position: Vec2i::new(1, 1),
             owner: None,
+            ..Default::default()
         });
 
         // Default tab is the trigger inspector.
