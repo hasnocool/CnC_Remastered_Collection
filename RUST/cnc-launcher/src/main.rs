@@ -10143,6 +10143,117 @@ mod tests {
     }
 
     #[test]
+    fn campaign_flow_advances_and_carries_credits() {
+        // Two-mission scripted run exercising score display, carry-over write,
+        // file round-trip re-read at next mission start, and the one-shot
+        // semantics that prevent double-apply.
+        let dir = std::env::temp_dir().join(format!("td-carr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let maps = Path::new(env!("CARGO_MANIFEST_DIR")).join("../maps/td_campaign");
+        std::fs::copy(maps.join("01.ini"), dir.join("01.ini")).unwrap();
+        std::fs::copy(maps.join("03.ini"), dir.join("02.ini")).unwrap();
+
+        let progress = dir.join("td_progress.dat");
+        let mut app = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+            LauncherOptions::default(),
+        )
+        .unwrap();
+        app.td_progress_path = progress.clone();
+        assert_eq!(app.load_mission_dir(&dir).unwrap(), 2);
+
+        // Mission 1 – load, give a distinctive credit amount, finish with victory.
+        app.mission_index = 0;
+        assert!(app.activate_selected_mission().unwrap());
+        let owner = app.game.player_owner;
+        app.game.houses[owner as usize].credits = 4321;
+        // Ensure the scenario actually starts with at least one surviving unit.
+        assert!(!app.game.units.is_empty());
+
+        app.show_td_score();
+        assert!(
+            app.td_score.is_some(),
+            "score screen must be shown after mission end"
+        );
+
+        app.game.mission.outcome = Some(MissionOutcome::Victory);
+        app.game.elapsed = Fixed16_16::from_int(45);
+        app.finish_td_mission();
+
+        // Victory advances to next mission and records completion.
+        assert!(app.selecting_mission);
+        assert_eq!(app.mission_index, 1);
+        assert!(app.td_completed[0]);
+
+        // Carry-over file was written at mission end.
+        let carry_path = app.td_progress_path.with_file_name("td-carryover.bin");
+        let recorded = Carryover::load_from_file(&carry_path)
+            .expect("carry-over file must exist after a victorious mission");
+        assert_eq!(recorded.credits, 4321);
+        assert!(
+            !recorded.units.is_empty(),
+            "carry-over must capture surviving units"
+        );
+
+        // Simulate a selector reload / fresh launch by clearing the in-memory cache.
+        // The next activation must re-read the file, not panic, and apply exactly once.
+        app.td_carryover = None;
+
+        // Activate mission 2 – file round-trip.
+        assert!(app.activate_selected_mission().unwrap());
+        // Carry-over is applied to the owner stored in the file, which may differ
+        // from the current player_owner if scenarios use different house indices.
+        let credits_after = app.game.houses[recorded.owner as usize].credits;
+        assert_eq!(
+            credits_after,
+            recorded
+                .credits
+                .min(cnc_tiberian_dawn::carryover::CREDITS_CAP),
+            "credits must be carried from the file"
+        );
+
+        // All carried unit types must be present in the new game.
+        for carried in &recorded.units {
+            let found = app
+                .game
+                .units
+                .iter()
+                .any(|u| u.owner == recorded.owner && u.unit_type == carried.unit_type);
+            assert!(
+                found,
+                "carried unit type {:?} must be deployed on mission start",
+                carried.unit_type
+            );
+        }
+
+        // One-shot semantics: a fresh launch must not re-apply the same carry-over.
+        let mut resumed = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+            LauncherOptions::default(),
+        )
+        .unwrap();
+        resumed.td_progress_path = progress.clone();
+        assert_eq!(resumed.load_mission_dir(&dir).unwrap(), 2);
+        resumed.mission_index = 1;
+        assert!(resumed.activate_selected_mission().unwrap());
+        // The carry-over file should be gone after the first activation; a fresh
+        // launch must use the scenario defaults and not re-load the old carry-over.
+        assert!(
+            !carry_path.exists(),
+            "carry-over artifact must be consumed after first apply"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn queued_game_commands_are_routed_into_the_game() {
         let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
         app.start_skirmish();
