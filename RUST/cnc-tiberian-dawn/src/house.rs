@@ -45,20 +45,41 @@ pub struct House {
     /// (everything buildable); scenarios may lower it via the scenario setup.
     pub tech_level: u8,
     pub ai_enabled: bool,
+    /// Difficulty bias for this house — `HouseClass::Assign_Handicap` (HOUSE.CPP:239).
+    ///
+    /// `FloatBias` is a **multiplier**, never a delta: it is scaled into the
+    /// purchase price (`TechnoClass::Refund_Amount`, TECHNO.CPP:4495
+    /// `Raw_Cost() * House->CostBias`; `FactoryClass::Set`, FACTORY.CPP:402
+    /// `object.Cost_Of() * house.CostBias`) and into the sidebar price
+    /// (SIDEBAR.CPP:2292), and it scales build time the same way.
+    ///
+    /// `ZERO` is the "no handicap" sentinel as well as the `#[serde(default)]`
+    /// value for a snapshot that predates this field, so it must behave exactly
+    /// like an unhandicapped house. See [`House::bias_is_effective`].
     #[serde(default)]
     pub handicap: cnc_core::FloatBias,
+    /// Credits currently shown on the credit tab — `CreditClass::Current`
+    /// (CREDITS.CPP:61).
+    ///
+    /// Display state, not ledger state: it rolls up toward
+    /// [`House::available_money`] a slice at a time
+    /// (`CreditClass::AI`, CREDITS.CPP:138-177). It is snapshot-serialized so a
+    /// replay reproduces the same roll-up.
     #[serde(default)]
     pub credit_display: i32,
+    /// Ticks to wait before the next roll-up step — `CreditClass::Countdown`
+    /// (CREDITS.CPP:63, :158-159, :171). Snapshot state for the same reason.
     #[serde(default)]
     pub credit_countdown: i32,
+    /// The set of houses allied with this one — `HouseClass::Allies`
+    /// (HOUSE.H:688, a bitmask; exposed by `Get_Allies`, HOUSE.H:447).
+    ///
+    /// One canonical field, deliberately: the original keeps a single bitmask,
+    /// so every accessor spelling ([`House::allies_list`],
+    /// [`House::alliance_members_list`], [`House::members_list`], …) reads this
+    /// same set and no second copy has to be kept in sync.
     #[serde(default)]
     pub allies: Vec<u8>,
-    #[serde(default)]
-    pub alliance_members: Vec<u8>,
-    #[serde(default)]
-    pub allied_houses: Vec<u8>,
-    #[serde(default)]
-    pub members: Vec<u8>,
 }
 
 impl House {
@@ -88,9 +109,6 @@ impl House {
             credit_display: 0,
             credit_countdown: 0,
             allies: Vec::new(),
-            alliance_members: Vec::new(),
-            allied_houses: Vec::new(),
-            members: Vec::new(),
         }
     }
     pub fn add_credits(&mut self, amount: i32) {
@@ -225,18 +243,32 @@ impl House {
         self.handicap = handicap;
         self
     }
-    pub fn has_handicap(&self) -> bool {
-        self.handicap != cnc_core::FloatBias::ZERO
-    }
-    pub fn handicap_cost(&self, cost: i32) -> i32 {
+    /// Whether this house's handicap actually changes the economy.
+    ///
+    /// The bias is a multiplier over cost and build time (HOUSE.CPP's
+    /// CostBias/BuildSpeedBias), so only a finite, strictly positive value can
+    /// scale anything. A zero bias is the serde "unset" sentinel and must leave
+    /// the unhandicapped value untouched so that pre-handicap snapshots stay
+    /// byte-identical; a non-finite or negative bias has no defined meaning and
+    /// is likewise treated as "no handicap" rather than propagating NaN into
+    /// the ledger.
+    pub fn bias_is_effective(&self) -> bool {
         let bias = self.handicap.to_f32();
-        if !bias.is_finite() || bias <= 0.0 || self.handicap == cnc_core::FloatBias::ZERO {
+        bias.is_finite() && bias > 0.0
+    }
+    pub fn has_handicap(&self) -> bool {
+        self.bias_is_effective()
+    }
+    /// The biased purchase price for a raw cost.
+    ///
+    /// The multiplication mirrors TECHNO.CPP:4495 / FACTORY.CPP:402. The exact
+    /// rounding is ours (the C++ stores an `int Balance`), so a test pins it
+    /// rather than trusting it.
+    pub fn handicap_cost(&self, cost: i32) -> i32 {
+        if !self.bias_is_effective() || cost <= 0 {
             return cost;
         }
-        if cost <= 0 {
-            return cost;
-        }
-        let value = (cost as f64) * (bias as f64);
+        let value = (cost as f64) * (self.handicap.to_f32() as f64);
         if !value.is_finite() {
             return cost;
         }
@@ -244,12 +276,12 @@ impl House {
         let clamped = rounded.clamp(0.0, i32::MAX as f64);
         clamped as i32
     }
+    /// The biased build time, scaled by the same multiplier as the price.
     pub fn handicap_time(&self, time: Fixed16_16) -> Fixed16_16 {
-        let bias = self.handicap.to_f32();
-        if !bias.is_finite() || bias <= 0.0 || self.handicap == cnc_core::FloatBias::ZERO {
+        if !self.bias_is_effective() {
             return time;
         }
-        let value = time.to_f32() * bias;
+        let value = time.to_f32() * self.handicap.to_f32();
         if !value.is_finite() {
             return time;
         }
@@ -257,11 +289,6 @@ impl House {
     }
 
     // --- Credit display tick (CREDITS.CPP) ---
-    fn sync_allies(&mut self) {
-        self.alliance_members = self.allies.clone();
-        self.allied_houses = self.allies.clone();
-        self.members = self.allies.clone();
-    }
     pub fn tick_credits(&mut self) {
         let target = self.available_money().max(0);
         if self.credit_display == target {
@@ -323,9 +350,12 @@ impl House {
         self.is_ally(house)
     }
     pub fn make_ally(&mut self, house: u8) {
+        // HOUSE.CPP:2095 — Make_Ally is a no-op when the house is already an
+        // ally (`if (house != HOUSE_NONE && !Is_Ally(house))`), so a repeat
+        // request cannot un-ally. Breaking an alliance is Make_Enemy's job
+        // (HOUSE.CPP:2158), which is always bilateral (:2164-2166).
         if !self.allies.contains(&house) {
             self.allies.push(house);
-            self.sync_allies();
         }
     }
     pub fn make_allied(&mut self, house: u8) {
@@ -345,7 +375,6 @@ impl House {
     }
     pub fn make_enemy(&mut self, house: u8) {
         self.allies.retain(|&h| h != house);
-        self.sync_allies();
     }
     pub fn remove_ally(&mut self, house: u8) {
         self.make_enemy(house);
@@ -411,10 +440,10 @@ impl House {
         self.handicap
     }
     pub fn cost_bias(&self) -> cnc_core::FloatBias {
-        if self.handicap == cnc_core::FloatBias::ZERO {
-            cnc_core::FloatBias::ONE
-        } else {
+        if self.bias_is_effective() {
             self.handicap
+        } else {
+            cnc_core::FloatBias::ONE
         }
     }
     pub fn build_speed_bias(&self) -> cnc_core::FloatBias {
@@ -494,7 +523,7 @@ mod tests {
         assert!(ok);
         assert!(game.houses[a as usize].is_ally(b));
         assert!(game.houses[b as usize].is_ally(a));
-        let mut h = House::new(ClassId::House, "X".to_string());
+        let h = House::new(ClassId::House, "X".to_string());
         assert!(!h.is_ally(5));
     }
 }

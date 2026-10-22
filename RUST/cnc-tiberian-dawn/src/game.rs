@@ -1060,15 +1060,27 @@ impl Game {
             .count() as u32;
         alive + queued < house.max_buildings
     }
+    /// The price `owner` actually pays for a raw cost.
+    ///
+    /// FACTORY.CPP:402 (`Balance = object.Cost_Of() * house.CostBias`) and
+    /// TECHNO.CPP:4495 (`Raw_Cost() * House->CostBias`) make the purchase price
+    /// the difficulty-biased cost, and SIDEBAR.CPP:2292 shows that same biased
+    /// figure on the sidebar. An unknown owner pays the raw cost.
+    pub fn production_cost(&self, owner: u8, raw_cost: i32) -> i32 {
+        self.houses
+            .get(owner as usize)
+            .map(|house| house.handicap_cost(raw_cost))
+            .unwrap_or(raw_cost)
+    }
+
     pub fn can_queue_unit(&self, owner: u8, unit_type: UnitType) -> bool {
         self.within_unit_limit(owner)
             && self.meets_tech_level(owner, self.unit_tech_level(unit_type))
             && self.meets_prerequisites(owner, unit_type.ini_name())
             && self.has_producer(owner, Self::unit_factory_kind(unit_type))
-            && self
-                .houses
-                .get(owner as usize)
-                .is_some_and(|house| house.can_afford(self.unit_cost(unit_type)))
+            && self.houses.get(owner as usize).is_some_and(|house| {
+                house.can_afford(self.production_cost(owner, self.unit_cost(unit_type)))
+            })
     }
 
     pub fn can_queue_building(&self, owner: u8, structure: StructureType) -> bool {
@@ -1076,10 +1088,9 @@ impl Game {
             && self.meets_tech_level(owner, self.building_tech_level(structure))
             && self.meets_prerequisites(owner, structure.ini_name())
             && self.owns_structure(owner, StructureType::ConstructionYard)
-            && self
-                .houses
-                .get(owner as usize)
-                .is_some_and(|house| house.can_afford(self.building_cost(structure)))
+            && self.houses.get(owner as usize).is_some_and(|house| {
+                house.can_afford(self.production_cost(owner, self.building_cost(structure)))
+            })
     }
 
     /// Full production sidebar for a house.
@@ -1168,7 +1179,9 @@ impl Game {
 
     /// Queue a unit at the house that owns the matching factory.
     pub fn queue_unit(&mut self, owner: u8, unit_type: UnitType) -> bool {
-        let cost = self.unit_cost(unit_type);
+        // FACTORY.CPP:402 — the buyer pays Cost_Of() * house.CostBias.
+        let raw_cost = self.unit_cost(unit_type);
+        let cost = self.production_cost(owner, raw_cost);
         if !self.can_queue_unit(owner, unit_type) {
             // Distinguish "no money" from "no tech": can_queue_unit folds both
             // into a single false, so re-check the purse to pick the line.
@@ -1191,15 +1204,17 @@ impl Game {
             return false;
         }
 
-        // TECHNO.CPP Time_To_Build uses the house power fraction.
-        let seconds = production_seconds(cost, house.power, house.max_power);
+        // TECHNO.CPP Time_To_Build uses the house power fraction; the
+        // difficulty bias scales that time the same way it scales the price.
+        let seconds = production_seconds(raw_cost, house.power, house.max_power);
+        let total_time = house.handicap_time(Fixed16_16::from_f32(seconds));
         if !house.spend_credits(cost) {
             return false;
         }
         house.production_queue.push_back(ProductionItem {
             class_id: unit_class_id(unit_type),
             progress: Fixed16_16::ZERO,
-            total_time: Fixed16_16::from_f32(seconds),
+            total_time,
             cost,
         });
         true
@@ -1256,7 +1271,9 @@ impl Game {
 
     /// Queue a structure at the Construction Yard.
     pub fn queue_building(&mut self, owner: u8, structure: StructureType) -> bool {
-        let cost = self.building_cost(structure);
+        // FACTORY.CPP:402 — the buyer pays Cost_Of() * house.CostBias.
+        let raw_cost = self.building_cost(structure);
+        let cost = self.production_cost(owner, raw_cost);
         if !self.can_queue_building(owner, structure) {
             let broke = self
                 .houses
@@ -1282,14 +1299,17 @@ impl Game {
             }
             return false;
         }
-        let seconds = production_seconds(cost, house.power, house.max_power);
+        // TECHNO.CPP Time_To_Build scales with the power fraction, and the
+        // difficulty bias scales that time like it scales the price.
+        let seconds = production_seconds(raw_cost, house.power, house.max_power);
+        let total_time = house.handicap_time(Fixed16_16::from_f32(seconds));
         if !house.spend_credits(cost) {
             return false;
         }
         house.production_queue.push_back(ProductionItem {
             class_id: structure.class_id(),
             progress: Fixed16_16::ZERO,
-            total_time: Fixed16_16::from_f32(seconds),
+            total_time,
             cost,
         });
         true
@@ -1758,6 +1778,17 @@ impl Game {
     pub fn set_alliance(&mut self, a: u8, b: u8) -> bool {
         self.ally_houses(a, b)
     }
+    /// An ALLY event between two houses: makes the alliance, in both
+    /// directions, exactly once.
+    ///
+    /// HOUSE.CPP:2092 `Make_Ally` is guarded by `!Is_Ally(house)` (:2095), so a
+    /// repeat request is a **no-op** — it does not un-ally. There is no toggle
+    /// in the original. Breaking an alliance is [`Game::break_alliance`],
+    /// matching HOUSE.CPP:2158 `Make_Enemy`, which is bilateral (:2164-2166,
+    /// "Making war is a bilateral aaction", :2156).
+    ///
+    /// Returns false for an out-of-range or self-directed event (a documented
+    /// no-op) and true when an alliance is in effect afterwards.
     pub fn apply_ally_event(&mut self, emitter: u8, recipient: u8) -> bool {
         let ei = emitter as usize;
         let ri = recipient as usize;
@@ -1768,12 +1799,29 @@ impl Game {
             return false;
         }
         if self.houses[ei].is_ally(recipient) {
-            self.houses[ei].make_enemy(recipient);
-            self.houses[ri].make_enemy(emitter);
-        } else {
-            self.houses[ei].make_ally(recipient);
-            self.houses[ri].make_ally(emitter);
+            // HOUSE.CPP:2095 — Make_Ally guarded by !Is_Ally; repeat is a no-op.
+            return true;
         }
+        self.houses[ei].make_ally(recipient);
+        self.houses[ri].make_ally(emitter);
+        true
+    }
+    /// Break an alliance between two houses, in both directions.
+    ///
+    /// HOUSE.CPP:2158-2176: `Allies &= ~(1 << house)` for this house and
+    /// `enemy->Allies &= ~(1 << Class->House)` for the other one, i.e. war is
+    /// always bilateral. A no-op (returns false) when the pair is not allied.
+    pub fn break_alliance(&mut self, a: u8, b: u8) -> bool {
+        let ai = a as usize;
+        let bi = b as usize;
+        if ai >= self.houses.len() || bi >= self.houses.len() || ai == bi {
+            return false;
+        }
+        if !self.houses[ai].is_ally(b) && !self.houses[bi].is_ally(a) {
+            return false;
+        }
+        self.houses[ai].make_enemy(b);
+        self.houses[bi].make_enemy(a);
         true
     }
     pub fn ally_event(&mut self, emitter: u8, recipient: u8) -> bool {
@@ -1926,6 +1974,10 @@ impl Game {
         }
 
         self.update_production(delta_time);
+        // HOUSE.CPP:1580 — HouseClass::AI drives VisibleCredits.AI(false, this, true)
+        // every frame, so the credit tab rolls up gradually toward Available_Money()
+        // instead of snapping when money is actually spent or harvested.
+        self.tick_credits();
         self.kill_passengers_of_destroyed_transports();
         self.sync_passenger_positions();
         self.update_death_announcements();

@@ -2,7 +2,9 @@
 
 use cnc_core::FloatBias;
 use cnc_core::{ClassId, Fixed16_16};
-use cnc_tiberian_dawn::{game::Game, house::House, house::ProductionItem};
+use cnc_tiberian_dawn::game::Game;
+use cnc_tiberian_dawn::house::{House, ProductionItem};
+use cnc_tiberian_dawn::UnitType;
 
 #[test]
 fn handicap_alters_economy() {
@@ -225,15 +227,76 @@ fn handicap_zero_identical_to_unhandicapped() {
 }
 
 #[test]
-fn ally_event_toggle_and_member_tracking() {
+fn ally_event_is_idempotent_and_does_not_toggle() {
     let mut game = Game::new("toggle", 8, 8);
     game.setup_demo();
     game.apply_ally_event(0, 1);
     assert!(game.houses[0].is_ally(1));
     assert!(game.houses[1].is_ally(0));
-    game.apply_ally_event(0, 1);
+
+    // HOUSE.CPP:2095 — Make_Ally is guarded by `!Is_Ally(house)`, so a repeat
+    // ALLY event is a no-op. There is no toggle in the original.
+    assert!(game.apply_ally_event(0, 1));
+    assert!(game.houses[0].is_ally(1));
+    assert!(game.houses[1].is_ally(0));
+    assert_eq!(game.houses[0].allies_list().len(), 1);
+
+    // Breaking is a separate, bilateral action (HOUSE.CPP:2158-2176).
+    assert!(game.break_alliance(0, 1));
     assert!(!game.houses[0].is_ally(1));
     assert!(!game.houses[1].is_ally(0));
+    // Breaking again is a no-op once already at war.
+    assert!(!game.break_alliance(0, 1));
+}
+
+#[test]
+fn handicap_applies_at_game_production_entry_points() {
+    // FACTORY.CPP:402: the buyer pays Cost_Of() * house.CostBias, so the
+    // Game-level queue entry points must scale the price and the build time,
+    // not just House::queue_production.
+    let mut plain = Game::new("plain", 8, 8);
+    plain.setup_demo();
+    plain.houses[0].add_credits(10_000);
+    let raw_cost = plain.unit_cost(UnitType::InfantryE1);
+    assert!(plain.queue_unit(0, UnitType::InfantryE1));
+    let spent_plain = plain.houses[0].credits_spent;
+    let time_plain = plain.houses[0].production_queue.front().unwrap().total_time;
+    assert_eq!(spent_plain, raw_cost as i64);
+
+    let mut easy = Game::new("easy", 8, 8);
+    easy.setup_demo();
+    easy.houses[0].add_credits(10_000);
+    easy.houses[0].set_handicap(FloatBias::HALF);
+    assert!(easy.queue_unit(0, UnitType::InfantryE1));
+    let spent_easy = easy.houses[0].credits_spent;
+    let time_easy = easy.houses[0].production_queue.front().unwrap().total_time;
+
+    // The pinned FloatBias::HALF ratio, applied to both price and time.
+    let expected = ((raw_cost as f64) * FloatBias::HALF.to_f32() as f64).round() as i64;
+    assert_eq!(spent_easy, expected);
+    assert_eq!(easy.production_cost(0, raw_cost), expected as i32);
+    assert_eq!(spent_easy * 2, spent_plain);
+    assert!((time_easy.to_f32() * 2.0 - time_plain.to_f32()).abs() < 1e-3);
+}
+
+#[test]
+fn handicap_is_consistent_across_predicate_and_bias() {
+    let mut h = House::new(ClassId::HouseGDI, "GDI".to_string());
+    h.set_handicap(FloatBias::from_f32(f32::NAN));
+    assert!(!h.has_handicap());
+    assert_eq!(h.handicap_cost(100), 100);
+    assert_eq!(h.cost_bias(), FloatBias::ONE);
+
+    h.set_handicap(FloatBias::from_f32(-2.0));
+    assert!(!h.has_handicap());
+    assert_eq!(h.handicap_cost(100), 100);
+    assert_eq!(h.cost_bias(), FloatBias::ONE);
+
+    h.set_handicap(FloatBias::HALF);
+    assert!(h.has_handicap());
+    assert!(h.bias_is_effective());
+    assert_eq!(h.handicap_cost(100), 50);
+    assert_eq!(h.cost_bias(), FloatBias::HALF);
 }
 
 #[test]
