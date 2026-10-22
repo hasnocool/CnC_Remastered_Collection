@@ -30,8 +30,10 @@ pub mod logging {
     /// Global level is `Info`; launcher modules get `Debug` while the noisy
     /// GPU/windowing crates are capped at `Warn`.
     pub fn launcher_log_config() -> cnc_logs::LogConfig {
-        let mut config = cnc_logs::LogConfig::default();
-        config.level = LogLevelConfig::Info;
+        let mut config = cnc_logs::LogConfig {
+            level: LogLevelConfig::Info,
+            ..cnc_logs::LogConfig::default()
+        };
 
         for target in ["cnc_launcher", "cnc_launcher::logging"] {
             config

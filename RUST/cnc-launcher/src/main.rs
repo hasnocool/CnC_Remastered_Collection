@@ -3062,6 +3062,9 @@ impl LauncherApp {
     /// Leave the TD campaign-complete screen.
     fn dismiss_td_campaign_complete(&mut self) {
         self.td_complete = false;
+        self.td_carryover = None;
+        let carryover_path = self.td_progress_path.with_file_name("td-carryover.bin");
+        let _ = std::fs::remove_file(&carryover_path);
         self.selecting_mission = !self.mission_choices.is_empty();
     }
 
@@ -3651,13 +3654,33 @@ impl LauncherApp {
         if won && self.td_completed.iter().all(|done| *done) {
             self.td_complete = true;
             self.selecting_mission = false;
+            self.td_recorded = false;
             return;
         }
-        self.selecting_mission = true;
-        if won {
-            if let Some(next) = next_incomplete(&self.td_completed, self.mission_index) {
+        if !won {
+            self.selecting_mission = true;
+            self.td_recorded = false;
+            return;
+        }
+        // Victory: advance to the next incomplete mission. If there is no
+        // such mission, or its file is missing/unreadable, the campaign is
+        // complete (completion screen) instead of panicking on a missing file.
+        if let Some(next) = next_incomplete(&self.td_completed, self.mission_index) {
+            if self
+                .mission_choices
+                .get(next)
+                .map(|choice| choice.path.exists() && Mission::from_file(&choice.path).is_ok())
+                .unwrap_or(false)
+            {
                 self.mission_index = next;
+                self.selecting_mission = true;
+            } else {
+                self.td_complete = true;
+                self.selecting_mission = false;
             }
+        } else {
+            self.td_complete = true;
+            self.selecting_mission = false;
         }
         self.td_recorded = false;
     }
@@ -3699,6 +3722,11 @@ impl LauncherApp {
     fn load_mission_dir(&mut self, dir: &Path) -> Result<usize> {
         self.mission_dir = Some(dir.to_path_buf());
         self.mission_choices.clear();
+        // A fresh mission directory starts a new campaign: drop any stale
+        // carry-over so it cannot be applied to the first mission twice.
+        self.td_carryover = None;
+        let carryover_path = self.td_progress_path.with_file_name("td-carryover.bin");
+        let _ = std::fs::remove_file(&carryover_path);
         let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
             .with_context(|| format!("failed to read mission directory {}", dir.display()))?
             .flatten()
@@ -3775,17 +3803,43 @@ impl LauncherApp {
         let Some(choice) = self.mission_choices.get(self.mission_index).cloned() else {
             return Ok(false);
         };
-        let path = choice.path;
-        self.game
-            .load_mission(&path)
-            .with_context(|| format!("failed to load mission {}", path.display()))?;
+        let path = choice.path.clone();
+        if !path.exists() {
+            // Missing mission file: finish the campaign on the completion
+            // screen instead of panicking.
+            self.td_complete = true;
+            self.selecting_mission = false;
+            return Ok(false);
+        }
+        if let Err(error) = self.game.load_mission(&path) {
+            tracing::warn!(path = %path.display(), %error, "failed to load mission");
+            self.td_complete = true;
+            self.selecting_mission = false;
+            return Ok(false);
+        }
         self.selecting_mission = false;
         self.selected_building = None;
         self.td_recorded = false;
+        // Load a carry-over persisted by the previous mission when the
+        // in-memory one is gone (e.g. after a restart), exactly once.
+        if self.td_carryover.is_none() {
+            let carryover_path = self.td_progress_path.with_file_name("td-carryover.bin");
+            if carryover_path.exists() {
+                match Carryover::load_from_file(&carryover_path) {
+                    Ok(loaded) => self.td_carryover = Some(loaded),
+                    Err(error) => {
+                        tracing::warn!(path = %carryover_path.display(), %error, "invalid carry-over; skipping");
+                        let _ = std::fs::remove_file(&carryover_path);
+                    }
+                }
+            }
+        }
         // Apply the previous mission's carry-over once, after the scenario
         // has set its default starting forces.
         if let Some(carryover) = self.td_carryover.take() {
             carryover.apply_to_game(&mut self.game);
+            let carryover_path = self.td_progress_path.with_file_name("td-carryover.bin");
+            let _ = std::fs::remove_file(&carryover_path);
         }
         self.td_briefing_open =
             !self.game.mission.briefing.is_empty() || !self.game.mission.objectives.is_empty();
@@ -11397,9 +11451,8 @@ mod tests {
         // Send hook: the joiner's local flag goes out to its known peers.
         join.ready_tracker.set_expected(2);
         join.send_ready(true);
-        assert_eq!(
+        assert!(
             join.ready_tracker.is_ready("Player1"),
-            true,
             "the send hook records the local flag"
         );
 
@@ -11502,7 +11555,7 @@ mod tests {
         assert!(fallback.used_fallback());
         assert_eq!(fallback.listings.len(), 1);
         assert_eq!(fallback.listings[0].address, "10.0.0.5:47890");
-        assert!(fallback.has_directory_rows() == false);
+        assert!(!fallback.has_directory_rows());
     }
 
     #[test]
