@@ -437,3 +437,64 @@ impl Default for House {
         Self::new(ClassId::House, "Default".to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cnc_core::ClassId;
+    use cnc_core::Fixed16_16;
+    use cnc_core::FloatBias;
+
+    #[test]
+    fn handicap_alters_economy() {
+        let h_easy =
+            House::new(ClassId::House, "Easy".to_string()).with_handicap(FloatBias::from_f32(0.75));
+        let h_normal =
+            House::new(ClassId::House, "Normal".to_string()).with_handicap(FloatBias::ZERO);
+        let cost = 200;
+        let time = Fixed16_16::from_int(120);
+        let cost_easy = h_easy.handicap_cost(cost);
+        let time_easy = h_easy.handicap_time(time);
+        let cost_normal = h_normal.handicap_cost(cost);
+        let time_normal = h_normal.handicap_time(time);
+        assert_eq!(cost_normal, cost);
+        assert_eq!(time_normal, time);
+        let expected_cost = ((cost as f32) * 0.75).round() as i32;
+        assert_eq!(cost_easy, expected_cost);
+        assert!((time_easy.to_f32() - time.to_f32() * 0.75).abs() < 1e-3);
+    }
+
+    #[test]
+    fn credit_tick_rolls_up_gradually() {
+        let mut h = House::new(ClassId::House, "G".to_string());
+        h.credits = 1000;
+        h.credit_display = 0;
+        h.credit_countdown = 0;
+        let mut steps = 0;
+        while h.credit_display < h.available_money() && steps < 10000 {
+            h.tick_credits();
+            steps += 1;
+        }
+        assert_eq!(h.credit_display, h.available_money());
+        let mut h2 = House::new(ClassId::House, "G".to_string());
+        h2.credits = 1000;
+        h2.credit_display = 0;
+        h2.tick_credits();
+        assert!(h2.credit_display > 0 && h2.credit_display < 1000);
+    }
+
+    #[test]
+    fn ally_event_sets_both_houses() {
+        let mut game = crate::game::Game::new("t", 10, 10);
+        game.setup_demo();
+        assert!(game.houses.len() >= 2);
+        let a = 0u8;
+        let b = 1u8;
+        let ok = game.ally_houses(a, b);
+        assert!(ok);
+        assert!(game.houses[a as usize].is_ally(b));
+        assert!(game.houses[b as usize].is_ally(a));
+        let mut h = House::new(ClassId::House, "X".to_string());
+        assert!(!h.is_ally(5));
+    }
+}
