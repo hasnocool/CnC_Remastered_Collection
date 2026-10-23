@@ -236,15 +236,22 @@ fn demux_inner(bytes: &[u8], strict: bool) -> Result<Vqa, VqaError> {
     let mut chunks = Vec::new();
     let mut offset = FORM_PREFIX_LEN;
     while offset + 8 <= bytes.len() {
-        let tag: [u8; 4] = bytes[offset..offset + 4]
-            .try_into()
-            .ok()
-            .unwrap_or_default();
-        let size = u32::from_le_bytes(
-            bytes[offset + 4..offset + 8]
-                .try_into()
-                .expect("8 bytes sliced"),
-        ) as usize;
+        // The loop condition guarantees at least 8 bytes remain, so these
+        // slices are always exactly the right length; read them directly
+        // instead of going through `try_into`/`expect` (no unwrap in the
+        // library path).
+        let tag: [u8; 4] = [
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ];
+        let size = u32::from_le_bytes([
+            bytes[offset + 4],
+            bytes[offset + 5],
+            bytes[offset + 6],
+            bytes[offset + 7],
+        ]) as usize;
         let data_start = offset + 8;
         if data_start + size > bytes.len() {
             return Err(VqaError::ChunkOverrun { tag });
@@ -256,8 +263,7 @@ fn demux_inner(bytes: &[u8], strict: bool) -> Result<Vqa, VqaError> {
                 if data.len() < VQHD_LEN {
                     return Err(VqaError::BadHeader(data.len(), VQHD_LEN));
                 }
-                let le =
-                    |at: usize| u16::from_le_bytes(data[at..at + 2].try_into().expect("2 bytes"));
+                let le = |at: usize| u16::from_le_bytes([data[at], data[at + 1]]);
                 header = Some(VqaHeader {
                     version: le(0),
                     flags: le(2),
@@ -832,5 +838,49 @@ mod tests {
         // The lenient demuxer keeps the chunk instead of failing.
         let lenient = demux(&bytes).expect("lenient demux");
         assert!(matches!(lenient.chunks[0], VqaChunk::Other { .. }));
+    }
+
+    #[test]
+    fn malformed_inputs_return_typed_errors_not_panics() {
+        // Empty / truncated container.
+        assert!(matches!(demux(&[]), Err(VqaError::TooShort)));
+        assert!(matches!(demux(b"FORM"), Err(VqaError::TooShort)));
+        // Chunk whose length field lies (overrun).
+        let mut bytes = synthetic_vqa();
+        // Corrupt the FORM size to 0 so the walk sees a truncated container.
+        bytes[4..8].copy_from_slice(&0u32.to_be_bytes());
+        let _ = demux(&bytes);
+        // Unknown chunk id (strict).
+        let mut bytes = synthetic_vqa();
+        bytes[28..32].copy_from_slice(b"ZZZZ");
+        let _ = demux_strict(&bytes);
+        // SND header with sample_rate 0.
+        let mut snd = Vec::new();
+        snd.extend_from_slice(&0u16.to_le_bytes());
+        snd.extend_from_slice(&1u16.to_le_bytes());
+        snd.extend_from_slice(&0u32.to_le_bytes());
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"FORM");
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes.extend_from_slice(b"WVQA");
+        bytes.extend_from_slice(&chunk(&TAG_HEADER, &[1, 0, 0, 0, 0, 0, 2, 0, 2, 0, 3, 0]));
+        bytes.extend_from_slice(&chunk(&TAG_AUDIO_ADPCM_MONO, &snd));
+        let total = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&total.to_be_bytes());
+        assert!(matches!(demux(&bytes), Err(VqaError::BadAudioSampleRate)));
+        // SND header with channels 3.
+        let mut snd = Vec::new();
+        snd.extend_from_slice(&22050u16.to_le_bytes());
+        snd.extend_from_slice(&3u16.to_le_bytes());
+        snd.extend_from_slice(&0u32.to_le_bytes());
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"FORM");
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes.extend_from_slice(b"WVQA");
+        bytes.extend_from_slice(&chunk(&TAG_HEADER, &[1, 0, 0, 0, 0, 0, 2, 0, 2, 0, 3, 0]));
+        bytes.extend_from_slice(&chunk(&TAG_AUDIO_ADPCM_MONO, &snd));
+        let total = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&total.to_be_bytes());
+        assert!(matches!(demux(&bytes), Err(VqaError::BadAudioChannels(3))));
     }
 }
