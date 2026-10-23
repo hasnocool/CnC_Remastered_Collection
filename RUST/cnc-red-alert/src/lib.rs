@@ -4,14 +4,12 @@
 //! keeps its own data model: two factions, five countries, naval and air
 //! branches, country superweapons and infiltration.
 
-pub mod aircraft;
 pub mod events;
 pub mod game;
 pub mod gapgen;
 pub mod house;
 pub mod map;
 pub mod mcv;
-pub mod naval;
 pub mod original_scenario;
 pub mod pathfind;
 pub mod render;
@@ -23,17 +21,16 @@ pub mod spy;
 pub mod superweapon;
 pub mod tesla;
 
-pub use aircraft::{AIRFIELD_CAPACITY, DEFAULT_AMMO, REARM_SECONDS};
 pub use events::{names as event_names, OutcomeKind as EventOutcomeKind, SuperweaponKind};
 pub use game::{
     armor_for, damage_vs_armor, unit_build_time, AiCommander, ArmorClass, BuildError, Game,
     GameCommand, GameStatus, GameStructure, GameUnit, ObjectiveState, RunningTrigger,
-    ScenarioOutcome, Shot, TargetRef, UnitRole, WeaponSpec,
+    ScenarioOutcome, Shot, TargetRef, UnitRole, WeaponSpec, AIRFIELD_CAPACITY, AIR_MAX_AMMO,
+    REARM_INTERVAL, SUB_TORPEDOES,
 };
 pub use gapgen::GapGenerator;
 pub use house::{Country, Faction, House, ProductionItem};
 pub use map::{Map, Terrain, TILE_SIZE};
-pub use naval::{SHIP_SPEED_PX_PER_SEC, SUB_SPEED_PX_PER_SEC, SUB_TORPEDOES};
 pub use pathfind::{find_path, MoveClass};
 pub use render::{entity_asset, render_entity};
 pub use rng::{SimRng, DEFAULT_SEED};
@@ -42,7 +39,6 @@ pub use scenario_mpr::{build_game as build_game_from_original, load_mpr, load_mp
 pub use spy::{InfiltrationEffect, InfiltrationTarget, Spy, Thief};
 pub use superweapon::{ArmoredUnit, Chronosphere, IronCurtain, Superweapon, SuperweaponError, GPS};
 pub use tesla::{TeslaBolt, TeslaCoil};
-
 #[cfg(test)]
 mod integration_tests {
     use super::*;

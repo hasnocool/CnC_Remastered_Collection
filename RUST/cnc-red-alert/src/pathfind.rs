@@ -1,8 +1,8 @@
 //! Cell-grid A* pathfinding for Red Alert ground, naval and air units.
 //!
 //! Movement classes select the passability rule: ground units need land,
-//! naval units need water and aircraft ignore terrain. The search itself is
-//! the classic 8-direction A* used by the Westwood engines.
+//! naval units need water, amphibious units traverse both, and aircraft ignore terrain.
+//! The search itself is the classic 8-direction A* used by the Westwood engines.
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
@@ -31,6 +31,7 @@ pub enum MoveClass {
     Ground,
     Naval,
     Air,
+    Amphibious,
 }
 
 impl MoveClass {
@@ -39,6 +40,7 @@ impl MoveClass {
             MoveClass::Ground => map.is_land(cell),
             MoveClass::Naval => map.is_water(cell),
             MoveClass::Air => map.in_bounds(cell),
+            MoveClass::Amphibious => map.is_land(cell) || map.is_water(cell),
         }
     }
 
@@ -47,6 +49,7 @@ impl MoveClass {
             MoveClass::Ground => "ground",
             MoveClass::Naval => "naval",
             MoveClass::Air => "air",
+            MoveClass::Amphibious => "amphibious",
         }
     }
 }
@@ -86,14 +89,15 @@ fn heuristic(x: i32, y: i32, goal_x: i32, goal_y: i32) -> i32 {
 ///
 /// Returns the cells after the start cell (the goal is last), or None when
 /// the goal is unreachable. Cells in the blocked slice are treated as occupied
-/// terrain for ground and naval units; aircraft ignore them.
+/// terrain for ground and naval units; aircraft ignore them. Threat costs are
+/// added to the path cost to prefer safer routes (Red Alert threat avoidance).
 pub fn find_path(
     map: &Map,
     class: MoveClass,
     blocked: &[Vec2i],
     start: Vec2i,
     goal: Vec2i,
-    max_nodes: usize,
+    threat_cost: &HashSet<(i32, i32)>,
 ) -> Option<Vec<Vec2i>> {
     if !map.in_bounds(start) || !map.in_bounds(goal) {
         return None;
@@ -133,8 +137,6 @@ pub fn find_path(
         x: start.x,
         y: start.y,
     });
-
-    let mut visited = 0usize;
     while let Some(State { x, y, g, .. }) = open.pop() {
         let current = index(x, y);
         if closed[current] {
@@ -157,10 +159,7 @@ pub fn find_path(
             return Some(path);
         }
         closed[current] = true;
-        visited += 1;
-        if visited > max_nodes {
-            return None;
-        }
+        // No node cap - search exhaustively (max_nodes removed per parity-100 task 26)
 
         for (dx, dy) in DIRS {
             let nx = x + dx;
@@ -181,7 +180,13 @@ pub fn find_path(
             } else {
                 COST_ORTHOGONAL
             };
-            let tentative = g + step;
+            // Add threat cost if this cell is in a danger zone
+            let threat = if threat_cost.contains(&(nx, ny)) {
+                50 // Threat penalty - makes pathfinder prefer safer routes
+            } else {
+                0
+            };
+            let tentative = g + step + threat;
             if tentative < g_score[next_index] {
                 g_score[next_index] = tentative;
                 came_from[next_index] = current as i32;
@@ -206,7 +211,8 @@ mod tests {
         let map = Map::new(24, 24);
         let start = Vec2i::new(4, 4);
         let goal = Vec2i::new(8, 10);
-        let path = find_path(&map, MoveClass::Ground, &[], start, goal, 10_000).unwrap();
+        let threat = HashSet::new();
+        let path = find_path(&map, MoveClass::Ground, &[], start, goal, &threat).unwrap();
         assert_eq!(path.last().copied(), Some(goal));
         assert!(path.iter().all(|cell| map.is_land(*cell)));
     }
@@ -216,14 +222,15 @@ mod tests {
         let map = Map::new(24, 24);
         let start = Vec2i::new(12, 2);
         let goal = Vec2i::new(13, 20);
-        let path = find_path(&map, MoveClass::Naval, &[], start, goal, 10_000).unwrap();
+        let threat = HashSet::new();
+        let path = find_path(&map, MoveClass::Naval, &[], start, goal, &threat).unwrap();
         assert_eq!(path.last().copied(), Some(goal));
         assert!(path.iter().all(|cell| map.is_water(*cell)));
 
         let start = Vec2i::new(4, 4);
         let goal = Vec2i::new(12, 4);
         assert!(
-            find_path(&map, MoveClass::Ground, &[], start, goal, 10_000).is_none(),
+            find_path(&map, MoveClass::Ground, &[], start, goal, &threat).is_none(),
             "ground path must not end in the river"
         );
     }
@@ -234,7 +241,8 @@ mod tests {
         let start = Vec2i::new(4, 4);
         let goal = Vec2i::new(20, 20);
         let blocked = vec![Vec2i::new(12, 12)];
-        let path = find_path(&map, MoveClass::Air, &blocked, start, goal, 10_000).unwrap();
+        let threat = HashSet::new();
+        let path = find_path(&map, MoveClass::Air, &blocked, start, goal, &threat).unwrap();
         assert_eq!(path.last().copied(), Some(goal));
         assert!(path.contains(&Vec2i::new(12, 12)));
     }
@@ -245,8 +253,27 @@ mod tests {
         let start = Vec2i::new(3, 3);
         let goal = Vec2i::new(6, 3);
         let blocked = vec![Vec2i::new(5, 2), Vec2i::new(5, 3), Vec2i::new(5, 4)];
-        let path = find_path(&map, MoveClass::Ground, &blocked, start, goal, 10_000).unwrap();
+        let threat = HashSet::new();
+        let path = find_path(&map, MoveClass::Ground, &blocked, start, goal, &threat).unwrap();
         assert!(!path.contains(&Vec2i::new(5, 3)));
         assert_eq!(path.last().copied(), Some(goal));
+    }
+
+    #[test]
+    fn amphibious_crosses_land_and_water_in_one_path() {
+        let map = Map::new(24, 24);
+        // Start on land, goal in water - amphibious should cross the shore
+        let start = Vec2i::new(4, 4);
+        let goal = Vec2i::new(13, 20);
+        let threat = HashSet::new();
+        let path = find_path(&map, MoveClass::Amphibious, &[], start, goal, &threat).unwrap();
+        assert_eq!(path.last().copied(), Some(goal));
+        // Path should contain both land and water cells
+        let has_land = path.iter().any(|cell| map.is_land(*cell));
+        let has_water = path.iter().any(|cell| map.is_water(*cell));
+        assert!(
+            has_land && has_water,
+            "amphibious path must cross both land and water"
+        );
     }
 }

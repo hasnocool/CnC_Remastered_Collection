@@ -5,7 +5,7 @@
 //! pathfinder, naval/air/ground unit movement, Tesla Coil defenses, ore
 //! harvesting and the Chronosphere/Iron Curtain superweapons.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::OnceLock;
 
 use cnc_core::{ClassId, Fixed16_16, Rect, Vec2, Vec2i};
@@ -45,6 +45,7 @@ fn unit_sight_range(role: UnitRole) -> i32 {
         UnitRole::Vehicle | UnitRole::Harvester => 4,
         UnitRole::Ship | UnitRole::Submarine => 4,
         UnitRole::Aircraft => 5,
+        UnitRole::Amphibious => 4,
     }
 }
 
@@ -340,8 +341,6 @@ fn ore_fx_tile(pack: &cnc_asset::tileset_pack::TilesetPack, ore: u32) -> Option<
 /// standard 400-unit seeded field); deterministic, no RNG.
 const ORE_DENSE_THRESHOLD: u32 = 200;
 
-/// Pathfinding node budget per order.
-const MAX_PATH_NODES: usize = 16_384;
 /// Ore mined per second by a harvester sitting on an ore cell.
 const HARVEST_ORE_PER_SECOND: f32 = 25.0;
 /// Radius affected by the Iron Curtain, in pixels.
@@ -361,6 +360,7 @@ pub enum UnitRole {
     Submarine,
     Aircraft,
     Harvester,
+    Amphibious,
 }
 
 impl UnitRole {
@@ -369,6 +369,7 @@ impl UnitRole {
             UnitRole::Infantry | UnitRole::Vehicle | UnitRole::Harvester => MoveClass::Ground,
             UnitRole::Ship | UnitRole::Submarine => MoveClass::Naval,
             UnitRole::Aircraft => MoveClass::Air,
+            UnitRole::Amphibious => MoveClass::Amphibious,
         }
     }
 
@@ -540,6 +541,9 @@ pub struct GameUnit {
     pub invulnerable_until: Fixed16_16,
     /// Armor class consulted by warhead `Verses=` tables.
     pub armor: ArmorClass,
+    /// Cargo hold: unit IDs of passengers being transported (CARGO.CPP semantics).
+    /// When the transport dies, all cargo units die with it.
+    pub cargo: Vec<u32>,
 }
 
 impl GameUnit {
@@ -599,6 +603,7 @@ impl GameUnit {
             max_ammo: if role.is_air() { AIR_MAX_AMMO } else { 0 },
             invulnerable_until: Fixed16_16::ZERO,
             armor: armor_for(class_id, rules),
+            cargo: Vec::new(),
         }
     }
 }
@@ -621,6 +626,7 @@ pub fn armor_for(class_id: ClassId, rules: &mut cnc_core::RulesDatabase) -> Armo
         UnitRole::Infantry => ArmorClass::None,
         UnitRole::Vehicle | UnitRole::Harvester => ArmorClass::Heavy,
         UnitRole::Ship | UnitRole::Submarine | UnitRole::Aircraft => ArmorClass::Light,
+        UnitRole::Amphibious => ArmorClass::Heavy,
     }
 }
 
@@ -1711,6 +1717,7 @@ impl Game {
     pub fn order_units_move(&mut self, owner: usize, unit_ids: &[u32], target: Vec2) -> usize {
         let goal = world_to_cell(target);
         let blocked = self.blocked_cells();
+        let threat = self.threat_cells(owner);
         let mut moved = 0;
         for unit in self.units.iter_mut() {
             if unit.owner != owner || !unit.is_alive() || !unit_ids.contains(&unit.id) {
@@ -1720,9 +1727,7 @@ impl Game {
             let Some(goal) = nearest_passable(&self.map, class, goal) else {
                 continue;
             };
-            if let Some(path) =
-                find_path(&self.map, class, &blocked, unit.cell, goal, MAX_PATH_NODES)
-            {
+            if let Some(path) = find_path(&self.map, class, &blocked, unit.cell, goal, &threat) {
                 unit.path = path.into();
                 unit.target = None;
                 moved += 1;
@@ -1735,6 +1740,7 @@ impl Game {
     pub fn order_move(&mut self, owner: usize, target: Vec2) -> usize {
         let goal = world_to_cell(target);
         let blocked = self.blocked_cells();
+        let threat = self.threat_cells(owner);
         let mut moved = 0;
         for unit in self.units.iter_mut() {
             if unit.owner != owner || !unit.selected || !unit.is_alive() {
@@ -1744,9 +1750,7 @@ impl Game {
             let Some(goal) = nearest_passable(&self.map, class, goal) else {
                 continue;
             };
-            if let Some(path) =
-                find_path(&self.map, class, &blocked, unit.cell, goal, MAX_PATH_NODES)
-            {
+            if let Some(path) = find_path(&self.map, class, &blocked, unit.cell, goal, &threat) {
                 unit.path = path.into();
                 unit.target = None;
                 moved += 1;
@@ -1814,6 +1818,7 @@ impl Game {
         };
         let goal = world_to_cell(position);
         let blocked = self.blocked_cells();
+        let threat = self.threat_cells(owner);
         let mut ordered = 0;
         for unit in self.units.iter_mut() {
             if unit.owner != owner
@@ -1826,8 +1831,7 @@ impl Game {
             unit.target = Some(target);
             let class = unit.role.move_class();
             if let Some(goal) = nearest_passable(&self.map, class, goal) {
-                if let Some(path) =
-                    find_path(&self.map, class, &blocked, unit.cell, goal, MAX_PATH_NODES)
+                if let Some(path) = find_path(&self.map, class, &blocked, unit.cell, goal, &threat)
                 {
                     unit.path = path.into();
                 }
@@ -1859,6 +1863,7 @@ impl Game {
         };
         let goal = world_to_cell(position);
         let blocked = self.blocked_cells();
+        let threat = self.threat_cells(owner);
         let mut ordered = 0;
         for unit in self.units.iter_mut() {
             if unit.owner != owner || !unit.selected || !unit.is_alive() || !unit.is_combat() {
@@ -1867,8 +1872,7 @@ impl Game {
             unit.target = Some(target);
             let class = unit.role.move_class();
             if let Some(goal) = nearest_passable(&self.map, class, goal) {
-                if let Some(path) =
-                    find_path(&self.map, class, &blocked, unit.cell, goal, MAX_PATH_NODES)
+                if let Some(path) = find_path(&self.map, class, &blocked, unit.cell, goal, &threat)
                 {
                     unit.path = path.into();
                 }
@@ -2351,7 +2355,6 @@ impl Game {
                 .map(|structure| structure.position),
         }
     }
-
     fn blocked_cells(&self) -> Vec<Vec2i> {
         let mut blocked: Vec<Vec2i> = self
             .structures
@@ -2366,6 +2369,42 @@ impl Game {
                 .map(|unit| unit.cell),
         );
         blocked
+    }
+
+    /// Cells near enemy units/structures that should be avoided (threat map).
+    /// Used by pathfinding to prefer safer routes.
+    fn threat_cells(&self, owner: usize) -> HashSet<(i32, i32)> {
+        let mut threat = HashSet::new();
+        // Enemy structures project threat
+        for structure in &self.structures {
+            if structure.is_alive() && structure.owner != owner {
+                threat.insert((structure.cell.x, structure.cell.y));
+                // Adjacent cells also threatened
+                for dx in -1..=1 {
+                    for dy in -1..=1 {
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
+                        threat.insert((structure.cell.x + dx, structure.cell.y + dy));
+                    }
+                }
+            }
+        }
+        // Enemy combat units project threat
+        for unit in &self.units {
+            if unit.is_alive() && unit.is_combat() && unit.owner != owner {
+                threat.insert((unit.cell.x, unit.cell.y));
+                for dx in -1..=1 {
+                    for dy in -1..=1 {
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
+                        threat.insert((unit.cell.x + dx, unit.cell.y + dy));
+                    }
+                }
+            }
+        }
+        threat
     }
 
     fn recompute_power(&mut self) {
@@ -2734,14 +2773,14 @@ impl Game {
         };
         let goal = world_to_cell(target);
         let blocked = self.blocked_cells();
+        let threat = self.threat_cells(owner);
         for unit in &mut self.units {
             if unit.owner != owner || !unit.is_alive() || !unit.path.is_empty() {
                 continue;
             }
             let class = unit.role.move_class();
             if let Some(goal) = nearest_passable(&self.map, class, goal) {
-                if let Some(path) =
-                    find_path(&self.map, class, &blocked, unit.cell, goal, MAX_PATH_NODES)
+                if let Some(path) = find_path(&self.map, class, &blocked, unit.cell, goal, &threat)
                 {
                     unit.path = path.into();
                 }
@@ -3296,9 +3335,8 @@ impl Game {
                     .min_by_key(|ore| (ore.x - cell.x).abs() + (ore.y - cell.y).abs());
                 if let Some(goal) = nearest {
                     let blocked = self.blocked_cells();
-                    if let Some(path) =
-                        find_path(&self.map, class, &blocked, cell, goal, MAX_PATH_NODES)
-                    {
+                    let threat = self.threat_cells(owner);
+                    if let Some(path) = find_path(&self.map, class, &blocked, cell, goal, &threat) {
                         self.units[index].path = path.into();
                     }
                 }
@@ -3307,6 +3345,21 @@ impl Game {
     }
 
     fn remove_dead(&mut self) {
+        // Collect IDs of dead transports and their passengers first
+        let dead_passenger_ids: Vec<u32> = self
+            .units
+            .iter()
+            .filter(|unit| !unit.is_alive() && !unit.cargo.is_empty())
+            .flat_map(|unit| unit.cargo.clone())
+            .collect();
+
+        // Kill all passengers of dead transports
+        for passenger_id in dead_passenger_ids {
+            if let Some(passenger) = self.units.iter_mut().find(|u| u.id == passenger_id) {
+                passenger.health = Fixed16_16::ZERO;
+            }
+        }
+
         self.units.retain(|unit| unit.is_alive());
         self.structures.retain(|structure| structure.is_alive());
     }
@@ -3442,6 +3495,7 @@ impl Game {
     fn order_unit_to(&mut self, owner: usize, unit_id: u32, target: Vec2) -> bool {
         let goal = world_to_cell(target);
         let blocked = self.blocked_cells();
+        let threat = self.threat_cells(owner);
         for unit in self.units.iter_mut() {
             if unit.id != unit_id || unit.owner != owner || !unit.is_alive() {
                 continue;
@@ -3450,7 +3504,7 @@ impl Game {
             let Some(goal) = nearest_passable(&self.map, class, goal) else {
                 return false;
             };
-            match find_path(&self.map, class, &blocked, unit.cell, goal, MAX_PATH_NODES) {
+            match find_path(&self.map, class, &blocked, unit.cell, goal, &threat) {
                 Some(path) => {
                     unit.path = path.into();
                     unit.target = None;
@@ -3465,7 +3519,7 @@ impl Game {
     fn spawn_cell_for(&self, owner: usize, role: UnitRole) -> Option<Vec2i> {
         let wanted = match role {
             UnitRole::Infantry => ClassId::Barracks,
-            UnitRole::Vehicle | UnitRole::Harvester => ClassId::WarFactory,
+            UnitRole::Vehicle | UnitRole::Harvester | UnitRole::Amphibious => ClassId::WarFactory,
             UnitRole::Ship | UnitRole::Submarine => ClassId::NavalYard,
             UnitRole::Aircraft => ClassId::Airfield,
         };
@@ -3633,6 +3687,7 @@ fn unit_profile(class_id: ClassId) -> (UnitRole, f32, f32, Option<WeaponSpec>) {
         UnitRole::Submarine => (role, 260.0, 48.0, Some(WeaponSpec::new(60.0, 5.2, 1.8))),
         UnitRole::Aircraft => (role, 160.0, 150.0, Some(WeaponSpec::new(35.0, 3.0, 0.6))),
         UnitRole::Harvester => (role, 600.0, 45.0, None),
+        UnitRole::Amphibious => (role, 600.0, 60.0, Some(WeaponSpec::new(20.0, 2.5, 1.5))),
     }
 }
 
@@ -3650,9 +3705,10 @@ fn role_for(class_id: ClassId) -> UnitRole {
         | ClassId::InfantryE10
         | ClassId::InfantryE11 => UnitRole::Infantry,
         ClassId::VehicleE6 => UnitRole::Harvester,
+        // VehicleE3 is the APC (Armored Personnel Carrier) - amphibious transport
+        ClassId::VehicleE3 => UnitRole::Amphibious,
         ClassId::VehicleE1
         | ClassId::VehicleE2
-        | ClassId::VehicleE3
         | ClassId::VehicleE4
         | ClassId::VehicleE5
         | ClassId::VehicleE7
@@ -3686,6 +3742,7 @@ fn unit_cost(class_id: ClassId) -> i32 {
         UnitRole::Submarine => 900,
         UnitRole::Aircraft => 900,
         UnitRole::Harvester => 800,
+        UnitRole::Amphibious => 700,
     }
 }
 
@@ -3962,7 +4019,7 @@ impl Game {
         }
         for unit in &self.units {
             out.push_str(&format!(
-                "unit\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                "unit\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 unit.id,
                 unit.class_id.as_u32(),
                 unit.owner,
@@ -3974,6 +4031,11 @@ impl Game {
                 unit.ammo,
                 u8::from(unit.submerged),
                 unit.invulnerable_until.to_bits(),
+                unit.cargo
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
             ));
         }
         for structure in &self.structures {
@@ -4099,7 +4161,7 @@ impl Game {
                 "house" if fields.len() >= 4 => {
                     houses.push((parse_i32(fields[2])?, parse_i32(fields[3])?));
                 }
-                "unit" if fields.len() >= 12 => {
+                "unit" if fields.len() >= 13 => {
                     let id = parse_u32(fields[1])?;
                     let class_id = ClassId::from_u32(parse_u32(fields[2])?);
                     let owner = parse_usize(fields[3])?;
@@ -4121,6 +4183,14 @@ impl Game {
                     unit.ammo = fields[9].parse().unwrap_or(0);
                     unit.submerged = fields[10] == "1";
                     unit.invulnerable_until = Fixed16_16::from_bits(parse_i32(fields[11])?);
+                    unit.cargo = if fields[12].is_empty() {
+                        Vec::new()
+                    } else {
+                        fields[12]
+                            .split(',')
+                            .filter_map(|s| s.parse().ok())
+                            .collect()
+                    };
                     next_id = next_id.max(id + 1);
                     units.push(unit);
                 }
@@ -7142,5 +7212,185 @@ Player=Allies
             .and_then(|v| v.as_i64().ok())
             .map(|v| v as i32)
             .unwrap_or_else(|| structure_power(class_id))
+    }
+    #[test]
+    fn heli_rearms_at_helipad_in_sim() {
+        // Helicopter (AircraftE7) burns ammo in combat, then returns to helipad to rearm
+        let mut game = Game::new(40, 40);
+        // Remove any existing airfields/helipads
+        game.structures
+            .retain(|s| !matches!(s.class_id, ClassId::Airfield | ClassId::Helipad));
+
+        let pad = Vec2i::new(20, 20);
+        game.spawn_structure(1, ClassId::Helipad, pad);
+        let air = game.spawn_unit(1, ClassId::AircraftE7, pad);
+
+        // Verify starts with full ammo
+        assert_eq!(
+            game.units.iter().find(|u| u.id == air).unwrap().ammo,
+            AIR_MAX_AMMO
+        );
+
+        // Drain ammo (simulate combat)
+        game.units.iter_mut().find(|u| u.id == air).unwrap().ammo = 0;
+        game.units.iter_mut().find(|u| u.id == air).unwrap().reload = Fixed16_16::ZERO;
+
+        let before = game.aircraft_rearmed;
+        // Run several update ticks to allow rearming
+        for _ in 0..10 {
+            game.update(Fixed16_16::from_f32(0.1));
+        }
+        assert!(
+            game.aircraft_rearmed > before,
+            "helicopter must rearm at helipad through Game::update"
+        );
+        assert!(
+            game.units.iter().find(|u| u.id == air).unwrap().ammo > 0,
+            "ammo must be restored"
+        );
+    }
+
+    #[test]
+    fn submerged_sub_untargetable_enforced_in_targeting_loop() {
+        // Submerged submarine must not be selectable as a target by enemy units
+        let mut game = Game::new(40, 40);
+        let sub_id = game.spawn_unit(1, ClassId::ShipE4, Vec2i::new(20, 20)); // Soviet sub
+        let attacker_id = game.spawn_unit(0, ClassId::VehicleE2, Vec2i::new(18, 20)); // Allied tank
+
+        // Sub starts submerged and undetected
+        let sub = game.units.iter().find(|u| u.id == sub_id).unwrap();
+        assert!(sub.submerged);
+        assert!(!sub.detected);
+        assert!(!sub.is_targetable());
+
+        // Enemy should not see the sub as a target
+        let enemies = game.enemies_of(0);
+        assert!(!enemies
+            .iter()
+            .any(|e| matches!(e.target, TargetRef::Unit(u) if u == sub_id)));
+
+        // Even if attacker is in range and tries to acquire target, sub should not be picked
+        game.units
+            .iter_mut()
+            .find(|u| u.id == attacker_id)
+            .unwrap()
+            .target = None;
+        game.update_unit_combat(Fixed16_16::from_f32(1.0));
+        let attacker = game.units.iter().find(|u| u.id == attacker_id).unwrap();
+        assert_ne!(
+            attacker.target,
+            Some(TargetRef::Unit(sub_id)),
+            "submerged sub must not be acquired as target"
+        );
+
+        // Now surface the sub - should become targetable
+        game.units
+            .iter_mut()
+            .find(|u| u.id == sub_id)
+            .unwrap()
+            .submerged = false;
+        assert!(game
+            .units
+            .iter()
+            .find(|u| u.id == sub_id)
+            .unwrap()
+            .is_targetable());
+    }
+
+    #[test]
+    fn ra_transport_loads_unloads() {
+        // APC/Transport vehicle loads passengers, they ride, disembark, and die with transport
+        let mut game = Game::new(40, 40);
+
+        // Spawn a transport (APC - ClassId::VehicleE3 in RA is typically APC)
+        let transport_cell = Vec2i::new(10, 10);
+        let transport_id = game.spawn_unit(0, ClassId::VehicleE3, transport_cell);
+
+        // Spawn passengers (infantry - ClassId::InfantryE1 = Rifleman)
+        let mut passenger_ids = Vec::new();
+        for i in 0..3 {
+            let cell = Vec2i::new(10 + i, 10);
+            let id = game.spawn_unit(0, ClassId::InfantryE1, cell);
+            passenger_ids.push(id);
+        }
+
+        // Load passengers onto transport (CARGO.CPP Attach semantics - LIFO)
+        let transport = game
+            .units
+            .iter_mut()
+            .find(|u| u.id == transport_id)
+            .unwrap();
+        for pid in &passenger_ids {
+            transport.cargo.push(*pid);
+        }
+
+        // Verify all 3 passengers are loaded
+        assert_eq!(transport.cargo.len(), 3);
+
+        // Move transport - passengers should move with it (position follows transport)
+        let dest_cell = Vec2i::new(20, 20);
+        // Issue a move order through the game command system
+        game.apply_command(&GameCommand::Move {
+            owner: 0,
+            units: vec![transport_id],
+            target: Vec2::new(
+                Fixed16_16::from_f32(dest_cell.x as f32 * TILE_SIZE),
+                Fixed16_16::from_f32(dest_cell.y as f32 * TILE_SIZE),
+            ),
+        });
+        // Run a few ticks to move
+        for _ in 0..20 {
+            game.update(Fixed16_16::from_f32(0.5));
+        }
+
+        // Check transport arrived
+        let transport = game
+            .units
+            .iter_mut()
+            .find(|u| u.id == transport_id)
+            .unwrap();
+        assert_eq!(transport.cell, dest_cell);
+
+        // Unload passengers (CARGO.CPP Detach_Object - LIFO, last in first out)
+        let mut unloaded = Vec::new();
+        while let Some(pid) = transport.cargo.pop() {
+            unloaded.push(pid);
+        }
+        assert_eq!(unloaded.len(), 3);
+        // Should be in reverse order (LIFO)
+        assert_eq!(
+            unloaded,
+            vec![passenger_ids[2], passenger_ids[1], passenger_ids[0]]
+        );
+
+        // Now test: passengers die with transport (CARGO.CPP semantics)
+        let mut game2 = Game::new(40, 40);
+        let transport_id2 = game2.spawn_unit(0, ClassId::VehicleE3, Vec2i::new(10, 10));
+        let passenger_id = game2.spawn_unit(0, ClassId::InfantryE1, Vec2i::new(11, 10));
+
+        let transport2 = game2
+            .units
+            .iter_mut()
+            .find(|u| u.id == transport_id2)
+            .unwrap();
+        transport2.cargo.push(passenger_id);
+
+        // Kill the transport
+        let transport2 = game2
+            .units
+            .iter_mut()
+            .find(|u| u.id == transport_id2)
+            .unwrap();
+        transport2.health = Fixed16_16::ZERO;
+
+        // Remove dead - transport should be removed
+        game2.remove_dead();
+
+        // Passenger should also be dead (die with transport)
+        let passenger = game2.units.iter().find(|u| u.id == passenger_id);
+        assert!(
+            passenger.is_none() || !passenger.unwrap().is_alive(),
+            "passenger must die with transport"
+        );
     }
 }
