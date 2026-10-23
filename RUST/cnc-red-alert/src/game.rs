@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use cnc_core::{ClassId, Fixed16_16, Rect, Vec2, Vec2i};
 use cnc_renderer::{Renderer, Sprite};
 
-use crate::house::{Country, Faction, House, ProductionItem};
+use crate::house::{Country, Faction, FactoryType, House, ProductionItem};
 use crate::map::{Map, Terrain, TILE_SIZE};
 use crate::original_scenario::{ObjectKind, OriginalScenario};
 use crate::pathfind::{find_path, MoveClass};
@@ -863,7 +863,7 @@ fn ra_owner_allows(tokens: &[String], allied: bool) -> bool {
 }
 /// One Rules.ini `Prerequisite=` token: NONE/ANY/ALL are always met,
 /// otherwise the token names a structure the house must own.
-fn ra_prerequisite_met(token: &str, owned: &[ClassId]) -> bool {
+pub fn ra_prerequisite_met(token: &str, owned: &[ClassId]) -> bool {
     let token = token.trim();
     if token.is_empty() {
         return true;
@@ -1454,9 +1454,16 @@ impl Game {
     }
 
     /// Cancel the front production item and refund it.
+    /// Note: This cancels from the first non-empty queue (legacy behavior).
     pub fn cancel_production(&mut self, owner: usize) -> Option<i32> {
         let house = self.houses.get_mut(owner)?;
-        let cancelled = house.cancel_front().map(|item| item.cost);
+        // Try each factory queue in order
+        let cancelled = house
+            .cancel_front_in(FactoryType::Barracks)
+            .or_else(|| house.cancel_front_in(FactoryType::WarFactory))
+            .or_else(|| house.cancel_front_in(FactoryType::Shipyard))
+            .or_else(|| house.cancel_front_in(FactoryType::Helipad))
+            .map(|item| item.cost);
         if cancelled.is_some() && owner == self.player_owner {
             // AUDIO.CPP VOX_CANCELED.
             self.eva.speak(cnc_audio::EvaLine::Canceled);
@@ -1663,7 +1670,17 @@ impl Game {
             total_time: House::production_time(seconds),
             cost,
         };
-        house.queue(item)
+        // Determine factory based on unit role
+        let role = role_for(class_id);
+        let factory = match role {
+            UnitRole::Infantry => FactoryType::Barracks,
+            UnitRole::Vehicle | UnitRole::Harvester | UnitRole::Amphibious => {
+                FactoryType::WarFactory
+            }
+            UnitRole::Ship | UnitRole::Submarine => FactoryType::Shipyard,
+            UnitRole::Aircraft => FactoryType::Helipad,
+        };
+        house.queue_in(factory, item).is_ok()
     }
 
     /// Apply a network/lockstep command to this game.
@@ -3012,28 +3029,36 @@ impl Game {
 
     fn update_production(&mut self, delta: Fixed16_16) {
         for owner in 0..self.houses.len() {
-            let completed = self.houses[owner].update_production(delta);
-            if let Some(item) = completed {
-                let role = role_for(item.class_id);
-                if let Some(cell) = self.spawn_cell_for(owner, role) {
-                    self.spawn_unit(owner, item.class_id, cell);
-                }
-                if let Some(source) = self.event_source.as_ref() {
-                    if item.class_id.is_building() {
-                        crate::events::structure_produced(source, owner, item.class_id);
-                    } else {
-                        crate::events::unit_produced(source, owner, item.class_id);
+            // Check each factory queue
+            for factory in [
+                FactoryType::Barracks,
+                FactoryType::WarFactory,
+                FactoryType::Shipyard,
+                FactoryType::Helipad,
+            ] {
+                let completed = self.houses[owner].update_factory(factory, delta);
+                if let Some(item) = completed {
+                    let role = role_for(item.class_id);
+                    if let Some(cell) = self.spawn_cell_for(owner, role) {
+                        self.spawn_unit(owner, item.class_id, cell);
                     }
-                }
-                // AUDIO.CPP VOX_UNIT_READY / VOX_CONSTRUCTION: the player
-                // hears about their own completions.
-                if owner == self.player_owner {
-                    let line = if item.class_id.is_building() {
-                        cnc_audio::EvaLine::ConstructionComplete
-                    } else {
-                        cnc_audio::EvaLine::UnitReady
-                    };
-                    self.eva.speak(line);
+                    if let Some(source) = self.event_source.as_ref() {
+                        if item.class_id.is_building() {
+                            crate::events::structure_produced(source, owner, item.class_id);
+                        } else {
+                            crate::events::unit_produced(source, owner, item.class_id);
+                        }
+                    }
+                    // AUDIO.CPP VOX_UNIT_READY / VOX_CONSTRUCTION: the player
+                    // hears about their own completions.
+                    if owner == self.player_owner {
+                        let line = if item.class_id.is_building() {
+                            cnc_audio::EvaLine::ConstructionComplete
+                        } else {
+                            cnc_audio::EvaLine::UnitReady
+                        };
+                        self.eva.speak(line);
+                    }
                 }
             }
         }
@@ -5195,12 +5220,17 @@ Briefing=Hold the line.\n\
     #[test]
     fn ra_queue_refuses_a_gated_type() {
         let mut game = Game::new(40, 40);
-        game.houses[0].production_queue.clear();
+        // Clear all factory queues
+        game.houses[0].cancel_front_barracks();
+        game.houses[0].cancel_front_war_factory();
+        game.houses[0].cancel_front_shipyard();
+        game.houses[0].cancel_front_helipad();
         let ini = cnc_core::IniFile::parse("[MTNK]\nTechLevel=10\n").expect("ini");
         game.rules = cnc_core::RulesDatabase::from_ini(&ini);
         game.houses[0].tech_level = 1;
         assert!(!game.queue_unit(0, ClassId::VehicleE2, 8));
-        assert!(game.houses[0].production_queue.is_empty());
+        // War factory queue should be empty
+        assert!(game.houses[0].war_factory_queue().is_empty());
     }
     #[test]
     fn ra_rules_cost_overrides_the_builtin_table() {
@@ -5225,7 +5255,7 @@ Briefing=Hold the line.\n\
         let ini = cnc_core::IniFile::parse("[MTNK]\nCost=1234\n").expect("ini");
         game.rules = cnc_core::RulesDatabase::from_ini(&ini);
         game.queue_unit(0, ClassId::VehicleE2, 8);
-        let item = game.houses[0].production_queue.front().expect("queued");
+        let item = game.houses[0].war_factory_queue().front().expect("queued");
         assert_eq!(item.cost, 1234, "the queue charges the rules price");
     }
     #[test]
@@ -5261,7 +5291,11 @@ Briefing=Hold the line.\n\
     fn ra_cancelling_an_empty_queue_is_silent() {
         let mut game = Game::new(40, 40);
         game.player_owner = 0;
-        game.houses[0].production_queue.clear();
+        // Clear all factory queues
+        game.houses[0].cancel_front_barracks();
+        game.houses[0].cancel_front_war_factory();
+        game.houses[0].cancel_front_shipyard();
+        game.houses[0].cancel_front_helipad();
         assert!(game.cancel_production(0).is_none());
         assert_eq!(game.eva.pending(), None);
     }
@@ -6437,7 +6471,11 @@ Player=Allies
             1
         );
         assert_eq!(game.houses[0].credits, before);
-        assert!(game.houses[0].production_queue.is_empty());
+        // Check all factory queues are empty
+        assert!(game.houses[0].barracks_queue().is_empty());
+        assert!(game.houses[0].war_factory_queue().is_empty());
+        assert!(game.houses[0].shipyard_queue().is_empty());
+        assert!(game.houses[0].helipad_queue().is_empty());
         assert_eq!(
             game.apply_command(&GameCommand::CancelProduction { owner: 0 }),
             0,
@@ -6642,16 +6680,16 @@ Player=Allies
     fn network_commands_queue_units() {
         let mut game = Game::new(32, 32);
         let credits = game.houses[0].credits;
-        let before = game.houses[0].production_queue.len();
+        let before = game.houses[0].barracks_queue().len();
         let queued = game.apply_command(&GameCommand::Produce {
             owner: 0,
             class_id: ClassId::InfantryE1,
             seconds: 4,
         });
         assert_eq!(queued, 1);
-        assert_eq!(game.houses[0].production_queue.len(), before + 1);
+        assert_eq!(game.houses[0].barracks_queue().len(), before + 1);
         assert!(game.houses[0].credits < credits, "cost is charged up front");
-        let item = game.houses[0].production_queue.back().unwrap();
+        let item = game.houses[0].barracks_queue().back().unwrap();
         assert_eq!(item.class_id, ClassId::InfantryE1);
         assert_eq!(
             game.apply_command(&GameCommand::Produce {

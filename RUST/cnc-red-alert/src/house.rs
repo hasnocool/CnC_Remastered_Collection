@@ -3,7 +3,7 @@
 //! Red Alert uses the same 16.16 fixed-point economy as Tiberian Dawn but has
 //! two factions and five countries with a unique structure each. This module
 //! models the house-level state that the scenario layer needs: treasury,
-//! power balance, tech level and a production queue with deterministic
+//! power balance, tech level and per-factory production queues with deterministic
 //! completion order.
 
 use cnc_core::{ClassId, Fixed16_16};
@@ -74,6 +74,15 @@ impl Country {
     }
 }
 
+/// Factory type for per-factory production queues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FactoryType {
+    Barracks,
+    WarFactory,
+    Shipyard,
+    Helipad,
+}
+
 /// One queued production item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductionItem {
@@ -82,6 +91,20 @@ pub struct ProductionItem {
     pub total_time: Fixed16_16,
     pub cost: i32,
 }
+
+/// Error when queuing production.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueueError {
+    /// Insufficient credits.
+    InsufficientFunds,
+    /// Prerequisite structure not owned.
+    PrerequisiteMissing(String),
+    /// Factory type not available (not built).
+    FactoryNotAvailable(FactoryType),
+}
+
+/// Silo capacity per silo (RA original: 2000 credits per silo).
+pub const SILO_CAPACITY: i32 = 2000;
 
 /// House state shared by campaign and skirmish games.
 #[derive(Debug, Clone)]
@@ -93,9 +116,15 @@ pub struct House {
     pub credits: i32,
     /// Net power: production minus drain (negative means low power).
     pub power: i32,
-    pub production_queue: VecDeque<ProductionItem>,
+    /// Per-factory production queues.
+    barracks_queue: VecDeque<ProductionItem>,
+    war_factory_queue: VecDeque<ProductionItem>,
+    shipyard_queue: VecDeque<ProductionItem>,
+    helipad_queue: VecDeque<ProductionItem>,
     pub tech_level: u8,
     pub credits_spent: i64,
+    /// Number of silos owned (each adds SILO_CAPACITY to credit storage).
+    silo_count: usize,
 }
 
 impl House {
@@ -107,9 +136,13 @@ impl House {
             country: None,
             credits: 0,
             power: 0,
-            production_queue: VecDeque::new(),
+            barracks_queue: VecDeque::new(),
+            war_factory_queue: VecDeque::new(),
+            shipyard_queue: VecDeque::new(),
+            helipad_queue: VecDeque::new(),
             tech_level: 98,
             credits_spent: 0,
+            silo_count: 0,
         }
     }
 
@@ -120,8 +153,34 @@ impl House {
         self
     }
 
+    /// Current credit count (capped by silo capacity).
+    pub fn credits(&self) -> i32 {
+        self.credits
+    }
+
+    /// Maximum credits this house can hold (based on silo count).
+    pub fn max_credits(&self) -> i32 {
+        if self.silo_count == 0 {
+            i32::MAX // No silo = unlimited (or very high limit in original)
+        } else {
+            self.silo_count as i32 * SILO_CAPACITY
+        }
+    }
+
+    /// Add a silo, increasing credit capacity.
+    pub fn add_silo(&mut self) {
+        self.silo_count += 1;
+    }
+
+    /// Number of silos owned.
+    pub fn silo_count(&self) -> usize {
+        self.silo_count
+    }
+
     pub fn add_credits(&mut self, amount: i32) {
-        self.credits = self.credits.saturating_add(amount);
+        let max = self.max_credits();
+        let new_credits = self.credits.saturating_add(amount);
+        self.credits = new_credits.min(max);
     }
 
     pub fn can_afford(&self, cost: i32) -> bool {
@@ -152,31 +211,233 @@ impl House {
         }
     }
 
-    /// Queue an item, charging its cost up front.
-    pub fn queue(&mut self, item: ProductionItem) -> bool {
-        if !self.spend(item.cost) {
-            return false;
+    /// Get a mutable reference to a factory queue.
+    fn queue_for(&mut self, factory: FactoryType) -> &mut VecDeque<ProductionItem> {
+        match factory {
+            FactoryType::Barracks => &mut self.barracks_queue,
+            FactoryType::WarFactory => &mut self.war_factory_queue,
+            FactoryType::Shipyard => &mut self.shipyard_queue,
+            FactoryType::Helipad => &mut self.helipad_queue,
         }
-        self.production_queue.push_back(item);
-        true
     }
 
-    /// Cancel the front item and refund its cost.
-    pub fn cancel_front(&mut self) -> Option<ProductionItem> {
-        let item = self.production_queue.pop_front()?;
+    /// Get an immutable reference to a factory queue.
+    fn queue_for_ref(&self, factory: FactoryType) -> &VecDeque<ProductionItem> {
+        match factory {
+            FactoryType::Barracks => &self.barracks_queue,
+            FactoryType::WarFactory => &self.war_factory_queue,
+            FactoryType::Shipyard => &self.shipyard_queue,
+            FactoryType::Helipad => &self.helipad_queue,
+        }
+    }
+
+    /// Queue an item in a specific factory, charging its cost up front.
+    pub fn queue_in(
+        &mut self,
+        factory: FactoryType,
+        item: ProductionItem,
+    ) -> Result<(), QueueError> {
+        if !self.spend(item.cost) {
+            return Err(QueueError::InsufficientFunds);
+        }
+        self.queue_for(factory).push_back(item);
+        Ok(())
+    }
+
+    /// Queue an item in barracks (infantry).
+    pub fn queue_barracks(&mut self, item: ProductionItem) -> Result<(), QueueError> {
+        self.queue_in(FactoryType::Barracks, item)
+    }
+
+    /// Queue an item in war factory (vehicles).
+    pub fn queue_war_factory(&mut self, item: ProductionItem) -> Result<(), QueueError> {
+        self.queue_in(FactoryType::WarFactory, item)
+    }
+
+    /// Queue an item in shipyard (naval).
+    pub fn queue_shipyard(&mut self, item: ProductionItem) -> Result<(), QueueError> {
+        self.queue_in(FactoryType::Shipyard, item)
+    }
+
+    /// Queue an item in helipad (aircraft).
+    pub fn queue_helipad(&mut self, item: ProductionItem) -> Result<(), QueueError> {
+        self.queue_in(FactoryType::Helipad, item)
+    }
+
+    /// Try to queue with prerequisite checking (requires owned structures list and rules).
+    /// The `check_prereq` closure returns true if the prerequisite is met.
+    pub fn try_queue_in<F>(
+        &mut self,
+        factory: FactoryType,
+        item: ProductionItem,
+        owned_structures: &[ClassId],
+        rules: &cnc_core::RulesDatabase,
+        check_prereq: F,
+    ) -> Result<(), QueueError>
+    where
+        F: Fn(&str, &[ClassId]) -> bool,
+    {
+        // Check prerequisites using the provided closure
+        if let Some(rule_name) = crate::game::rules_type_name(item.class_id) {
+            if let Some(rule) = rules.type_rule(rule_name) {
+                for prereq in &rule.prerequisite {
+                    if !check_prereq(prereq, owned_structures) {
+                        return Err(QueueError::PrerequisiteMissing(format!(
+                            "Missing prerequisite: {}",
+                            prereq
+                        )));
+                    }
+                }
+            }
+        }
+        self.queue_in(factory, item)
+    }
+
+    /// Try to queue in barracks with prerequisite checking.
+    pub fn try_queue_barracks(
+        &mut self,
+        item: ProductionItem,
+        owned_structures: &[ClassId],
+        rules: &cnc_core::RulesDatabase,
+    ) -> Result<(), QueueError> {
+        self.try_queue_in(
+            FactoryType::Barracks,
+            item,
+            owned_structures,
+            rules,
+            crate::game::ra_prerequisite_met,
+        )
+    }
+
+    /// Try to queue in war factory with prerequisite checking.
+    pub fn try_queue_war_factory(
+        &mut self,
+        item: ProductionItem,
+        owned_structures: &[ClassId],
+        rules: &cnc_core::RulesDatabase,
+    ) -> Result<(), QueueError> {
+        self.try_queue_in(
+            FactoryType::WarFactory,
+            item,
+            owned_structures,
+            rules,
+            crate::game::ra_prerequisite_met,
+        )
+    }
+
+    /// Try to queue in shipyard with prerequisite checking.
+    pub fn try_queue_shipyard(
+        &mut self,
+        item: ProductionItem,
+        owned_structures: &[ClassId],
+        rules: &cnc_core::RulesDatabase,
+    ) -> Result<(), QueueError> {
+        self.try_queue_in(
+            FactoryType::Shipyard,
+            item,
+            owned_structures,
+            rules,
+            crate::game::ra_prerequisite_met,
+        )
+    }
+
+    /// Try to queue in helipad with prerequisite checking.
+    pub fn try_queue_helipad(
+        &mut self,
+        item: ProductionItem,
+        owned_structures: &[ClassId],
+        rules: &cnc_core::RulesDatabase,
+    ) -> Result<(), QueueError> {
+        self.try_queue_in(
+            FactoryType::Helipad,
+            item,
+            owned_structures,
+            rules,
+            crate::game::ra_prerequisite_met,
+        )
+    }
+
+    /// Cancel the front item in a specific factory and refund its cost.
+    pub fn cancel_front_in(&mut self, factory: FactoryType) -> Option<ProductionItem> {
+        let item = self.queue_for(factory).pop_front()?;
         self.credits += item.cost;
         Some(item)
     }
 
-    /// Advance the front item; low power halves progress.
-    pub fn update_production(&mut self, delta_time: Fixed16_16) -> Option<ProductionItem> {
+    /// Cancel the front barracks item.
+    pub fn cancel_front_barracks(&mut self) -> Option<ProductionItem> {
+        self.cancel_front_in(FactoryType::Barracks)
+    }
+
+    /// Cancel the front war factory item.
+    pub fn cancel_front_war_factory(&mut self) -> Option<ProductionItem> {
+        self.cancel_front_in(FactoryType::WarFactory)
+    }
+
+    /// Cancel the front shipyard item.
+    pub fn cancel_front_shipyard(&mut self) -> Option<ProductionItem> {
+        self.cancel_front_in(FactoryType::Shipyard)
+    }
+
+    /// Cancel the front helipad item.
+    pub fn cancel_front_helipad(&mut self) -> Option<ProductionItem> {
+        self.cancel_front_in(FactoryType::Helipad)
+    }
+
+    /// Advance the front item in a specific factory; low power halves progress.
+    pub fn update_factory(
+        &mut self,
+        factory: FactoryType,
+        delta_time: Fixed16_16,
+    ) -> Option<ProductionItem> {
         let factor = Fixed16_16::from_f32(self.power_fraction());
-        let item = self.production_queue.front_mut()?;
+        let queue = self.queue_for(factory);
+        let item = queue.front_mut()?;
         item.progress += delta_time * factor;
         if item.progress >= item.total_time {
-            return self.production_queue.pop_front();
+            return queue.pop_front();
         }
         None
+    }
+
+    /// Update barracks production.
+    pub fn update_barracks(&mut self, delta_time: Fixed16_16) -> Option<ProductionItem> {
+        self.update_factory(FactoryType::Barracks, delta_time)
+    }
+
+    /// Update war factory production.
+    pub fn update_war_factory(&mut self, delta_time: Fixed16_16) -> Option<ProductionItem> {
+        self.update_factory(FactoryType::WarFactory, delta_time)
+    }
+
+    /// Update shipyard production.
+    pub fn update_shipyard(&mut self, delta_time: Fixed16_16) -> Option<ProductionItem> {
+        self.update_factory(FactoryType::Shipyard, delta_time)
+    }
+
+    /// Update helipad production.
+    pub fn update_helipad(&mut self, delta_time: Fixed16_16) -> Option<ProductionItem> {
+        self.update_factory(FactoryType::Helipad, delta_time)
+    }
+
+    /// Get immutable reference to barracks queue.
+    pub fn barracks_queue(&self) -> &VecDeque<ProductionItem> {
+        self.queue_for_ref(FactoryType::Barracks)
+    }
+
+    /// Get immutable reference to war factory queue.
+    pub fn war_factory_queue(&self) -> &VecDeque<ProductionItem> {
+        self.queue_for_ref(FactoryType::WarFactory)
+    }
+
+    /// Get immutable reference to shipyard queue.
+    pub fn shipyard_queue(&self) -> &VecDeque<ProductionItem> {
+        self.queue_for_ref(FactoryType::Shipyard)
+    }
+
+    /// Get immutable reference to helipad queue.
+    pub fn helipad_queue(&self) -> &VecDeque<ProductionItem> {
+        self.queue_for_ref(FactoryType::Helipad)
     }
 
     /// Production time for a unit/structure given a base seconds value.
@@ -226,9 +487,10 @@ mod tests {
             total_time: Fixed16_16::from_int(10),
             cost: 200,
         };
-        assert!(house.queue(item));
+        // Use war factory queue for legacy test
+        assert!(house.queue_war_factory(item).is_ok());
         assert_eq!(house.credits, 400);
-        let refunded = house.cancel_front().unwrap();
+        let refunded = house.cancel_front_war_factory().unwrap();
         assert_eq!(refunded.cost, 200);
         assert_eq!(house.credits, 600);
     }
@@ -238,19 +500,24 @@ mod tests {
         let mut house = allied();
         house.add_credits(500);
         house.power = -10;
-        house.queue(ProductionItem {
-            class_id: ClassId::VehicleE1,
-            progress: Fixed16_16::ZERO,
-            total_time: Fixed16_16::from_int(10),
-            cost: 100,
-        });
+        // Use war factory queue for legacy test
+        house
+            .queue_war_factory(ProductionItem {
+                class_id: ClassId::VehicleE1,
+                progress: Fixed16_16::ZERO,
+                total_time: Fixed16_16::from_int(10),
+                cost: 100,
+            })
+            .expect("queue");
         let half = Fixed16_16::from_int(4);
-        assert!(house.update_production(half).is_none());
-        assert_eq!(house.production_queue[0].progress, Fixed16_16::from_int(2));
+        assert!(house.update_war_factory(half).is_none());
+        assert_eq!(
+            house.war_factory_queue()[0].progress,
+            Fixed16_16::from_int(2)
+        );
         assert!(house.low_power());
         assert_eq!(house.power_fraction(), 0.5);
     }
-
     #[test]
     fn country_gate_allows_only_the_unique_structure() {
         let mut house = allied().with_country(Country::England);
@@ -258,5 +525,118 @@ mod tests {
         assert!(!house.can_build_unique_structure(ClassId::IronCurtain));
         house.country = None;
         assert!(!house.can_build_unique_structure(ClassId::GapGenerator));
+    }
+
+    /// Two factory queues (barracks + war factory) build in parallel.
+    /// Infantry from barracks and vehicle from war factory should progress simultaneously.
+    #[test]
+    fn parallel_factory_queues_build() {
+        let mut house = allied();
+        house.add_credits(10000);
+
+        // Queue infantry (barracks) and vehicle (war factory) simultaneously
+        house
+            .queue_barracks(ProductionItem {
+                class_id: ClassId::InfantryE1,
+                progress: Fixed16_16::ZERO,
+                total_time: Fixed16_16::from_int(10),
+                cost: 120,
+            })
+            .expect("barracks queue");
+        house
+            .queue_war_factory(ProductionItem {
+                class_id: ClassId::VehicleE1,
+                progress: Fixed16_16::ZERO,
+                total_time: Fixed16_16::from_int(20),
+                cost: 600,
+            })
+            .expect("war factory queue");
+
+        // Both should be in their respective queues
+        assert_eq!(house.barracks_queue().len(), 1);
+        assert_eq!(house.war_factory_queue().len(), 1);
+
+        // Advance time - both should progress
+        let delta = Fixed16_16::from_int(5);
+        let barracks_done = house.update_barracks(delta);
+        let war_factory_done = house.update_war_factory(delta);
+
+        assert!(barracks_done.is_none(), "barracks not done yet at 5s");
+        assert!(war_factory_done.is_none(), "war factory not done yet at 5s");
+
+        // Check both progressed
+        assert_eq!(house.barracks_queue()[0].progress, Fixed16_16::from_int(5));
+        assert_eq!(
+            house.war_factory_queue()[0].progress,
+            Fixed16_16::from_int(5)
+        );
+
+        // Complete both
+        let delta2 = Fixed16_16::from_int(5);
+        let barracks_done = house.update_barracks(delta2);
+        let war_factory_done = house.update_war_factory(delta2);
+
+        assert!(barracks_done.is_some(), "barracks done at 10s");
+        assert!(war_factory_done.is_none(), "war factory needs 20s total");
+
+        let delta3 = Fixed16_16::from_int(10);
+        let war_factory_done = house.update_war_factory(delta3);
+        assert!(war_factory_done.is_some(), "war factory done at 20s");
+    }
+
+    /// Production blocked when prerequisite structure not owned.
+    #[test]
+    fn prereq_unmet_production_blocked_with_reason() {
+        let mut house = allied();
+        house.add_credits(10000);
+
+        // Create a rules database with a Tech Center prerequisite for Heavy Tank
+        let ini = cnc_core::IniFile::parse("[MTNK]\nPrerequisite=TECH\n").expect("ini");
+        let rules = cnc_core::RulesDatabase::from_ini(&ini);
+
+        // Try to queue a unit requiring a Tech Center (not owned)
+        // This should fail with a reason
+        let result = house.try_queue_war_factory(
+            ProductionItem {
+                class_id: ClassId::VehicleE2, // Heavy Tank - requires Tech Center
+                progress: Fixed16_16::ZERO,
+                total_time: Fixed16_16::from_int(30),
+                cost: 1200,
+            },
+            &[],
+            &rules,
+        );
+
+        assert!(result.is_err(), "should fail without Tech Center");
+        match result {
+            Err(QueueError::PrerequisiteMissing(msg)) => {
+                assert!(
+                    msg.contains("Tech Center")
+                        || msg.contains("prerequisite")
+                        || msg.contains("TECH")
+                );
+            }
+            _ => panic!("expected PrerequisiteMissing error"),
+        }
+    }
+
+    /// Silo capacity: when credits exceed silo capacity, overflow is lost.
+    #[test]
+    fn silo_overflow_loses_credits_per_pinned_rule() {
+        let mut house = allied();
+        // Add a silo (capacity 2000 per silo in RA)
+        house.add_silo();
+        house.add_silo(); // 2 silos = 4000 capacity
+
+        house.add_credits(3000);
+        assert_eq!(house.credits(), 3000);
+
+        // Add 2000 more - should hit capacity at 4000, lose 1000
+        house.add_credits(2000);
+        assert_eq!(house.credits(), 4000, "credits capped at silo capacity");
+
+        // Adding more should lose the overflow
+        house.add_credits(5000);
+        assert_eq!(house.credits(), 4000, "overflow lost");
     }
 }
