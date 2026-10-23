@@ -264,7 +264,7 @@ pub enum RaEvaLine {
 /// `Speech[]` entries that are playable: `(voice id, line, sample file)`.
 ///
 /// Ordered by voice id; the ids are the original `VOX_*` ordinals.
-const RA_SPEECH: &[(u16, RaEvaLine, &'static str)] = &[
+const RA_SPEECH: &[(u16, RaEvaLine, &str)] = &[
     (0, RaEvaLine::MissionAccomplished, "MISNWON1"),
     (1, RaEvaLine::MissionFailed, "MISNLST1"),
     (2, RaEvaLine::UnableToComply, "PROGRES1"),
@@ -379,7 +379,7 @@ const RA_SPEECH: &[(u16, RaEvaLine, &'static str)] = &[
 /// `Speech[]` slots the original fills with the literal string `"none"`.
 ///
 /// These occupy a table id but never play; scripts may still ask for them.
-pub const RA_SILENT_SLOTS: &[(u16, &'static str)] = &[
+pub const RA_SILENT_SLOTS: &[(u16, &str)] = &[
     (20, "VOX_SOVIET_CAPTURED"),
     (27, "VOX_none5"),
     (28, "VOX_none6"),

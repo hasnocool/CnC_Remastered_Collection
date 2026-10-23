@@ -87,10 +87,8 @@ fn lineages_have_a_speech_category_and_priority() {
         SpeechCategory::BaseAttack.priority() > SpeechCategory::Production.priority(),
         "a base attack must outrank production chatter"
     );
-    assert!(
-        SpeechCategory::Mission.priority() <= u8::MAX,
-        "priorities stay in the Westwood 0-255 space"
-    );
+    let _in_u8_space = SpeechCategory::Mission.priority();
+    // priorities stay in the Westwood 0-255 space: `priority()` returns u8.
 }
 
 // ---------------------------------------------------------------- events

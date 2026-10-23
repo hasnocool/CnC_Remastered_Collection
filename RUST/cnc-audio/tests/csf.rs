@@ -114,7 +114,7 @@ fn csf_reports_bad_magic() {
 
 #[test]
 fn csf_reports_truncated_header() {
-    assert!(matches!(CsfFile::parse(FIXTURE), Ok(_)));
+    assert!(CsfFile::parse(FIXTURE).is_ok());
     assert!(matches!(
         CsfFile::parse(&FIXTURE[..CSF_HEADER_LEN - 1]),
         Err(CsfError::Truncated { .. })

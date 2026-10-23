@@ -583,7 +583,8 @@ fn take<'a>(data: &'a [u8], offset: &mut usize, len: usize) -> Result<&'a [u8], 
 
 fn decode_inverted_utf16(payload: &[u8], offset: usize) -> Result<String, CsfError> {
     let mut units = Vec::with_capacity(payload.len() / 2);
-    for chunk in payload.chunks_exact(2) {
+    let (chunks, _rest) = payload.as_chunks::<2>();
+    for chunk in chunks {
         let raw = u16::from_le_bytes([chunk[0], chunk[1]]);
         units.push(!raw);
     }
