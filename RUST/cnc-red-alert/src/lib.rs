@@ -26,14 +26,13 @@ pub mod tesla;
 pub use aircraft::{AIRFIELD_CAPACITY, DEFAULT_AMMO, REARM_SECONDS};
 pub use events::{names as event_names, OutcomeKind as EventOutcomeKind, SuperweaponKind};
 pub use game::{
-    armor_for, damage_vs_armor, AiCommander, ArmorClass, BuildError, Game, GameCommand, GameStatus,
-    GameStructure, GameUnit, ObjectiveState, RunningTrigger, ScenarioOutcome, Shot, TargetRef,
-    UnitRole, WeaponSpec,
+    armor_for, damage_vs_armor, unit_build_time, AiCommander, ArmorClass, BuildError, Game,
+    GameCommand, GameStatus, GameStructure, GameUnit, ObjectiveState, RunningTrigger,
+    ScenarioOutcome, Shot, TargetRef, UnitRole, WeaponSpec,
 };
 pub use gapgen::GapGenerator;
 pub use house::{Country, Faction, House, ProductionItem};
 pub use map::{Map, Terrain, TILE_SIZE};
-pub use mcv::{can_deploy_at, yard_footprint, MCV};
 pub use naval::{SHIP_SPEED_PX_PER_SEC, SUB_SPEED_PX_PER_SEC, SUB_TORPEDOES};
 pub use pathfind::{find_path, MoveClass};
 pub use render::{entity_asset, render_entity};
@@ -47,6 +46,7 @@ pub use tesla::{TeslaBolt, TeslaCoil};
 #[cfg(test)]
 mod integration_tests {
     use super::*;
+    use crate::mcv::{can_deploy_at, MCV};
     use cnc_core::{ClassId, Fixed16_16, Vec2};
 
     fn point(x: f32, y: f32) -> Vec2 {

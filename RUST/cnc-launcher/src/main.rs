@@ -5543,17 +5543,6 @@ fn apply_net_move(game: &mut RaGame, player: u8, units: &[u32], target: Vec2) {
     });
 }
 
-/// UI production timings; remote peers derive the same value from the class.
-fn ra_unit_build_seconds(class_id: cnc_core::ClassId) -> i32 {
-    match class_id {
-        cnc_core::ClassId::InfantryE1 => 4,
-        cnc_core::ClassId::VehicleE1 => 6,
-        cnc_core::ClassId::VehicleE2 => 8,
-        cnc_core::ClassId::ShipE1 => 9,
-        _ => 5,
-    }
-}
-
 /// Deploy a remote player's MCV.
 fn apply_net_deploy(game: &mut RaGame, player: u8, unit: u32) -> bool {
     game.apply_command(&GameCommand::Deploy {
@@ -5643,10 +5632,11 @@ fn apply_net_attack(game: &mut RaGame, player: u8, units: &[u32], target: u32) -
 
 /// Queue a remote player's unit production.
 fn apply_net_produce(game: &mut RaGame, player: u8, class_id: cnc_core::ClassId) -> bool {
+    let seconds = game.unit_build_time_of(class_id);
     game.apply_command(&GameCommand::Produce {
         owner: player as usize,
         class_id,
-        seconds: ra_unit_build_seconds(class_id),
+        seconds,
     }) > 0
 }
 
@@ -6664,10 +6654,11 @@ impl RaLauncherApp {
     /// Queue a unit locally and broadcast the same order in a network game.
     fn produce_unit(&mut self, class_id: cnc_core::ClassId) {
         let player = self.game.player_owner;
+        let seconds = self.game.unit_build_time_of(class_id);
         self.pending_commands.push(GameCommand::Produce {
             owner: player,
             class_id,
-            seconds: ra_unit_build_seconds(class_id),
+            seconds,
         });
         if let Some(net) = self.network.as_mut() {
             // RA derives the build time from the class, so factory stays unused.
@@ -9894,10 +9885,20 @@ mod tests {
             game.houses[0].production_queue.back().unwrap().class_id,
             cnc_core::ClassId::VehicleE2
         );
-        assert_eq!(ra_unit_build_seconds(cnc_core::ClassId::InfantryE1), 4);
-        assert_eq!(ra_unit_build_seconds(cnc_core::ClassId::VehicleE1), 6);
-        assert_eq!(ra_unit_build_seconds(cnc_core::ClassId::VehicleE2), 8);
-        assert_eq!(ra_unit_build_seconds(cnc_core::ClassId::ShipE1), 9);
+        // Default build times from unit_build_time (mirrors old ra_unit_build_seconds)
+        assert_eq!(
+            cnc_red_alert::unit_build_time(cnc_core::ClassId::InfantryE1),
+            4
+        );
+        assert_eq!(
+            cnc_red_alert::unit_build_time(cnc_core::ClassId::VehicleE1),
+            6
+        );
+        assert_eq!(
+            cnc_red_alert::unit_build_time(cnc_core::ClassId::VehicleE2),
+            8
+        );
+        assert_eq!(cnc_red_alert::unit_build_time(cnc_core::ClassId::ShipE1), 9);
         assert!(!apply_net_produce(
             &mut game,
             9,

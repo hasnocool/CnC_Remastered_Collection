@@ -646,6 +646,15 @@ impl RulesDatabase {
         self.types.get(name).and_then(|rule| rule.strength)
     }
 
+    /// Build time override for a type section, if the rules file provides one.
+    pub fn type_build_time(&self, name: &str) -> Option<i32> {
+        self.types
+            .get(name)
+            .and_then(|rule| rule.raw.get("BuildTime"))
+            .and_then(|v| v.as_i64().ok())
+            .map(|v| v as i32)
+    }
+
     pub fn difficulty(&self, level: DifficultyLevel) -> &DifficultyRule {
         match level {
             DifficultyLevel::Easy => &self.easy,
@@ -653,7 +662,6 @@ impl RulesDatabase {
             DifficultyLevel::Hard => &self.hard,
         }
     }
-
     pub fn is_empty(&self) -> bool {
         self.weapons.is_empty()
             && self.warheads.is_empty()
