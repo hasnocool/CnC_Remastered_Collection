@@ -261,7 +261,9 @@ impl House {
     }
     /// The biased purchase price for a raw cost.
     ///
-    /// The multiplication mirrors TECHNO.CPP:4495 / FACTORY.CPP:402. The exact
+    /// The multiplication mirrors TECHNO.CPP:4495 / FACTORY.CPP:402
+    /// (`Raw_Cost() * House->CostBias`): the handicap IS the CostBias
+    /// multiplier, so an easy house pays 0.75× the raw cost. The exact
     /// rounding is ours (the C++ stores an `int Balance`), so a test pins it
     /// rather than trusting it.
     pub fn handicap_cost(&self, cost: i32) -> i32 {
