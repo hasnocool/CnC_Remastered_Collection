@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=C&C Launcher (Debug)
+GenericName=Command & Conquer Remastered Launcher
+Comment=Launch Tiberian Dawn and Red Alert game modes (debug build)
+Exec=/home/hyperion/Projects/Games/CnC_Remastered_Collection/RUST/target/debug/cnc-launcher
+Icon=cnc-launcher-debug
+Terminal=false
+Type=Application
+Categories=Game;StrategyGame;
+Keywords=cnc;command;conquer;tiberian;dawn;red;alert;debug;
+StartupNotify=true

@@ -1,0 +1,16 @@
+[Desktop Entry]
+Name=C&C Map Editor (Release)
+GenericName=Command & Conquer Map Editor
+Comment=Edit Tiberian Dawn and Red Alert maps (release build)
+Exec=/home/hyperion/Projects/Games/CnC_Remastered_Collection/RUST/target/release/cnc-map-editor
+Icon=cnc-map-editor
+Terminal=false
+Type=Application
+Categories=Game;StrategyGame;
+Keywords=cnc;command;conquer;map;editor;tiberian;dawn;red;alert;
+StartupNotify=true
+Actions=debug;
+
+[Desktop Action debug]
+Name=Open in Debug Build
+Exec=/home/hyperion/Projects/Games/CnC_Remastered_Collection/RUST/target/debug/cnc-map-editor
