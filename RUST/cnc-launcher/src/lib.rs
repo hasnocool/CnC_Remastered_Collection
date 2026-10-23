@@ -1,10 +1,13 @@
 //! C&C Launcher library
 
+pub mod campaign;
 pub mod events_subscriber;
 pub mod lobby;
 pub mod lobby_screen;
 pub mod menu;
 pub mod ready;
+/// End-of-mission scoring, shared by the launcher shell and the campaign flow.
+pub mod score;
 pub mod types;
 
 pub use types::{

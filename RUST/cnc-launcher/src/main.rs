@@ -61,8 +61,9 @@ mod lobby_screen;
 mod menu;
 mod options;
 mod ready;
-mod score;
 
+use cnc_launcher::campaign;
+use cnc_launcher::score;
 use lobby_screen::LobbyScreen;
 use menu::{
     GameChoice, LaunchTarget, MainMenu, MenuCommand, OptionsAction, OptionsModal, VolumeBus,
@@ -3643,7 +3644,9 @@ impl LauncherApp {
             // mission; persisted so a reload of the selector keeps it.
             self.td_carryover = Some(Carryover::from_game(&self.game, self.game.player_owner));
             if let Some(carryover) = &self.td_carryover {
-                let path = self.td_progress_path.with_file_name("td-carryover.bin");
+                let path = self
+                    .td_progress_path
+                    .with_file_name(campaign::CARRYOVER_FILE_NAME);
                 match carryover.save_to_file(&path) {
                     Ok(()) => tracing::info!(path = %path.display(), "carry-over saved"),
                     Err(error) => tracing::warn!(%error, "failed to save carry-over"),
@@ -3665,19 +3668,14 @@ impl LauncherApp {
         // Victory: advance to the next incomplete mission. If there is no
         // such mission, or its file is missing/unreadable, the campaign is
         // complete (completion screen) instead of panicking on a missing file.
-        if let Some(next) = next_incomplete(&self.td_completed, self.mission_index) {
-            if self
-                .mission_choices
-                .get(next)
-                .map(|choice| choice.path.exists() && Mission::from_file(&choice.path).is_ok())
-                .unwrap_or(false)
-            {
-                self.mission_index = next;
-                self.selecting_mission = true;
-            } else {
-                self.td_complete = true;
-                self.selecting_mission = false;
-            }
+        let paths: Vec<PathBuf> = self
+            .mission_choices
+            .iter()
+            .map(|choice| choice.path.clone())
+            .collect();
+        if let Some(next) = campaign::next_after(&self.td_completed, self.mission_index, &paths) {
+            self.mission_index = next;
+            self.selecting_mission = true;
         } else {
             self.td_complete = true;
             self.selecting_mission = false;
@@ -3760,7 +3758,23 @@ impl LauncherApp {
         self.td_completed = vec![false; len];
         self.td_best = vec![None; len];
         self.load_td_progress();
+        // Restore the carry-over written by the previous mission so a selector
+        // reload (or a restart) keeps the surviving units + treasury. A missing
+        // or corrupt file just starts the next mission clean.
+        self.load_td_carryover();
         Ok(len)
+    }
+
+    /// Read the persisted carry-over, degrading to `None` when the file is
+    /// absent or unusable (never fatal, never a corrupt save).
+    fn load_td_carryover(&mut self) {
+        let path = self
+            .td_progress_path
+            .with_file_name(campaign::CARRYOVER_FILE_NAME);
+        if !path.is_file() {
+            return;
+        }
+        self.td_carryover = campaign::CampaignFlow::load_carryover(&path);
     }
 
     fn td_visible(&self) -> Vec<usize> {
