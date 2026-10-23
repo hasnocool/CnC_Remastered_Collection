@@ -1,0 +1,62 @@
+# Task 27: RA Economy Depth (per-factory queues, prereqs, silo capacity)
+
+## Summary
+Implemented per-factory production queues, prerequisite gating, and silo capacity with overflow credit loss for Red Alert.
+
+## Changes Made
+
+### house.rs
+- Replaced single `production_queue: VecDeque<ProductionItem>` with four per-factory queues:
+  - `barracks_queue` (infantry)
+  - `war_factory_queue` (vehicles, harvesters, amphibious)
+  - `shipyard_queue` (ships, submarines)
+  - `helipad_queue` (aircraft)
+- Added `FactoryType` enum for factory identification
+- Added `QueueError` enum for queue operation errors (InsufficientFunds, PrerequisiteMissing, FactoryNotAvailable)
+- Added silo support:
+  - `SILO_CAPACITY = 2000` constant (per silo, matching RA original)
+  - `silo_count` field tracking number of owned silos
+  - `add_silo()`, `silo_count()`, `max_credits()`, `credits()` methods
+  - `add_credits()` now caps at silo capacity
+- Added per-factory queue methods:
+  - `queue_in()`, `queue_barracks()`, `queue_war_factory()`, `queue_shipyard()`, `queue_helipad()`
+  - `try_queue_in()`, `try_queue_barracks()`, `try_queue_war_factory()`, `try_queue_shipyard()`, `try_queue_helipad()` with prerequisite checking
+  - `cancel_front_in()`, `cancel_front_barracks()`, `cancel_front_war_factory()`, `cancel_front_shipyard()`, `cancel_front_helipad()`
+  - `update_factory()`, `update_barracks()`, `update_war_factory()`, `update_shipyard()`, `update_helipad()`
+  - `barracks_queue()`, `war_factory_queue()`, `shipyard_queue()`, `helipad_queue()` accessors
+
+### game.rs
+- Updated `queue_unit()` to route units to correct factory based on `UnitRole`
+- Updated `cancel_production()` to cancel from first non-empty queue (legacy behavior)
+- Updated `update_production()` to process all four factory queues in parallel
+- Made `ra_prerequisite_met()` public for use by House methods
+- Updated imports to include `FactoryType`
+
+### Tests Added (house.rs)
+1. `parallel_factory_queues_build` - Verifies infantry (barracks) and vehicle (war factory) build simultaneously
+2. `prereq_unmet_production_blocked_with_reason` - Verifies production blocked when Tech Center not owned
+3. `silo_overflow_loses_credits_per_pinned_rule` - Verifies credits capped at silo capacity (2000 per silo)
+
+### Tests Updated (house.rs)
+- `spending_and_refunds_are_exact` - Updated to use war factory queue
+- `low_power_halves_production_speed` - Updated to use war factory queue
+
+### Tests Updated (game.rs)
+- `ra_queue_refuses_a_gated_type` - Uses `war_factory_queue()`
+- `ra_queued_unit_uses_the_rules_cost` - Uses `war_factory_queue()`
+- `ra_cancelling_an_empty_queue_is_silent` - Clears all factory queues
+- `cancelling_production_refunds_the_front_item` - Checks all factory queues empty
+- `network_commands_queue_units` - Uses `barracks_queue()` for infantry
+
+## Verification
+- All 7 house tests pass
+- All 200+ game tests pass
+- `cargo fmt --check` passes
+- `cargo clippy -p cnc-red-alert --all-targets -- -D warnings` passes
+- `cargo test -p cnc-red-alert` passes (215 tests total)
+
+## Acceptance Criteria Met
+- ✅ `parallel_factory_queues_build` passes: two queues build in parallel (infantry + armor simultaneously)
+- ✅ `prereq_unmet_production_blocked_with_reason` passes: prereq-unmet production blocked with reason
+- ✅ `silo_overflow_loses_credits_per_pinned_rule` passes: silo overflow loses credits per pinned rule
+- ✅ `spending_and_refunds_are_exact` stays green (regression guard)
