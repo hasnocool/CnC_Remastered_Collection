@@ -3005,6 +3005,8 @@ impl EditorState {
                 );
                 y += 24.0;
                 let quarter = pw * 0.25 - 2.0;
+                // Keep the nudge row inside the window floor.
+                let y = y.min(self.height - 20.0);
                 push(
                     px,
                     y,
@@ -3116,6 +3118,15 @@ impl EditorState {
                     19.0,
                     ControlKind::Field(Focus::TriggerGroup),
                 );
+                y += 22.0;
+                // Filtered trigger folder rows; stop before the window floor.
+                for id in self.visible_trigger_ids() {
+                    if y + 18.0 > self.height {
+                        break;
+                    }
+                    push(px, y, pw, 18.0, ControlKind::Trigger(id));
+                    y += 20.0;
+                }
             }
         }
 
