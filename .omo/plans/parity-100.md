@@ -203,14 +203,14 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): fixture files exist with committed checksums; `cargo test -p cnc-tiberian-dawn fixture` passes WITHOUT the env var set.
   QA scenarios: happy — CI green without env var; failure — env var points at garbage → tests skip with warning (not fail), Evidence .omo/evidence/task-11-parity-100.log
   Commit: Y | test: synthetic original-format golden fixtures
-- [ ] 12. Editor opens/saves original maps
+- [x] 12. Editor opens/saves original maps
   What to do / Must NOT do: `cnc-map-editor` GamePlugin gains load/save dispatch for TD ini+bin and RA .MPR consuming cnc-asset codecs EXCLUSIVELY (no local codec copies — Metis finding 10); semantic round-trip: open fixture → save → section-equal.
   Parallelization: Wave 1 | Blocked by: 8,9,11 | Blocks: 13 | Parallel with: W2 chains
   References: RUST/cnc-map-editor/src/plugin.rs (trait shape); CnCTDRAMapEditor/TiberianDawn/GamePlugin.cs:115–160,858–957; CnCTDRAMapEditor/RedAlert/GamePlugin.cs:226–268; AUDIT §6 (original-format map I/O row).
   Acceptance criteria (agent-executable): tests `editor_roundtrips_original_td_fixture` and `editor_roundtrips_original_ra_fixture` pass; per-house and `[Basic]`-family sections survive round-trip (`editor_preserves_basic_and_house_sections`); `grep -rn "lcw" RUST/cnc-map-editor/src` = 0 matches (no local codec).
   QA scenarios: happy — round-trip produces section-equal INI; failure — unsupported extension → error listing supported formats, Evidence .omo/evidence/task-12-parity-100.log
   Commit: Y | feat(editor): original-format map I/O via cnc-asset codecs
-- [ ] 13. Launcher original-campaign flow + carry-over wiring
+- [~] 13. Launcher original-campaign flow + carry-over wiring
   What to do / Must NOT do: Mission select lists original campaigns (env-gated dir from todos 8/9); mission end → score → next mission; TD `carryover::Carryover` written at mission end and loaded at next start (PARITY.md §3.4 remaining wiring); RA flow consumes todo-31 carryover when present. Split: TD-half lands in Wave 1 (blocked by 12); RA-half completes after todo 31 lands (Wave 2). Do NOT regress authored-campaign flow.
   Parallelization: Wave 1 (TD-half), completing in Wave 2 (RA-half after 31) | Blocked by: 12 (TD-half), 31 (RA-half) | Blocks: 53
   References: RUST/cnc-launcher/src/{menu.rs,score.rs}; RUST/cnc-tiberian-dawn/src/carryover.rs (CNCCARRY, checksummed); RUST/docs/PARITY.md §3.4; AUDIT §3.1.
@@ -245,14 +245,14 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): tower engages in-range enemy without player units (`tower_fires_without_player_units`); SAML fires missiles at aircraft; Obelisk charge-up cadence pinned.
   QA scenarios: happy — base defense kills raider with no player input; failure — unpowered defense holds fire (power gating), Evidence .omo/evidence/task-17-parity-100.log
   Commit: Y | feat(td): defensive structures fire
-- [ ] 18. TD apply_command arms + game-state CRC
+- [x] 18. TD apply_command arms + game-state CRC
   What to do / Must NOT do: `Game::apply_command` arms for all 15 wire Command variants (11 unapplied today — only Sabotage applied, network.rs:197–209); add world-state CRC to lockstep frames (beyond command hash, network.rs:86–92) exchanged like FRAMESYNC. Exhaustive match = compile-enforced completeness. Do NOT change transport semantics (todo 16 owns those).
   Parallelization: Wave 2 (TD chain) | Blocked by: 17 | Blocks: 19 | Parallel with: 22–31 (RA chain)
   References: RUST/cnc-tiberian-dawn/src/network.rs:86–92,197–209,230–283; RUST/cnc-tiberian-dawn/src/game.rs:1708–1712; AUDIT §3.8.
   Acceptance criteria (agent-executable): exhaustive match compiles (every variant has an arm); `two_identical_games_compare_state_crcs` passes; injected divergence → `desynced()` true.
   QA scenarios: happy — identical command streams → identical CRCs across processes; failure — one mutated command → desync flagged deterministically, Evidence .omo/evidence/task-18-parity-100.log
   Commit: Y | feat(td): full command application + state CRC
-- [ ] 19. TD economy fidelity (FloatBias, credit tick, alliances)
+- [x] 19. TD economy fidelity (FloatBias, credit tick, alliances)
   What to do / Must NOT do: Wire `cnc_core::FloatBias` handicap into TD House (exists in cnc-core, zero TD consumers — AUDIT §3.10); credit tick accumulation display state (CREDITS.CPP semantics: gradual 1-per-tick-ish roll-up, snapshot-serialized); ALLY alliance events + member tracking. Do NOT change instant-spending correctness (existing house tests stay green).
   Parallelization: Wave 2 (TD chain) | Blocked by: 18 | Blocks: 20 | Parallel with: 22–31 (RA chain)
   References: RUST/cnc-core/src/float_bias.rs (ported, unused — AUDIT §3.10); RUST/cnc-tiberian-dawn/src/house.rs:69–142; AUDIT §4 economy row, §3.10.
@@ -455,14 +455,14 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): `waypoint_roundtrips_ini` passes; undo removes waypoint cleanly; duplicate letter rejected.
   QA scenarios (name the exact tool + invocation): happy — place A/B/C, save, reload identical; failure — duplicate letter → validation error, Evidence .omo/evidence/task-47-parity-100.log
   Commit: Y | feat(editor): waypoints tool
-- [ ] 48. TeamTypes editor tab
+- [x] 48. TeamTypes editor tab
   What to do / Must NOT do: Full TeamTypes editing dialog + [TeamTypes]/[TaskForces] INI sections (TeamTypesDialog.cs 504L, Model/TeamType.cs analog) using todo-32 enums for missions/params; undo-safe command pattern. Do NOT invent team behavior — engine consumes these in todos 34/35.
   Parallelization: Wave 4 (C9 serial chain) | Blocked by: 47,32 | Blocks: 49 | Parallel with: C6 chain, 45
   References: CnCTDRAMapEditor/Dialogs/TeamTypesDialog.cs; CnCTDRAMapEditor/Model/TeamType.cs; AUDIT §6 (TeamTypes tab MISSING).
   Acceptance criteria (agent-executable): authored TeamType survives save/reload section-equal (`teamtype_roundtrips`); every edit is undoable in one step.
   QA scenarios: happy — create team with taskforce, save, reload; failure — invalid house reference → validation error blocks save, Evidence .omo/evidence/task-48-parity-100.log
   Commit: Y | feat(editor): TeamTypes tab
-- [ ] 49. Footprints + infantry groups + property dialogs
+- [x] 49. Footprints + infantry groups + property dialogs
   What to do / Must NOT do: Multi-cell building placement with foundation/bib occupancy; 5-slot infantry groups per cell (mirrors todo 15 engine semantics); object property dialogs (facing, health, sub-cell position) per ObjectProperties.cs.
   Parallelization: Wave 4 (C9 serial chain) | Blocked by: 48 | Blocks: 50 | Parallel with: C6 chain, 45
   References: CnCTDRAMapEditor/Model/Building.cs, Model/Infantry.cs:98 (InfantryGroup); CnCTDRAMapEditor/Controls/ObjectProperties.cs; AUDIT §6 (objects-model row, ~30%).
@@ -498,7 +498,7 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   QA scenarios (name the exact tool + invocation): happy — every gap row has PASS evidence; failure — any open row → appended fix todo executed + re-verified before F-wave, Evidence .omo/evidence/task-53-parity-100.log
   Commit: Y | docs: final parity re-audit
 
-- [ ] 54. Make cnc-console + cnc-events build (pre-existing debt)
+- [x] 54. Make cnc-console + cnc-events build (pre-existing debt)
   What to do / Must NOT do: Bring the two orphan crates into the workspace and make them compile. `cnc-console`: its `src` module set (`app`, `events_panel`, `filters`, `log_panel`, `settings`, `styles`, `widgets`) existed only as untracked `*.rs.bak` drafts and was destroyed during todo 1 — **never tracked in git, unrecoverable** (no `/home` btrfs snapshots; absent from the local backup tarball); the surviving `src/main.rs` was a non-compiling winit 0.30 / egui 0.29 draft with its 19-line import header pasted 4×. Re-author the modules from the crate README + `Cargo.toml` surface. `cnc-events`: fix its 21 compile errors (unescaped `{`/`}` in `streaming.rs` `format!` JSON strings at :154,:161,:168,:171; `SmallVec` misuse in `definitions.rs` :60,:72,:103; missing `unsubscribe` on `Arc<EventBusInner>` at `bus.rs` :84,:92; `Box<dyn Event>` lacks `Clone` at `bus.rs` :196,:218,:347,:352; `dyn Fn`/`dyn Event` bounds in `handler.rs` :17,:112,:124; `dyn Event: serde::Serialize` at `replay.rs` :93,:347; missing `EventBusError::AlreadyInitialized` at `lib.rs` :44). Then add BOTH to `RUST/Cargo.toml` members. Do NOT add an empty `[workspace]` table to either crate (that silently excludes them from fmt/clippy/test). Do NOT re-land the lost drafts as if they were recovered — write real, tested code.
   Parallelization: Wave 1 | Blocked by: 3,4,5 | Blocks: none | Parallel with: 6,7
   References (executor has NO interview context - be exhaustive): .omo/evidence/baseline-report.md §2 (incident record + exact error inventory); RUST/docs/PARITY_AUDIT_2026-10-20.md Appendix A (`| cnc-console | 1 | — | **uncompilable** |`); RUST/cnc-console/{README.md,Cargo.toml}; RUST/cnc-console/src/main.rs; RUST/cnc-events/src/{streaming,definitions,bus,handler,replay,lib}.rs; RUST/cnc-logs (the sibling crate that DOES build, as the working pattern).
