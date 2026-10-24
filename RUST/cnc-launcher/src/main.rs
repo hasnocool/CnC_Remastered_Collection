@@ -5778,6 +5778,10 @@ pub struct RaLauncherApp {
     briefing_open: bool,
     paused: bool,
     pause_choice: usize,
+    /// Score screen state for end-of-mission scoreboard (RA).
+    ra_score: Option<score::ScoreReport>,
+    /// When the score overlay was shown (for animation).
+    ra_score_since: Option<Instant>,
     active_scenario_path: Option<PathBuf>,
     network: Option<RaNetwork>,
     replay: Option<ReplayState>,
@@ -5849,6 +5853,8 @@ impl RaLauncherApp {
             briefing_open: false,
             paused: false,
             pause_choice: 0,
+            ra_score: None,
+            ra_score_since: None,
             active_scenario_path: None,
             network: None,
             replay: None,
@@ -7019,6 +7025,19 @@ impl RaLauncherApp {
         };
         self.game.outcome == Some(victory)
     }
+    fn show_ra_score(&mut self) {
+        let won = self.outcome_is_victory();
+        // Use the RA game's elapsed time and zero stats for now (stats from todo 44)
+        self.ra_score = Some(score::compute_score(
+            0, // harvested_credits - not yet tracked
+            0, // units_produced - not yet tracked
+            0, // projectiles_fired - not yet tracked
+            self.game.elapsed.int().max(0) as u64,
+            won,
+            score::DIFFICULTY_NEUTRAL_BP,
+        ));
+        self.ra_score_since = Some(Instant::now());
+    }
 
     pub fn start_skirmish(&mut self) {
         self.game_speed = 1.0;
@@ -7708,6 +7727,22 @@ impl RaLauncherApp {
             );
             info_y += 11.0;
         }
+        // End-of-mission scoreboard for RA.
+        if let (Some(report), Some(since)) = (&self.ra_score, self.ra_score_since) {
+            renderer.set_camera(&hud_camera(&self.camera));
+            let half_w = self.camera.viewport_width as f32 * 0.5;
+            let half_h = self.camera.viewport_height as f32 * 0.5;
+            let left = self.camera.position.x.to_f32() - half_w;
+            let top = self.camera.position.y.to_f32() - half_h;
+            score::draw_overlay(
+                renderer.as_mut(),
+                report,
+                since.elapsed(),
+                left + 24.0,
+                top + 100.0,
+            );
+        }
+
         if let Some((notice, at)) = &self.notice {
             if at.elapsed() < Duration::from_secs(4) {
                 renderer.draw_text(notice, left + 16.0, info_y, 9.0, [1.0, 0.76, 0.35, 1.0]);
@@ -8226,10 +8261,16 @@ impl ApplicationHandler for RaLauncherApp {
                 }
                 if let Key::Named(NamedKey::Enter) = &event.logical_key {
                     if self.game.outcome.is_some() {
-                        if self.campaign_active && self.outcome_is_victory() {
-                            self.advance_campaign();
+                        if self.ra_score.is_none() {
+                            self.show_ra_score();
                         } else {
-                            self.abort_mission();
+                            self.ra_score = None;
+                            self.ra_score_since = None;
+                            if self.campaign_active && self.outcome_is_victory() {
+                                self.advance_campaign();
+                            } else {
+                                self.abort_mission();
+                            }
                         }
                         return;
                     }

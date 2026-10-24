@@ -1,0 +1,65 @@
+# Map Land Type and Overlay Data Structures for Terrain Semantics
+
+## Key Data Structures
+
+### CellClass (CELL.H)
+- **LandType Land**: Base terrain type (LAND_CLEAR, LAND_ROAD, LAND_WATER, LAND_ROCK, LAND_WALL, LAND_TIBERIUM, LAND_BEACH, LAND_ROUGH, LAND_RIVER)
+- **LandType OverrideLand**: Can override passability (LAND_NONE = no override)
+- **LandType Land = OverlayTypeClass::As_Reference(Overlay).Land**: Overlay determines land type
+- **LandType Land = ttype->Land_Type(TIcon)**: Template determines land type
+- **Land_Type() method**: Returns effective land type considering overrides
+
+### Map Data Flow
+1. **Recalc_Attributes()** (CELL.CPP):
+   - If INTERIOR terrain with clear template → LAND_ROCK
+   - If Overlay exists → Land = OverlayTypeClass::As_Reference(Overlay).Land
+   - If template exists → Land = ttype->Land_Type(TIcon)
+   - Default → LAND_CLEAR
+
+2. **Pathfinding Semantics**:
+   - `Passable_Cell` → `Can_Enter_Cell` checks effective land type
+   - `MoveType` enum determines passability:
+     - MOVE_OK (1), MOVE_CLOAK (1) - Fully passable
+     - MOVE_MOVING_BLOCK (3), MOVE_DESTROYABLE (8), MOVE_TEMP (10) - Partially passable
+     - MOVE_NO (0) - Not passable
+
+### Terrain Types (DEFINES.H)
+- **LAND_CLEAR** - Clear terrain (passable)
+- **LAND_ROAD** - Road terrain (passable)
+- **LAND_WATER** - Water (impassable)
+- **LAND_ROCK** - Impassable rock (impassable)
+- **LAND_WALL** - Wall (impassable)
+- **LAND_TIBERIUM** - Tiberium field (impassable)
+- **LAND_BEACH** - Beach terrain (passable)
+- **LAND_ROUGH** - Rocky terrain (impassable)
+- **LAND_RIVER** - Rocky riverbed (impassable)
+
+### Overlay Effects
+- **OVERLAY_NONE** - No overlay (uses Land)
+- **OVERLAY types** - Map to land types (e.g., concrete walls, etc.)
+- **Land = OverlayTypeClass::As_Reference(Overlay).Land** - Override logic
+
+## Pathfinding Integration
+
+In FINDPATH.CPP:
+- `Passable_Cell` → `Can_Enter_Cell` → checks effective land type via `MoveType` enum
+- Effective land type determined by:
+  1. `OverrideLand` field (if set, uses this value)
+  2. `Land` field (base terrain type)
+  3. `Overlay` type (maps to land type)
+
+## Semantic Summary
+
+| Land Type | Passable | Notes |
+|-----------|----------|-------|
+| LAND_CLEAR | ✓ | Default clear terrain |
+| LAND_ROAD | ✓ | Road terrain |
+| LAND_BEACH | ✓ | Beach terrain |
+| LAND_ROCK | ✗ | Impassable rock |
+| LAND_WALL | ✗ | Wall blocks movement |
+| LAND_TIBERIUM | ✗ | Tiberium field blocks movement |
+| LAND_ROUGH | ✗ | Rocky terrain blocks movement |
+| LAND_RIVER | ✗ | Riverbed blocks movement |
+| LAND_WATER | ✗ | Water blocks movement |
+
+Overlay types can modify land semantics, with concrete/walls making terrain impassable regardless of base land type.

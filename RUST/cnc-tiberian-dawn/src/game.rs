@@ -544,6 +544,14 @@ pub struct Game {
     pub tiberium_tick: u32,
     /// Units completed through production (for HUD/logging).
     pub units_produced: u64,
+    /// Units lost (destroyed) during mission.
+    pub units_lost: u64,
+    /// Structures completed through production (for HUD/logging).
+    pub structures_built: u64,
+    /// Structures lost (destroyed) during mission.
+    pub structures_lost: u64,
+    /// Total credits spent by player via production.
+    pub credits_spent: i64,
     /// Total credits delivered by harvesters (for HUD/logging).
     pub harvested_credits: i64,
     /// Completed structures waiting to be placed on the map.
@@ -630,6 +638,10 @@ impl Game {
             projectiles_fired: 0,
             tiberium_tick: 0,
             units_produced: 0,
+            units_lost: 0,
+            structures_built: 0,
+            structures_lost: 0,
+            credits_spent: 0,
             harvested_credits: 0,
             ready_buildings: Vec::new(),
             aircraft_shots: 0,
@@ -1256,6 +1268,7 @@ impl Game {
         if !house.spend_credits(cost) {
             return false;
         }
+        self.credits_spent += cost as i64;
         house.production_queue.push_back(ProductionItem {
             class_id: unit_class_id(unit_type),
             progress: Fixed16_16::ZERO,
@@ -1742,6 +1755,7 @@ impl Game {
             }
             self.dead_units_announced.push(index);
             let victim = self.units[index].owner;
+            self.units_lost += 1;
             if let Some(source) = self.event_source.as_ref() {
                 let unit_type = self.units[index].unit_type;
                 crate::events::unit_lost(source, victim, unit_type, index);
@@ -1768,6 +1782,7 @@ impl Game {
             }
             self.dead_buildings_announced.push(index);
             let victim = self.buildings[index].owner;
+            self.structures_lost += 1;
             if let Some(source) = self.event_source.as_ref() {
                 let structure = self.buildings[index].structure.ini_name().to_string();
                 crate::events::structure_lost(source, victim, structure, index);
@@ -1946,6 +1961,7 @@ impl Game {
                 if let Some(source) = self.event_source.as_ref() {
                     crate::events::structure_ready(source, owner, structure);
                 }
+                self.structures_built += 1;
                 self.ready_buildings.push((owner, structure));
                 continue;
             }

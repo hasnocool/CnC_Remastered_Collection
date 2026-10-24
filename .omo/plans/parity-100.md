@@ -259,14 +259,14 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): handicap bias alters production cost/speed per pinned ratio (`handicap_alters_economy`); credit display rolls up gradually in snapshot; ALLY event sets alliance in both houses.
   QA scenarios: happy — easy bias produces measurably cheaper/faster builds; failure — bias zero → identical to unhandicapped, Evidence .omo/evidence/task-19-parity-100.log
   Commit: Y | feat(td): handicap, credit tick, alliances
-- [ ] 20. TD overlays/walls/terrain-object combat
+- [x] 20. TD overlays/walls/terrain-object combat
   What to do / Must NOT do: Wall/vegetation overlay objects with hit points; warhead destroy-wall/wood flags applied in damage path (warhead rows exist in td_rules.rs:47–137 but flags unused); smudge/scorch persistence in snapshots; land-type semantics (water drown, tree block) replacing bare `is_passable`. Do NOT touch renderer art (editor lane owns visuals).
   Parallelization: Wave 2 (TD chain) | Blocked by: 19 | Blocks: 21 | Parallel with: 22–31 (RA chain)
   References: RUST/cnc-tiberian-dawn/src/td_rules.rs:47–137 (warhead rows; destroy-walls/wood triple unmodeled); TIBERIANDAWN/OVERLAY.CPP, TERRAIN.CPP, SMUDGE.CPP; AUDIT §3.7 (walls/overlays), §4 overlays row (cited by category).
   Acceptance criteria (agent-executable): HE destroys wall cell, sniper does not (`warhead_flags_gate_wall_damage`); scorch persists across save/replay; infantry drowned in water cell.
   QA scenarios: happy — sandbag wall absorbs rifle then falls to HE; failure — wrong flag → no-op, Evidence .omo/evidence/task-20-parity-100.log
   Commit: Y | feat(td): destructible overlays, smudges, land types
-- [ ] 21. TD pathfinding depth
+- [x] 21. TD pathfinding depth
   What to do / Must NOT do: Zone-based search + edge-following per FINDPATH.CPP; `Can_Enter_Cell` per-terrain checks beyond the is_passable flag; remove/raise MAX_PATH_NODES stall on long detours; deterministic tie-breaks preserved. Do NOT change the octile A* public API consumers rely on without updating call sites in the same todo.
   Parallelization: Wave 2 (TD chain tail) | Blocked by: 20 | Blocks: 53 | Parallel with: 22–31 (RA chain)
   References: TIBERIANDAWN/FINDPATH.CPP; RUST/cnc-tiberian-dawn/src/pathfind.rs; RUST/cnc-tiberian-dawn/src/game.rs:2351–2450; AUDIT §4 pathfinding row (~60%).
@@ -399,7 +399,7 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): CSF fixture parses labels + values with player-prefixed filtering (`csf_parses_labels_and_values`); scripted build completion emits a queued speech event (`speak_enqueues_eva_line`).
   QA scenarios (name the exact tool + invocation): happy — three queued EVA lines play in order, later priority preempts; failure — missing label → fallback key logged, no panic, Evidence .omo/evidence/task-39-parity-100.log
   Commit: Y | feat: EVA speech pipeline + full CSF
-- [ ] 40. Radar/minimap logic + sidebar depth
+- [x] 40. Radar/minimap logic + sidebar depth
   What to do / Must NOT do: Engine-side radar/minimap state (shroud-filtered per todo 38, low-power kill switch), sidebar depth: radar tabs, power indicator state, production queue UI, Commando/Engineer rows (PORTING.md:116–119). Launch lane serialization: C6 todos run one-at-a-time over cnc-launcher/src/main.rs (Metis finding 9).
   Parallelization: Wave 4 (C6 chain: 39→40→44→41→42→43) | Blocked by: 39,38 | Blocks: 44 | Parallel with: editor chain, 45
   References: RUST/cnc-tiberian-dawn/PORTING.md:116–119; RUST/cnc-tiberian-dawn/src/game.rs:589–641 (sidebar options today); TIBERIANDAWN/SIDEBAR.CPP; AUDIT §3.8, §4 sidebar row (~10%).
@@ -427,7 +427,7 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): options persist across restart and apply to a live game (`options_apply_to_running_game`); lobby selection boots a 2-player LiveSession.
   QA scenarios: happy — two clients join via lobby and lockstep; failure — invalid config → defaults restored, Evidence .omo/evidence/task-43-parity-100.log
   Commit: Y | feat(launcher): multiplayer and options dialogs
-- [ ] 44. Mission stats collection
+- [x] 44. Mission stats collection
   What to do / Must NOT do: STATS.CPP-style counters in both engines (units built/lost/killed, structures built/lost, credits spent/earned, mission time) published through the EventBus (todo 4) and snapshot-serialized, feeding score.rs. No UI here (todo 41 consumes).
   Parallelization: Wave 4 (C6 chain position 3) | Blocked by: 40,4 | Blocks: 41 | Parallel with: editor chain, 45
   References: TIBERIANDAWN/STATS.CPP (stat semantics); RUST/cnc-launcher/src/score.rs; AUDIT §4 score row, §5 UI row.
