@@ -469,7 +469,7 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): 2x2 building occupies 4 cells with bib (`footprint_occupies_cells`); 5 infantry per cell; property edit is one undo step.
   QA scenarios: happy — place conyard, overlap rejected deterministically; failure — overlapping placement → rejected with reason, Evidence .omo/evidence/task-49-parity-100.log
   Commit: Y | feat(editor): building footprints + infantry groups
-- [ ] 50. INI-driven type registries
+- [x] 50. INI-driven type registries
   What to do / Must NOT do: Load editor catalogs from rules.ini/art.ini via cnc-core RulesDatabase (replaces hardcoded 14–21 ClassId vectors, plugin.rs:95–166); names/prerequisites/costs from data; trigger dialog event/action pickers from todo-32 enums. Unknown type entries warn + skip (never fail the load).
   Parallelization: Wave 4 (C9 serial chain) | Blocked by: 49,25 | Blocks: 51 | Parallel with: C6 chain, 45
   References: RUST/cnc-core/src/rules.rs (RulesDatabase public API); RUST/cnc-map-editor/src/plugin.rs:95–166 (hardcoded vectors); CnCTDRAMapEditor/TiberianDawn/BuildingTypes.cs (registry pattern); AUDIT §6 (type-registries row, ~15%).

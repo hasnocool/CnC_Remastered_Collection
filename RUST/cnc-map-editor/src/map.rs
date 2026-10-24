@@ -2106,4 +2106,70 @@ mod tests {
     fn original_import_requires_map_pack() {
         assert!(MapModel::from_original_ra("[Basic]\nName=X\n").is_err());
     }
+    #[test]
+    fn meg_roundtrips() {
+        // Test that a model can be exported to .MEG format and read back
+        let mut model = MapModel::new(16, 16);
+        model.theater = "Temperate".to_string();
+        model.player_starts.push(Vec2i::new(2, 2));
+        model.insert_object(MapObject {
+            id: 0,
+            class_id: ClassId::ConstructionYard,
+            position: Vec2i::new(5, 5),
+            owner: Some(ClassId::HouseGDI),
+            ..Default::default()
+        });
+        model.add_trigger(Trigger {
+            id: 1,
+            name: "win".to_string(),
+            condition: "always".to_string(),
+            action: "win".to_string(),
+            group: "Victory".to_string(),
+        });
+
+        // Export to MEG
+        let meg_bytes = model.to_meg().expect("export to MEG");
+
+        // Read back from MEG
+        let loaded = MapModel::from_meg(&meg_bytes).expect("read from MEG");
+
+        assert_eq!(loaded.width, model.width);
+        assert_eq!(loaded.height, model.height);
+        assert_eq!(loaded.theater, model.theater);
+        assert_eq!(loaded.player_starts, model.player_starts);
+        assert_eq!(loaded.objects.len(), model.objects.len());
+        assert_eq!(loaded.triggers.len(), model.triggers.len());
+    }
+
+    #[test]
+    #[ignore] // Will pass after implementing cell-bound trigger
+    fn editor_cell_trigger_fires_in_game() {
+        // Test that a cell-bound trigger fires in engine test
+        let mut model = MapModel::new(16, 16);
+        model.theater = "Temperate".to_string();
+        model.player_starts.push(Vec2i::new(2, 2));
+
+        // Place a trigger bound to a specific cell
+        let trigger = Trigger {
+            id: 1,
+            name: "cell_trigger".to_string(),
+            condition: "cell:5,5".to_string(),
+            action: "win".to_string(),
+            group: "Test".to_string(),
+        };
+        model.add_trigger(trigger);
+
+        // Export to MPR (RA original format)
+        let mpr_text = model.to_original_ra().expect("export to MPR");
+
+        // Verify the trigger is in the MPR
+        assert!(mpr_text.contains("cell_trigger"));
+        assert!(mpr_text.contains("cell:5,5"));
+
+        // Load back and verify
+        let loaded = MapModel::from_original_ra(&mpr_text).expect("read from MPR");
+        assert_eq!(loaded.triggers.len(), 1);
+        assert_eq!(loaded.triggers[0].name, "cell_trigger");
+        assert_eq!(loaded.triggers[0].condition, "cell:5,5");
+    }
 }

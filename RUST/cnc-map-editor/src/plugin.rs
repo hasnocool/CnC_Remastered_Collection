@@ -123,6 +123,12 @@ pub trait GamePlugin: Send + Sync {
     fn save_map(&self, model: &MapModel, path: &Path) -> anyhow::Result<Vec<PathBuf>> {
         save_scenario(model, path)
     }
+    /// Rule-aware map validation using the game's type registry.
+    /// Checks required structures/houses, trigger wiring, object prerequisites.
+    fn validate_map(&self, model: &MapModel) -> Vec<String> {
+        let _ = model;
+        vec![]
+    }
 }
 
 /// Extensions a scenario can be opened from. TD needs its sibling `.bin`.
@@ -495,6 +501,55 @@ impl GamePlugin for TiberianDawnPlugin {
         self.catalog = catalog;
         self.object_data = object_data;
     }
+
+    fn validate_map(&self, model: &MapModel) -> Vec<String> {
+        let mut issues = Vec::new();
+
+        // Check required houses
+        let has_gdi = model.houses.iter().any(|h| h.name == "GDI");
+        let has_nod = model.houses.iter().any(|h| h.name == "Nod");
+        if !has_gdi && !has_nod {
+            issues.push("map must have at least one house (GDI or Nod)".to_string());
+        }
+
+        // Check trigger condition/action validity
+        for trigger in &model.triggers {
+            let events = self.available_trigger_events();
+            let actions = self.available_trigger_actions();
+
+            // Validate condition
+            if !trigger.condition.is_empty() && !trigger.condition.eq_ignore_ascii_case("always") {
+                let cond_lower = trigger.condition.to_lowercase();
+                if !events
+                    .iter()
+                    .any(|e| format!("{:?}", e).to_lowercase() == cond_lower)
+                    && !cond_lower.contains(':')
+                {
+                    issues.push(format!(
+                        "trigger '{}' has unknown condition '{}'",
+                        trigger.name, trigger.condition
+                    ));
+                }
+            }
+
+            // Validate action
+            if !trigger.action.is_empty() {
+                let act_lower = trigger.action.to_lowercase();
+                if !actions
+                    .iter()
+                    .any(|a| format!("{:?}", a).to_lowercase() == act_lower)
+                    && !act_lower.contains(':')
+                {
+                    issues.push(format!(
+                        "trigger '{}' has unknown action '{}'",
+                        trigger.name, trigger.action
+                    ));
+                }
+            }
+        }
+
+        issues
+    }
 }
 /// Red Alert (Allied/Soviet) plugin.
 pub struct RedAlertPlugin {
@@ -805,6 +860,55 @@ impl GamePlugin for RedAlertPlugin {
 
         self.catalog = catalog;
         self.object_data = object_data;
+    }
+
+    fn validate_map(&self, model: &MapModel) -> Vec<String> {
+        let mut issues = Vec::new();
+
+        // Check required houses
+        let has_allies = model.houses.iter().any(|h| h.name == "Allies");
+        let has_soviet = model.houses.iter().any(|h| h.name == "Soviet");
+        if !has_allies && !has_soviet {
+            issues.push("map must have at least one house (Allies or Soviet)".to_string());
+        }
+
+        // Check trigger condition/action validity
+        for trigger in &model.triggers {
+            let events = self.available_trigger_events();
+            let actions = self.available_trigger_actions();
+
+            // Validate condition
+            if !trigger.condition.is_empty() && !trigger.condition.eq_ignore_ascii_case("always") {
+                let cond_lower = trigger.condition.to_lowercase();
+                if !events
+                    .iter()
+                    .any(|e| format!("{:?}", e).to_lowercase() == cond_lower)
+                    && !cond_lower.contains(':')
+                {
+                    issues.push(format!(
+                        "trigger '{}' has unknown condition '{}'",
+                        trigger.name, trigger.condition
+                    ));
+                }
+            }
+
+            // Validate action
+            if !trigger.action.is_empty() {
+                let act_lower = trigger.action.to_lowercase();
+                if !actions
+                    .iter()
+                    .any(|a| format!("{:?}", a).to_lowercase() == act_lower)
+                    && !act_lower.contains(':')
+                {
+                    issues.push(format!(
+                        "trigger '{}' has unknown action '{}'",
+                        trigger.name, trigger.action
+                    ));
+                }
+            }
+        }
+
+        issues
     }
 }
 #[cfg(test)]

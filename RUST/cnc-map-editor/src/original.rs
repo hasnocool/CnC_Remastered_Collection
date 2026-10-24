@@ -562,7 +562,63 @@ impl MapModel {
         let bin = bin.expect("the TD writer always produces a cell image");
         Ok((text, bin))
     }
+    /// Write the model as a Megafile (.MEG) archive containing the scenario.
+    pub fn to_meg(&self) -> anyhow::Result<Vec<u8>> {
+        use cnc_asset::Megafile;
 
+        // Determine the dialect: prefer the imported dialect, fall back to the
+        // full-fidelity editor dialect for freshly authored maps.
+        let dialect = self.original_dialect().unwrap_or(ImportKind::EditorDialect);
+
+        let mut mega = Megafile::new();
+
+        match dialect {
+            ImportKind::OriginalTd => {
+                let (ini_text, bin) = self.to_original_td()?;
+                mega.add_file("map.ini", ini_text.into_bytes());
+                mega.add_file("map.bin", bin);
+            }
+            ImportKind::OriginalRa => {
+                let ini_text = self.to_original_ra()?;
+                mega.add_file("map.ini", ini_text.into_bytes());
+            }
+            ImportKind::EditorDialect => {
+                let ini_text = self.to_ini();
+                mega.add_file("map.ini", ini_text.into_bytes());
+            }
+        }
+
+        mega.write().context("write Megafile")
+    }
+
+    /// Read a model from a Megafile (.MEG) archive.
+    pub fn from_meg(data: &[u8]) -> anyhow::Result<Self> {
+        use cnc_asset::Megafile;
+
+        let mega = Megafile::read(data).context("read Megafile")?;
+
+        // Try to find the scenario file
+        let ini_data = mega
+            .get_file("map.ini")
+            .or_else(|| mega.get_file("scenario.ini"))
+            .context("no map.ini or scenario.ini in MEG")?;
+
+        let ini_text =
+            String::from_utf8(ini_data.clone()).context("scenario INI is not valid UTF-8")?;
+
+        // Sniff the format: RA original (MapPack), TD original, or editor dialect.
+        if ini_text.contains("[MapPack]") || ini_text.contains("[OverlayPack]") {
+            // RA original format
+            Self::from_original_ra(&ini_text)
+        } else if ini_text.contains("[Basic]") && mega.get_file("map.bin").is_some() {
+            // TD original format
+            let bin_data = mega.get_file("map.bin").cloned().unwrap_or_default();
+            Self::from_original_td(&ini_text, &bin_data)
+        } else {
+            // Editor dialect (full fidelity)
+            Self::from_ini(&ini_text)
+        }
+    }
     /// Sections that are regenerated from the model rather than preserved.
     pub fn regenerated_sections(&self) -> &'static [&'static str] {
         REGENERATED
