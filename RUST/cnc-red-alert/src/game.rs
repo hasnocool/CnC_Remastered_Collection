@@ -1022,6 +1022,8 @@ pub struct Game {
     pub(crate) ra_dead_structures: Vec<usize>,
     /// Per-house low-power latch.
     pub(crate) ra_low_power_announced: Vec<bool>,
+    /// Cooldown for "base under attack" EVA line.
+    pub(crate) next_base_attack_speak: Fixed16_16,
     /// Rounds reloaded at airfields/helipads (telemetry, matches TD).
     pub aircraft_rearmed: u64,
     pub rules: cnc_core::RulesDatabase,
@@ -1072,8 +1074,8 @@ impl Game {
             ra_dead_units: Vec::new(),
             ra_dead_structures: Vec::new(),
             ra_low_power_announced: Vec::new(),
+            next_base_attack_speak: Fixed16_16::ZERO,
             aircraft_rearmed: 0,
-            rules: cnc_core::RulesDatabase::default(),
             shroud_off: false,
             elapsed: Fixed16_16::ZERO,
             triggers: Vec::new(),
@@ -1089,6 +1091,7 @@ impl Game {
             // Observational only: no bus until a host calls set_event_bus.
             event_source: None,
             scenario_outcome_emitted: false,
+            rules: cnc_core::RulesDatabase::default(),
         }
     }
 
@@ -1993,6 +1996,7 @@ impl Game {
         self.update_rearm(delta);
         self.update_ra_death_announcements();
         self.update_ra_low_power();
+        self.announce_base_attack();
         self.update_triggers();
         self.update_structure_combat(delta);
         self.update_unit_combat(delta);
@@ -3237,6 +3241,25 @@ impl Game {
                 self.eva.speak(cnc_audio::EvaLine::LowPower);
             }
             self.ra_low_power_announced[owner] = low;
+        }
+    }
+
+    /// `HOUSE.CPP` `Attacked()`: warn when a player structure is taking damage.
+    ///
+    /// Gated by the same speech cooldown the remaster uses so a sustained
+    /// assault does not spam the line.
+    fn announce_base_attack(&mut self) {
+        if self.elapsed < self.next_base_attack_speak {
+            return;
+        }
+        let under_attack = self.structures.iter().any(|structure| {
+            structure.owner == self.player_owner
+                && structure.is_alive()
+                && structure.health < structure.max_health
+        });
+        if under_attack {
+            self.eva.speak(cnc_audio::EvaLine::BaseUnderAttack);
+            self.next_base_attack_speak = self.elapsed + Fixed16_16::from_f32(35.0);
         }
     }
 

@@ -45,6 +45,14 @@ pub mod names {
     pub const SUPERWEAPON_FIRED: &str = "td_superweapon_fired";
     /// The campaign mission resolved as a victory or defeat.
     pub const MISSION_OUTCOME: &str = "td_mission_outcome";
+    /// A unit's weapon fired a projectile (AUDIO.CPP fire-effect hook).
+    pub const WEAPON_FIRED: &str = "td_weapon_fired";
+    /// A projectile/warhead impacted (AUDIO.CPP explosion-effect hook).
+    pub const PROJECTILE_IMPACT: &str = "td_projectile_impact";
+    /// The player selected one or more units (UI select beep).
+    pub const UNITS_SELECTED: &str = "td_units_selected";
+    /// A move order was acknowledged (UI move beep).
+    pub const MOVE_ORDERED: &str = "td_move_ordered";
 }
 
 /// Which mission ending was published.
@@ -190,6 +198,78 @@ pub(crate) fn superweapon_fired(
             ("superweapon", serde_json::json!(kind.as_str())),
             ("cell_x", serde_json::json!(cell.x)),
             ("cell_y", serde_json::json!(cell.y)),
+        ]),
+        source.source_name(),
+    );
+    let _ = source.publish(event);
+}
+
+/// Publish a weapon-fired event. Observation only.
+///
+/// Emitted when `Game::update_unit_combat` launches a projectile (the
+/// AUDIO.CPP fire-effect hook point), so the launcher can play the muzzle
+/// sound for the shooter's weapon.
+pub(crate) fn weapon_fired(
+    source: &EventSource,
+    owner: u8,
+    unit_index: usize,
+    position: (i32, i32),
+) {
+    let event = GameEvent::with_source(
+        names::WEAPON_FIRED,
+        structured([
+            ("owner", serde_json::json!(owner)),
+            ("unit_index", serde_json::json!(unit_index)),
+            ("x", serde_json::json!(position.0)),
+            ("y", serde_json::json!(position.1)),
+        ]),
+        source.source_name(),
+    );
+    let _ = source.publish(event);
+}
+
+/// Publish a projectile-impact event. Observation only.
+///
+/// Emitted from `Game::update_projectiles` when a projectile reaches its
+/// target (the AUDIO.CPP explosion-effect hook point).
+pub(crate) fn projectile_impact(source: &EventSource, position: (i32, i32)) {
+    let event = GameEvent::with_source(
+        names::PROJECTILE_IMPACT,
+        structured([
+            ("x", serde_json::json!(position.0)),
+            ("y", serde_json::json!(position.1)),
+        ]),
+        source.source_name(),
+    );
+    let _ = source.publish(event);
+}
+
+/// Publish a units-selected event. Observation only.
+///
+/// Emitted from the `Game::select_*` paths when the selection changed.
+pub(crate) fn units_selected(source: &EventSource, owner: u8, count: usize) {
+    let event = GameEvent::with_source(
+        names::UNITS_SELECTED,
+        structured([
+            ("owner", serde_json::json!(owner)),
+            ("count", serde_json::json!(count)),
+        ]),
+        source.source_name(),
+    );
+    let _ = source.publish(event);
+}
+
+/// Publish a move-order event. Observation only.
+///
+/// Emitted from `Game::order_move` when at least one unit was ordered.
+pub(crate) fn move_ordered(source: &EventSource, owner: u8, count: usize, cell: (i32, i32)) {
+    let event = GameEvent::with_source(
+        names::MOVE_ORDERED,
+        structured([
+            ("owner", serde_json::json!(owner)),
+            ("count", serde_json::json!(count)),
+            ("cell_x", serde_json::json!(cell.0)),
+            ("cell_y", serde_json::json!(cell.1)),
         ]),
         source.source_name(),
     );

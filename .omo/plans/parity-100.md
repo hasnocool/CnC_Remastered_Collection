@@ -406,7 +406,7 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): minimap reflects fog state (`minimap_reflects_shroud`); power-out blanks radar; all buildables incl. commando/engineer listed when prerequisites met.
   QA scenarios: happy — building radar structure enables minimap; failure — radar destroyed → minimap static + EVA offline, Evidence .omo/evidence/task-40-parity-100.log
   Commit: Y | feat(launcher): radar and sidebar depth
-- [ ] 41. RA score + briefing/ending flow
+- [x] 41. RA score + briefing/ending flow
   What to do / Must NOT do: RA score screen path (main.rs:2612 wires td_score only, `ra_score` grep = 0); RA briefing screen (briefing image infra exists, scenario.rs:48) + end-of-mission → score → next mission flow for both engines; stats feed from todo 44.
   Parallelization: Wave 4 (C6 chain position 4) | Blocked by: 44,38 | Blocks: 42 | Parallel with: editor chain, 45
   References: RUST/cnc-launcher/src/score.rs (ScoreReport, td_score); RUST/cnc-launcher/src/main.rs:2612; RUST/cnc-red-alert/src/scenario.rs:48; AUDIT §3.8, §5 UI row.

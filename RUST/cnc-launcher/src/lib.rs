@@ -1,5 +1,6 @@
 //! C&C Launcher library
 
+pub mod audio_director;
 pub mod campaign;
 pub mod events_subscriber;
 pub mod lobby;

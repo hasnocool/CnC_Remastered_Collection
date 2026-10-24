@@ -3292,6 +3292,16 @@ impl Game {
                         Some(target_index as u32),
                     ));
                     self.projectiles_fired += 1;
+                    // AUDIO.CPP fire-effect hook: observation only.
+                    if let Some(source) = self.event_source.as_ref() {
+                        let owner = self.units[index].owner;
+                        crate::events::weapon_fired(
+                            source,
+                            owner,
+                            index,
+                            (position.x.to_f32() as i32, position.y.to_f32() as i32),
+                        );
+                    }
                     if weapon.weapon_type != primary.weapon_type {
                         self.secondary_shots += 1;
                     }
@@ -3501,6 +3511,16 @@ impl Game {
                     projectile.position,
                     projectile.source as usize,
                 ));
+                // AUDIO.CPP explosion-effect hook: observation only.
+                if let Some(source) = self.event_source.as_ref() {
+                    crate::events::projectile_impact(
+                        source,
+                        (
+                            projectile.position.x.to_f32() as i32,
+                            projectile.position.y.to_f32() as i32,
+                        ),
+                    );
+                }
                 false
             } else {
                 true
@@ -3829,6 +3849,10 @@ impl Game {
         }
         if let Some((index, _)) = best {
             self.units[index].is_selected = true;
+            // UI select beep: observation only.
+            if let Some(source) = self.event_source.as_ref() {
+                crate::events::units_selected(source, self.player_owner, 1);
+            }
             Some(index)
         } else {
             None
@@ -3858,6 +3882,12 @@ impl Game {
             if x >= min_x && x <= max_x && y >= min_y && y <= max_y {
                 unit.is_selected = true;
                 count += 1;
+            }
+        }
+        // UI select beep: observation only.
+        if count > 0 {
+            if let Some(source) = self.event_source.as_ref() {
+                crate::events::units_selected(source, self.player_owner, count);
             }
         }
         count
@@ -3905,6 +3935,10 @@ impl Game {
             unit.target = Some(destination);
             unit.ordered = true;
             unit.attack_target = None;
+        }
+        // UI move-order beep: observation only.
+        if let Some(source) = self.event_source.as_ref() {
+            crate::events::move_ordered(source, self.player_owner, count, (target_x, target_y));
         }
         count
     }

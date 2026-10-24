@@ -62,7 +62,9 @@ mod menu;
 mod options;
 mod ready;
 
+use cnc_launcher::audio_director;
 use cnc_launcher::campaign;
+use cnc_launcher::events_subscriber;
 use cnc_launcher::score;
 use lobby_screen::LobbyScreen;
 use menu::{
@@ -2792,6 +2794,13 @@ pub struct LauncherApp {
     assets: AssetRegistry,
     #[allow(dead_code)]
     mixer: AudioMixer,
+    /// In-game SFX director (todo 42): routes engine events to the mixer.
+    audio_director: audio_director::AudioDirector,
+    /// Theme queue (todo 42): explore/combat layers driven by house state.
+    theme_queue: audio_director::ThemeQueue,
+    /// Engine event consumer feeding the director; created at startup so no
+    /// pre-subscription events are missed.
+    event_subscriber: events_subscriber::EventSubscriber,
     /// Persisted launcher options (plan line 206); the options-modal UI
     /// lane mutates this in place.
     #[allow(dead_code)] // Read by the Phase 9.1 options modal.
@@ -2861,6 +2870,11 @@ impl LauncherApp {
         let mut game = Game::with_rules("GDI Mission 1", MAP_SIZE, MAP_SIZE, rules);
         game.setup_demo();
 
+        // Attach the event bus before the game moves into the struct so the
+        // subscriber sees events from the very first tick (todo 42).
+        let event_bus = std::sync::Arc::new(cnc_events::EventBus::new(4096));
+        game.set_event_bus(event_bus.clone());
+
         let mut camera = Camera::default();
         camera.set_viewport(width.max(1), height.max(1));
         camera.position = game.world_center();
@@ -2886,6 +2900,9 @@ impl LauncherApp {
                 options.apply_to_mixer(&mixer);
                 mixer
             },
+            audio_director: audio_director::AudioDirector::new(),
+            theme_queue: audio_director::ThemeQueue::new(),
+            event_subscriber: events_subscriber::EventSubscriber::new(event_bus),
             options,
             cursor: None,
             drag_start: None,
@@ -4195,6 +4212,16 @@ impl LauncherApp {
         if !self.td_paused {
             self.game
                 .update(Fixed16_16::from_f32(delta * self.game_speed));
+            // In-game SFX: pump engine events through the audio director
+            // (todo 42). The EVA voice queue is drained by the existing
+            // speech wiring; this lane covers positional/UI effects.
+            let events = self.event_subscriber.drain();
+            self.audio_director.route_batch(&self.mixer, &events);
+            // Theme escalation: a damaged player structure switches the
+            // music layer to combat (THEME.CPP On_Base_Attack analogue).
+            if self.game.eva.pending() == Some(cnc_audio::EvaLine::BaseUnderAttack) {
+                self.theme_queue.on_base_attack();
+            }
         }
 
         if self.game.units_produced != self.last_produced {
@@ -5756,6 +5783,15 @@ pub struct RaLauncherApp {
     /// (1 = RA, 2 = TD); None until the first successful upload, keeping
     /// uploads rare (screen context changes, never per frame).
     tileset_slot: Option<u8>,
+    /// In-game SFX director (todo 42): routes engine events to the mixer.
+    audio_director: audio_director::AudioDirector,
+    /// Shared audio mixer (todo 42): headless fallback when no device exists.
+    mixer: AudioMixer,
+    /// Theme queue (todo 42): explore/combat layers driven by house state.
+    theme_queue: audio_director::ThemeQueue,
+    /// Engine event consumer feeding the director; created before the first
+    /// tick so no pre-subscription events are missed.
+    event_subscriber: events_subscriber::EventSubscriber,
     scenario_name: String,
     mode: RaMode,
     setup: SkirmishSetup,
@@ -5816,6 +5852,12 @@ pub struct RaLauncherApp {
 impl RaLauncherApp {
     pub fn new(kind: RendererKind, width: u32, height: u32, frame_limit: u64) -> Self {
         let game = RaGame::new(MAP_SIZE, MAP_SIZE);
+        // Attach the event bus before anything ticks so the audio director
+        // sees every engine event (todo 42). A missing device falls back to
+        // a silent headless mixer: sim unaffected either way.
+        let event_bus = std::sync::Arc::new(cnc_events::EventBus::new(4096));
+        let mut game = game;
+        game.set_event_bus(event_bus.clone());
         let mut camera = Camera::default();
         camera.set_viewport(width.max(1), height.max(1));
         camera.position = Vec2::new(
@@ -5830,6 +5872,10 @@ impl RaLauncherApp {
             renderer: None,
             camera,
             game,
+            audio_director: audio_director::AudioDirector::new(),
+            mixer: AudioMixer::headless(),
+            theme_queue: audio_director::ThemeQueue::new(),
+            event_subscriber: events_subscriber::EventSubscriber::new(event_bus),
             ra_tileset: cnc_asset::tileset_pack::load_default("ra_inspired"),
             td_tileset: cnc_asset::tileset_pack::load_default("td_inspired"),
             tileset_slot: None,
@@ -7514,6 +7560,16 @@ impl RaLauncherApp {
         if !self.paused {
             self.game
                 .update(Fixed16_16::from_f32(delta * self.game_speed));
+            // In-game SFX: pump engine events through the audio director
+            // (todo 42). A missing device falls back to a headless mixer;
+            // route errors are swallowed either way.
+            let events = self.event_subscriber.drain();
+            self.audio_director.route_batch(&self.mixer, &events);
+            // Theme escalation: a damaged player structure switches the
+            // music layer to combat (THEME.CPP On_Base_Attack analogue).
+            if self.game.eva.pending() == Some(cnc_audio::EvaLine::BaseUnderAttack) {
+                self.theme_queue.on_base_attack();
+            }
         }
 
         renderer.begin_frame();
