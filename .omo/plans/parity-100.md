@@ -385,7 +385,7 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): moving scout reveals sight circle (`scout_reveals_circle`); RA fog re-covers after delay, TD stays revealed; snapshot round-trip preserves grid.
   QA scenarios (name the exact tool + invocation): happy — two identical games with fog produce identical CRCs; failure — sight range OOB → clamped, no panic, Evidence .omo/evidence/task-37-parity-100.log
   Commit: Y | feat(core): per-house visibility layer
-- [ ] 38. Shroud consumers + GPS + paradrops
+- [x] 38. Shroud consumers + GPS + paradrops
   What to do / Must NOT do: Targeting/AI consult shroud (negative test: fully shrouded enemy NOT targeted); GPS superweapon wired into Game::superweapons + one-shot mass reveal (struct exists, superweapon.rs:283, never instantiated — AUDIT §8.6 wire-or-wire decision: wire); gap generator shrouds its area (gapgen consulted by targeting); radar low-power → minimap dead; paradrops via Badger/transport (needs todo 16). Also accepts the special-flags shroud-off test moved from todo 36 (`special_shroud_off_disables_fog`). Do NOT let this lane edit ai.rs/house.rs beyond targeting call sites (ownership: this todo is the C5 lane's consumer wiring, and it runs strictly after the C4 chain completes).
   Parallelization: Wave 3 (C5 chain tail, strictly after C4 chain 32–36) | Blocked by: 37,32,16,34,35,36 | Blocks: 40 | Parallel with: none
   References: RUST/cnc-red-alert/src/superweapon.rs:283 (gps_reveals_every_enemy_and_resets test exists); RUST/cnc-red-alert/src/gapgen.rs (shrouds() never consulted); TIBERIANDAWN/AIRCRAFT.CPP (Badger paradrop); TIBERIANDAWN/SPECIAL.CPP (special flags); AUDIT §3.3, §3.7, §5 specials.

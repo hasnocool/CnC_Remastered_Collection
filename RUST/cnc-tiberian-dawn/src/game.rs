@@ -1608,8 +1608,10 @@ impl Game {
         true
     }
 
-    fn apply_blast(&mut self, center: Vec2, radius: f32, damage: i32, warhead: WarheadType) {
-        let warhead = self.warhead_profile(warhead);
+    fn apply_blast(&mut self, center: Vec2, radius: f32, damage: i32, warhead_type: WarheadType) {
+        let warhead_profile = self.warhead_profile(warhead_type);
+        let warhead_rule = self.rules.warhead(warhead_type.ini_name());
+
         for unit in &mut self.units {
             if !unit.is_alive() {
                 continue;
@@ -1618,7 +1620,7 @@ impl Game {
             if distance > radius {
                 continue;
             }
-            let modified = warhead
+            let modified = warhead_profile
                 .damage(
                     Fixed16_16::from_int(damage),
                     unit.armor,
@@ -1638,7 +1640,7 @@ impl Game {
             if distance > radius {
                 continue;
             }
-            let modified = warhead
+            let modified = warhead_profile
                 .damage(
                     Fixed16_16::from_int(damage),
                     building.armor,
@@ -1647,6 +1649,34 @@ impl Game {
                 .int();
             building.health =
                 (building.health - Fixed16_16::from_int(modified)).max(Fixed16_16::ZERO);
+        }
+
+        // Apply damage to walls/overlays in blast radius (COMBAT.CPP Explosion_Damage)
+        if let Some(rule) = warhead_rule {
+            let destroy_walls = rule.destroy_walls;
+            let destroy_wood = rule.destroy_wood;
+            let radius_cells = (radius / TILE_SIZE).ceil() as i32;
+            let center_cell = Vec2i::new(
+                center.x.int() / TILE_SIZE as i32,
+                center.y.int() / TILE_SIZE as i32,
+            );
+            for dy in -radius_cells..=radius_cells {
+                for dx in -radius_cells..=radius_cells {
+                    let cell = Vec2i::new(center_cell.x + dx, center_cell.y + dy);
+                    if !self.map.grid.in_bounds(cell.x, cell.y) {
+                        continue;
+                    }
+                    let cell_center = Self::cell_center(cell.x, cell.y);
+                    let distance = cell_center.distance(center).to_f32();
+                    if distance > radius {
+                        continue;
+                    }
+                    // Apply wall damage - use base damage without armor modification for walls
+                    self.map
+                        .grid
+                        .reduce_wall(cell, damage, destroy_walls, destroy_wood, false);
+                }
+            }
         }
     }
 
@@ -6982,6 +7012,58 @@ mod weapon_rules_tests {
             unit.weapon.as_ref().unwrap().damage,
             Fixed16_16::from_int(42)
         );
+    }
+}
+
+#[cfg(test)]
+mod overlay_terrain_tests {
+    use super::*;
+    use crate::td_rules::WeaponType;
+    use cnc_core::rules::RulesDatabase;
+
+    fn rules(source: &str) -> RulesDatabase {
+        RulesDatabase::from_str(source).expect("rules should parse")
+    }
+
+    #[test]
+    fn warhead_flags_gate_wall_damage() {
+        // HE warhead has DestroyWalls=yes, sniper (HollowPoint) does not
+        let database = rules("[HE]\nDestroyWalls=yes\nSpread=6\nVerses=100,100,100,100,100\n");
+        let mut game = Game::with_rules("test", 32, 32, database);
+        game.setup_demo();
+
+        // Place a wall overlay at cell (10, 10)
+        let wall_cell = Vec2i::new(10, 10);
+        game.map.grid.set_overlay(wall_cell, 1); // overlay_type 1 = wall
+
+        // Fire HE projectile at the wall cell - should destroy it
+        let he_weapon = game.make_weapon(WeaponType::Grenade); // uses HE warhead
+        let center = Game::cell_center(wall_cell.x, wall_cell.y);
+        game.apply_blast(
+            center,
+            1.0,
+            he_weapon.damage.int(),
+            he_weapon.warhead.warhead_type,
+        );
+
+        // Wall should be destroyed
+        assert_eq!(game.map.grid.get(wall_cell).unwrap().overlay_type, 0);
+
+        // Reset wall
+        game.map.grid.set_overlay(wall_cell, 1);
+
+        // Fire sniper (HollowPoint) at the wall cell - should NOT destroy it
+        let sniper_weapon = game.make_weapon(WeaponType::Rifle); // uses HollowPoint warhead
+        let center = Game::cell_center(wall_cell.x, wall_cell.y);
+        game.apply_blast(
+            center,
+            1.0,
+            sniper_weapon.damage.int(),
+            sniper_weapon.warhead.warhead_type,
+        );
+
+        // Wall should remain
+        assert_eq!(game.map.grid.get(wall_cell).unwrap().overlay_type, 1);
     }
 }
 

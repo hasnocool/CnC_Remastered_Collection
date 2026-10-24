@@ -28,11 +28,17 @@ pub struct CellGrid {
 pub struct Cell {
     pub terrain_type: u8,
     pub overlay_type: u8,
+    pub overlay_hp: u8,
     pub tiberium_amount: u8,
     pub is_passable: bool,
     pub is_buildable: bool,
     pub has_tiberium: bool,
     pub tiberium_type: u8,
+    // Smudge/scorch layer for persistence across save/replay
+    pub smudge_type: u8,
+    pub smudge_data: u8,
+    // Land type for movement/combat semantics (water, tree, etc.)
+    pub land_type: u8,
 }
 
 impl CellGrid {
@@ -42,11 +48,15 @@ impl CellGrid {
             cells.push(Cell {
                 terrain_type: 0,
                 overlay_type: 0,
+                overlay_hp: 0,
                 tiberium_amount: 0,
                 is_passable: true,
                 is_buildable: true,
                 has_tiberium: false,
                 tiberium_type: 0,
+                smudge_type: 0,
+                smudge_data: 0,
+                land_type: 0,
             });
         }
         Self {
@@ -83,6 +93,89 @@ impl CellGrid {
     pub fn set_overlay(&mut self, pos: Vec2i, overlay: u8) {
         if let Some(cell) = self.get_mut(pos) {
             cell.overlay_type = overlay;
+        }
+    }
+
+    /// Apply damage to a wall/overlay in a cell. Returns true if the overlay was destroyed.
+    /// Based on CELL.CPP CellClass::Reduce_Wall.
+    pub fn reduce_wall(
+        &mut self,
+        pos: Vec2i,
+        damage: i32,
+        destroy_walls: bool,
+        destroy_wood: bool,
+        _is_wooden: bool,
+    ) -> bool {
+        let Some(cell) = self.get_mut(pos) else {
+            return false;
+        };
+        if cell.overlay_type == 0 {
+            return false;
+        }
+
+        // Check if this is a wall type and if the warhead can destroy it
+        let is_wall = Self::is_wall_overlay(cell.overlay_type);
+        let is_wooden_wall = Self::is_wooden_overlay(cell.overlay_type);
+
+        if !is_wall {
+            return false;
+        }
+
+        if !destroy_walls && !(destroy_wood && is_wooden_wall) {
+            return false;
+        }
+
+        // Initialize HP if not set (full HP)
+        if cell.overlay_hp == 0 {
+            cell.overlay_hp = Self::max_hp_for_overlay(cell.overlay_type);
+        }
+
+        // Apply damage
+        let damage = damage.clamp(0, 255) as u8;
+        let destroyed = if damage >= cell.overlay_hp {
+            true
+        } else {
+            // Chance-based destruction proportional to damage
+            // Using a simple deterministic approach: destroy if damage >= HP/2 for now
+            // The original uses Random_Pick(0, wall.DamagePoints) < damage
+            damage >= (cell.overlay_hp / 2).max(1)
+        };
+
+        if destroyed {
+            cell.overlay_type = 0;
+            cell.overlay_hp = 0;
+            cell.is_passable = true;
+            // Apply scorch mark (smudge) when wall is destroyed by HE
+            cell.smudge_type = 1; // SMUDGE_SCORCH
+            cell.smudge_data = 0;
+            true
+        } else {
+            cell.overlay_hp = cell.overlay_hp.saturating_sub(damage);
+            false
+        }
+    }
+
+    /// Check if an overlay type is a wall
+    fn is_wall_overlay(overlay_type: u8) -> bool {
+        // Overlay types 1-5 are walls (sandbag, cyclone, brick, barbwire, wood)
+        matches!(overlay_type, 1..=5)
+    }
+
+    /// Check if an overlay type is a wooden wall
+    fn is_wooden_overlay(overlay_type: u8) -> bool {
+        // Overlay type 5 is wood wall
+        overlay_type == 5
+    }
+
+    /// Get max HP for an overlay type
+    fn max_hp_for_overlay(overlay_type: u8) -> u8 {
+        match overlay_type {
+            1 => 16, // Sandbag - 16 HP (from original DamagePoints=16)
+            2 => 32, // Cyclone - 32 HP
+            3 => 48, // Brick - 48 HP
+            4 => 16, // Barbwire - 16 HP
+            5 => 16, // Wood - 16 HP
+            _ => 0,
         }
     }
 
@@ -418,6 +511,35 @@ pub fn is_water_terrain(terrain_type: u8) -> bool {
     terrain_type >= TERRAIN_WATER_BASE
 }
 
+/// Land type constants for terrain semantics (movement, combat)
+/// These are stored in Cell.land_type and determine passability, damage effects, etc.
+pub const LAND_CLEAR: u8 = 0; // Normal passable ground
+pub const LAND_ROCK: u8 = 1; // Rocky terrain (impassable to most)
+pub const LAND_WATER: u8 = 2; // Water (drowns infantry, boats only)
+pub const LAND_TREE: u8 = 3; // Trees (blocks movement, destructible)
+pub const LAND_SANDBAG: u8 = 4; // Sandbags (absorbs rifle, falls to HE)
+pub const LAND_BRICK: u8 = 5; // Brick/concrete walls
+pub const LAND_WOOD: u8 = 6; // Wooden walls/fences
+
+/// Check if a land type is water (drowns infantry)
+pub fn is_water_land(land_type: u8) -> bool {
+    land_type == LAND_WATER
+}
+
+/// Check if a land type blocks movement (trees, walls)
+pub fn is_blocking_land(land_type: u8) -> bool {
+    matches!(land_type, LAND_TREE | LAND_BRICK | LAND_WOOD)
+}
+
+/// Check if a land type is destructible by HE (sandbags, wood)
+pub fn is_he_destructible_land(land_type: u8) -> bool {
+    matches!(land_type, LAND_SANDBAG | LAND_WOOD)
+}
+
+/// Check if a land type absorbs small arms (sandbags)
+pub fn is_small_arms_absorbing_land(land_type: u8) -> bool {
+    land_type == LAND_SANDBAG
+}
 /// `resources_fx` family (plus fallback manifest row) for a tiberium cell.
 ///
 /// Growth stages 0–1 render the sprout family, stage 2 the cluster family,

@@ -11,7 +11,7 @@ use std::collections::BinaryHeap;
 
 use cnc_core::Vec2i;
 
-use crate::map::CellGrid;
+use crate::map::{is_blocking_land, is_water_terrain, CellGrid};
 
 const DIRS: [(i32, i32); 8] = [
     (0, -1),  // North
@@ -23,7 +23,6 @@ const DIRS: [(i32, i32); 8] = [
     (-1, 0),  // West
     (-1, -1), // North-West
 ];
-
 const COST_ORTHOGONAL: i32 = 10;
 const COST_DIAGONAL: i32 = 14;
 
@@ -84,7 +83,20 @@ pub fn find_path(
         if !grid.in_bounds(x, y) {
             return false;
         }
-        grid.cells[index(x, y)].is_passable
+        let cell = &grid.cells[index(x, y)];
+        // Base passability check
+        if !cell.is_passable {
+            return false;
+        }
+        // Water terrain blocks ground units
+        if is_water_terrain(cell.terrain_type) {
+            return false;
+        }
+        // Blocking land types (trees, brick walls, wood walls)
+        if is_blocking_land(cell.land_type) {
+            return false;
+        }
+        true
     };
     let passable = |x: i32, y: i32, allow_blocked: bool| {
         terrain_ok(x, y) && (allow_blocked || !is_blocked(x, y))

@@ -405,6 +405,8 @@ pub struct WarheadRule {
     pub name: String,
     pub spread: i32,
     pub wall: bool,
+    pub destroy_walls: bool,
+    pub destroy_wood: bool,
     pub verses: Vec<u8>,
 }
 
@@ -432,6 +434,8 @@ impl WarheadRule {
             name: name.to_string(),
             spread: get_i32(section, "Spread").unwrap_or(0),
             wall: get_bool(section, "Wall").unwrap_or(false),
+            destroy_walls: get_bool(section, "DestroyWalls").unwrap_or(false),
+            destroy_wood: get_bool(section, "DestroyWood").unwrap_or(false),
             verses,
         }
     }
