@@ -39,6 +39,14 @@ pub struct LauncherOptions {
     pub effects_volume: f32,
     /// Master volume, 0..=1 (cnc-audio `AudioMixer::set_master_volume`).
     pub master_volume: f32,
+    /// Game speed multiplier, 0.25..=3.0 (applied to running game simulation).
+    pub game_speed: f32,
+    /// Maximum buildable tech level (0 = no cap). Matches `BuildLevel`.
+    pub build_threshold: u8,
+    /// Shroud / fog disabled (`IsShadowGrow` / `ShroudOff`).
+    pub shroud_off: bool,
+    /// One-tick strikes enabled (instant attack execution).
+    pub one_tick_strikes: bool,
     /// Read-only display list of the hard-coded hotkeys as
     /// `(action, key)` pairs; never persisted because rebinding is out of
     /// scope for this lane.
@@ -52,6 +60,10 @@ impl Default for LauncherOptions {
             music_volume: 1.0,
             effects_volume: 1.0,
             master_volume: 1.0,
+            game_speed: 1.0,
+            build_threshold: 0,
+            shroud_off: false,
+            one_tick_strikes: false,
             controls: Self::default_controls(),
         }
     }
@@ -198,6 +210,20 @@ impl LauncherOptions {
                     options.effects_volume = volume_or(value, options.effects_volume)
                 }
                 "mastervolume" => options.master_volume = volume_or(value, options.master_volume),
+                "gamespeed" => options.game_speed = speed_or(value, options.game_speed),
+                "buildthreshold" => {
+                    if let Ok(v) = value.trim().parse::<u8>() {
+                        options.build_threshold = v;
+                    }
+                }
+                "shroudoff" => {
+                    options.shroud_off =
+                        value.trim().eq_ignore_ascii_case("true") || value.trim() == "1";
+                }
+                "onetickstrikes" => {
+                    options.one_tick_strikes =
+                        value.trim().eq_ignore_ascii_case("true") || value.trim() == "1";
+                }
                 _ => {}
             }
         }
@@ -225,8 +251,15 @@ impl LauncherOptions {
         std::fs::write(
             path,
             format!(
-                "[Options]\nRenderer={}\nMusicVolume={}\nEffectsVolume={}\nMasterVolume={}\n",
-                self.renderer, self.music_volume, self.effects_volume, self.master_volume
+                "[Options]\nRenderer={}\nMusicVolume={}\nEffectsVolume={}\nMasterVolume={}\nGameSpeed={}\nBuildThreshold={}\nShroudOff={}\nOneTickStrikes={}\n",
+                self.renderer,
+                self.music_volume,
+                self.effects_volume,
+                self.master_volume,
+                self.game_speed,
+                self.build_threshold,
+                self.shroud_off,
+                self.one_tick_strikes
             ),
         )
     }
@@ -241,9 +274,22 @@ fn volume_or(value: &str, fallback: f32) -> f32 {
     }
 }
 
+/// Parse a persisted game speed: finite values clamp into 0.25..=3.0 (the
+/// in-game speed range in `main.rs::adjust_td_speed`), everything else keeps
+/// `fallback`.
+fn speed_or(value: &str, fallback: f32) -> f32 {
+    match value.trim().parse::<f32>() {
+        Ok(speed) if speed.is_finite() => speed.clamp(0.25, 3.0),
+        _ => fallback,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::LauncherApp;
+    use crate::RendererKind;
+    use cnc_core::RulesDatabase;
 
     // --- LauncherOptions: defaults, validation, persistence ---
 
@@ -351,6 +397,10 @@ mod tests {
             music_volume: 0.25,
             effects_volume: 0.5,
             master_volume: 0.75,
+            game_speed: 1.0,
+            build_threshold: 0,
+            shroud_off: false,
+            one_tick_strikes: false,
             controls: LauncherOptions::default_controls(),
         };
         options.save_to(&path).expect("save creates parent dirs");
@@ -502,5 +552,55 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn options_apply_to_running_game() {
+        let dir = scratch("apply-running");
+        let _guard = ScratchGuard(dir.clone());
+        let path = dir.join("launcher-options.ini");
+
+        // Create options with game speed and special toggles
+        let options = LauncherOptions {
+            renderer: "software".to_string(),
+            music_volume: 0.5,
+            effects_volume: 0.75,
+            master_volume: 0.8,
+            game_speed: 1.5,
+            build_threshold: 5,
+            shroud_off: true,
+            one_tick_strikes: false,
+            controls: LauncherOptions::default_controls(),
+        };
+        options.save_to(&path).expect("save options");
+
+        // Load options in new session
+        let loaded = LauncherOptions::load_from(&path);
+
+        // Verify persistence
+        assert_eq!(loaded.game_speed, 1.5);
+        assert_eq!(loaded.build_threshold, 5);
+        assert!(loaded.shroud_off);
+        assert!(!loaded.one_tick_strikes);
+
+        // Apply to running game
+        let app = LauncherApp::new(
+            RendererKind::Software,
+            320,
+            240,
+            RulesDatabase::default(),
+            loaded,
+        )
+        .expect("create app");
+
+        // Game speed should be applied from options
+        assert_eq!(app.game_speed, 1.5);
+
+        // Volume should be applied to mixer
+        let mixer = cnc_audio::AudioMixer::headless();
+        options.apply_to_mixer(&mixer);
+        assert_eq!(mixer.music_volume(), 0.5);
+        assert_eq!(mixer.effects_volume(), 0.75);
+        assert_eq!(mixer.master_volume(), 0.8);
     }
 }

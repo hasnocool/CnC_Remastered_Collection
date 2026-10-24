@@ -13,6 +13,26 @@ pub enum RendererKind {
     Software,
 }
 
+impl RendererKind {
+    pub fn parse(value: &str) -> anyhow::Result<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "wgpu" | "gpu" => Ok(Self::Wgpu),
+            "software" | "cpu" => Ok(Self::Software),
+            other => Err(anyhow::anyhow!(
+                "unknown renderer '{}' (expected 'wgpu' or 'software')",
+                other
+            )),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Wgpu => "wgpu",
+            Self::Software => "software",
+        }
+    }
+}
+
 /// Default map size for skirmish games.
 pub const MAP_SIZE: u32 = 64;
 
@@ -31,6 +51,8 @@ pub struct LauncherApp {
     pub game: Game,
     pub td_tileset: Option<TilesetPack>,
     pub ra_tileset: Option<TilesetPack>,
+    /// Game speed multiplier, applied to fixed-step simulation.
+    pub game_speed: f32,
 }
 
 impl LauncherApp {
@@ -39,6 +61,7 @@ impl LauncherApp {
         width: u32,
         height: u32,
         rules: RulesDatabase,
+        options: crate::options::LauncherOptions,
     ) -> anyhow::Result<Self> {
         let mut game = Game::with_rules("GDI Mission 1", MAP_SIZE, MAP_SIZE, rules);
         game.setup_demo();
@@ -56,6 +79,7 @@ impl LauncherApp {
             game,
             td_tileset: cnc_asset::tileset_pack::load_default("td_inspired"),
             ra_tileset: cnc_asset::tileset_pack::load_default("ra_inspired"),
+            game_speed: options.game_speed.clamp(0.25, 3.0),
         })
     }
 }

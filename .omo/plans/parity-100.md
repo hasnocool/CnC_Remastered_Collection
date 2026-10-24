@@ -413,7 +413,7 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): RA mission end renders animated score (`ra_mission_end_shows_score`); briefing renders before first mission.
   QA scenarios: happy — scripted RA mission completes through briefing→mission→score→next; failure — missing stats → zeros displayed, no panic, Evidence .omo/evidence/task-41-parity-100.log
   Commit: Y | feat(launcher): RA score and briefing flow
-- [ ] 42. In-game SFX + theme queue
+- [x] 42. In-game SFX + theme queue
   What to do / Must NOT do: Engine sound events (fire/explosion/select/move/build-complete) routed to the launcher AudioMixer (menu-only today — main.rs:8224); ThemeClass scan/play/next tied to house state (TIBERIANDAWN/THEME.CPP) using the existing MusicPlayer explore/combat layers.
   Parallelization: Wave 4 (C6 chain position 5) | Blocked by: 41 | Blocks: 43 | Parallel with: editor chain, 45
   References: RUST/cnc-audio/src/{mixer.rs,music.rs}; RUST/cnc-sfx (procedural effects); TIBERIANDAWN/THEME.CPP; AUDIT §3.8, §7 (SFX unwired).

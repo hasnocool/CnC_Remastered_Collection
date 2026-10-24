@@ -2880,6 +2880,9 @@ impl LauncherApp {
         camera.position = game.world_center();
         camera.zoom = Fixed16_16::from_f32(DEFAULT_GAME_ZOOM);
 
+        // Extract game_speed before options is moved into mixer
+        let game_speed = options.game_speed.clamp(0.25, 3.0);
+
         Ok(Self {
             kind,
             width,
@@ -2914,7 +2917,10 @@ impl LauncherApp {
             control_groups: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             selected_building: None,
             save_slot: 0,
-            game_speed: 1.0,
+            // In-game options applied from persistence (plan todo 43):
+            // game speed drives the fixed-step multiplier and the special
+            // toggles are pushed onto every house AI once the sim is running.
+            game_speed,
             frame_index: 0,
             last_produced: 0,
             last_harvested: 0,

@@ -6,11 +6,13 @@ pub mod events_subscriber;
 pub mod lobby;
 pub mod lobby_screen;
 pub mod menu;
+pub mod options;
 pub mod ready;
 /// End-of-mission scoring, shared by the launcher shell and the campaign flow.
 pub mod score;
 pub mod types;
 
+pub use options::LauncherOptions;
 pub use types::{
     LauncherApp, RaLauncherApp, RendererKind, DEFAULT_GAME_ZOOM, MAP_SIZE, RA_TILE_SIZE,
 };
