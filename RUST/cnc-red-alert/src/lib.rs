@@ -39,6 +39,10 @@ pub use scenario_mpr::{build_game as build_game_from_original, load_mpr, load_mp
 pub use spy::{InfiltrationEffect, InfiltrationTarget, Spy, Thief};
 pub use superweapon::{ArmoredUnit, Chronosphere, IronCurtain, Superweapon, SuperweaponError, GPS};
 pub use tesla::{TeslaBolt, TeslaCoil};
+
+#[cfg(test)]
+mod mission_fsm_tests;
+
 #[cfg(test)]
 mod integration_tests {
     use super::*;

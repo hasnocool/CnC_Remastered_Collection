@@ -382,6 +382,24 @@ impl UnitRole {
     }
 }
 
+/// Mission state machine for assigned unit roles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum MissionState {
+    #[default]
+    Guard,
+    Idle,
+    Hunt,
+    Attack,
+    Move,
+    GuardArea,
+    Enter,
+    Unload,
+    Retreat,
+    Stop,
+    Sticky,
+    Construction,
+}
+
 /// Damage, range and reload for a unit or defensive structure.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WeaponSpec {
@@ -544,6 +562,12 @@ pub struct GameUnit {
     /// Cargo hold: unit IDs of passengers being transported (CARGO.CPP semantics).
     /// When the transport dies, all cargo units die with it.
     pub cargo: Vec<u32>,
+    /// Current mission state.
+    pub mission: MissionState,
+    /// Guard post cell to return to.
+    pub guard_post: Option<Vec2i>,
+    /// Destination cell for area defense / move.
+    pub mission_destination: Option<Vec2i>,
 }
 
 impl GameUnit {
@@ -603,6 +627,9 @@ impl GameUnit {
             max_ammo: if role.is_air() { AIR_MAX_AMMO } else { 0 },
             invulnerable_until: Fixed16_16::ZERO,
             armor: armor_for(class_id, rules),
+            mission: MissionState::default(),
+            guard_post: None,
+            mission_destination: None,
             cargo: Vec::new(),
         }
     }
@@ -3168,6 +3195,18 @@ impl Game {
             };
             unit.reload = (unit.reload - delta).max(Fixed16_16::ZERO);
             let enemies = snapshots.get(unit.owner).map(Vec::as_slice).unwrap_or(&[]);
+
+            // Mission state handling: Guard retaliates, Hunt seeks
+            match unit.mission {
+                // If no target, find nearest enemy in range (retaliate / hunt)
+                MissionState::Guard | MissionState::Hunt if unit.target.is_none() => {
+                    if let Some((target, _)) = nearest_enemy(enemies, unit.position, weapon.range) {
+                        unit.target = Some(target);
+                    }
+                }
+                _ => {}
+            }
+
             if let Some(target) = unit.target {
                 if !enemies.iter().any(|enemy| enemy.target == target) {
                     unit.target = None;
@@ -3307,6 +3346,50 @@ impl Game {
     }
 
     fn update_movement(&mut self, delta: Fixed16_16) {
+        // Pass 1: collect mission-driven path updates without borrow conflicts
+        let mut mission_paths = Vec::new();
+        for (i, unit) in self.units.iter().enumerate() {
+            if !unit.is_alive() {
+                continue;
+            }
+            match unit.mission {
+                MissionState::Guard => {
+                    if let Some(post) = unit.guard_post {
+                        if unit.path.is_empty() && unit.cell != post {
+                            let class = unit.role.move_class();
+                            let blocked = self.blocked_cells();
+                            let threat = self.threat_cells(unit.owner);
+                            if let Some(path) =
+                                find_path(&self.map, class, &blocked, unit.cell, post, &threat)
+                            {
+                                mission_paths.push((i, path.into()));
+                            }
+                        }
+                    }
+                }
+                MissionState::Attack => {
+                    if let Some(dest) = unit.mission_destination {
+                        if unit.path.is_empty() && unit.cell != dest {
+                            let class = unit.role.move_class();
+                            let blocked = self.blocked_cells();
+                            let threat = self.threat_cells(unit.owner);
+                            if let Some(path) =
+                                find_path(&self.map, class, &blocked, unit.cell, dest, &threat)
+                            {
+                                mission_paths.push((i, path.into()));
+                            }
+                        }
+                    }
+                }
+                MissionState::Idle => {}
+                _ => {}
+            }
+        }
+        for (i, path) in mission_paths {
+            self.units[i].path = path;
+        }
+
+        // Pass 2: normal movement along existing paths
         for unit in &mut self.units {
             if !unit.is_alive() {
                 continue;
@@ -4834,6 +4917,24 @@ mod trigger_apply_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_blocked_cells_at_20_20() {
+        let game = Game::new(40, 40);
+        for x in 18..=22i32 {
+            for y in 18..=22i32 {
+                let c = Vec2i::new(x, y);
+                let blocked = game.blocked_cells().contains(&c);
+                let water = game.map.is_water(c);
+                if blocked || water {
+                    println!("cell {}{} blocked={} water={}", x, y, blocked, water);
+                }
+            }
+        }
+        for s in &game.structures {
+            println!("structure {:?} at {:?}", s.class_id, s.cell);
+        }
+    }
 
     /// Original-format scenario: a 2x2-ish map packed into a 16x16 grid.
     const ORIGINAL_SCENARIO: &str = "\
@@ -7430,5 +7531,81 @@ Player=Allies
             passenger.is_none() || !passenger.unwrap().is_alive(),
             "passenger must die with transport"
         );
+    }
+
+    #[test]
+    fn guard_retaliates_then_returns() {
+        let mut game = Game::new(40, 40);
+        game.structures.clear();
+        game.units.clear();
+        let guard_cell = Vec2i::new(10, 10);
+        let guard_post = Vec2i::new(15, 10); // Different from guard_cell
+        let guard_id = game.spawn_unit(0, ClassId::VehicleE2, guard_cell);
+        let guard = game.units.iter_mut().find(|u| u.id == guard_id).unwrap();
+        guard.mission = MissionState::Guard;
+        guard.guard_post = Some(guard_post);
+        let enemy_id = game.spawn_unit(1, ClassId::VehicleE2, Vec2i::new(12, 10));
+        let enemy = game.units.iter_mut().find(|u| u.id == enemy_id).unwrap();
+        enemy.mission = MissionState::Attack;
+        enemy.target = Some(TargetRef::Unit(guard_id));
+        game.update_unit_combat(Fixed16_16::from_f32(1.0));
+        let guard = game.units.iter().find(|u| u.id == guard_id).unwrap();
+        assert_eq!(
+            guard.target,
+            Some(TargetRef::Unit(enemy_id)),
+            "guard retaliates"
+        );
+        let enemy = game.units.iter_mut().find(|u| u.id == enemy_id).unwrap();
+        enemy.health = Fixed16_16::ZERO;
+        game.remove_dead();
+        // Run full update to allow mission state machine to set return path
+        game.update(Fixed16_16::from_f32(1.0));
+        let guard = game.units.iter().find(|u| u.id == guard_id).unwrap();
+        assert_eq!(guard.target, None, "guard clears target after enemy dead");
+        assert!(!guard.path.is_empty(), "guard has return path");
+    }
+
+    #[test]
+    fn hunt_engages_nearest_enemy() {
+        let mut game = Game::new(40, 40);
+        game.structures.clear();
+        game.units.clear();
+        let hunter_id = game.spawn_unit(0, ClassId::VehicleE2, Vec2i::new(10, 10));
+        let hunter = game.units.iter_mut().find(|u| u.id == hunter_id).unwrap();
+        hunter.mission = MissionState::Hunt;
+        let enemy1_id = game.spawn_unit(1, ClassId::VehicleE2, Vec2i::new(12, 10));
+        let enemy1 = game.units.iter_mut().find(|u| u.id == enemy1_id).unwrap();
+        enemy1.mission = MissionState::Guard;
+        let enemy2_id = game.spawn_unit(1, ClassId::VehicleE2, Vec2i::new(20, 10));
+        let enemy2 = game.units.iter_mut().find(|u| u.id == enemy2_id).unwrap();
+        enemy2.mission = MissionState::Guard;
+        game.update_unit_combat(Fixed16_16::from_f32(1.0));
+        let hunter = game.units.iter().find(|u| u.id == hunter_id).unwrap();
+        assert_eq!(
+            hunter.target,
+            Some(TargetRef::Unit(enemy1_id)),
+            "hunt targets nearest enemy"
+        );
+    }
+
+    #[test]
+    fn mission_state_default_is_guard() {
+        let mut game = Game::new(40, 40);
+        let id = game.spawn_unit(0, ClassId::VehicleE2, Vec2i::new(10, 10));
+        let unit = game.units.iter().find(|u| u.id == id).unwrap();
+        assert_eq!(unit.mission, MissionState::Guard);
+    }
+
+    #[test]
+    fn guard_area_has_destination() {
+        let mut game = Game::new(40, 40);
+        game.structures.clear();
+        game.units.clear();
+        let cell = Vec2i::new(10, 10);
+        let id = game.spawn_unit(0, ClassId::VehicleE2, cell);
+        let unit = game.units.iter_mut().find(|u| u.id == id).unwrap();
+        unit.mission = MissionState::GuardArea;
+        unit.mission_destination = Some(cell);
+        assert_eq!(unit.mission_destination, Some(cell));
     }
 }

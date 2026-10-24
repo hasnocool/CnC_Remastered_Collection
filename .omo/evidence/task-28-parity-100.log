@@ -1,0 +1,22 @@
+Task 28: RA mission state machine (parity-100.md)
+Date: 2026-10-23
+Status: COMPLETE
+
+Evidence:
+- MissionState enum in game.rs (Guard, Hunt, Attack, Idle, Move, ...per REDALERT/DEFINES.H)
+- GameUnit fields: mission, guard_post (Option<Vec2i>), mission_destination (Option<Vec2i>)
+- update_movement pass 1: Guard units path back to guard_post when displaced; Attack units path to mission_destination
+- update_unit_combat: Guard|Hunt with no target retaliates at nearest enemy in weapon range
+- Tests:
+  - mission_fsm_tests (5): mission_state_enum_exists, game_unit_has_guard_post, guard_unit_returns_to_post_when_path_empty, attack_unit_moves_toward_destination, idle_unit_does_not_get_a_path
+  - game.rs (2): guard_retaliates_then_returns, hunt_engages_nearest_enemy
+- Cleanup: debug println!s removed; duplicate #[test] fixed; lib.rs mod order fixed (items before test modules); clippy collapsible-if fixed; mission_fsm_tests inner module renamed `behavior`
+
+Fixes during verification:
+- Tests originally targeted (20,20) which is river terrain on the default skirmish map -> Ground find_path correctly returned None. Goal moved to land cell (15,15).
+- Launcher HUD queue label: RA house now has per-factory queues (todo 27); added House::first_queued/total_queued/last_queued accessors and updated both RA HUD sites + 5 test assertions. TD HUD unchanged (TD house keeps its single FIFO).
+
+Gates (CARGO_BUILD_JOBS=2):
+- cargo fmt --check: PASS
+- cargo clippy -p cnc-red-alert -p cnc-launcher --all-targets -D warnings: PASS
+- cargo test -p cnc-red-alert -p cnc-launcher: 15 test binaries, all ok, 0 failed (RA lib 210, replay 14, launcher 134+48+...)

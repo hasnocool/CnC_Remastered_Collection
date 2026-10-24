@@ -7596,7 +7596,7 @@ impl RaLauncherApp {
             .game
             .houses
             .get(self.game.player_owner)
-            .and_then(|house| house.production_queue.front())
+            .and_then(|house| house.first_queued())
             .map(|item| {
                 format!(
                     "{:?} {}%",
@@ -9874,15 +9874,15 @@ mod tests {
     #[test]
     fn network_produce_command_queues_remote_unit() {
         let mut game = RaGame::new(32, 32);
-        let before = game.houses[0].production_queue.len();
+        let before = game.houses[0].total_queued();
         assert!(apply_net_produce(
             &mut game,
             0,
             cnc_core::ClassId::VehicleE2
         ));
-        assert_eq!(game.houses[0].production_queue.len(), before + 1);
+        assert_eq!(game.houses[0].total_queued(), before + 1);
         assert_eq!(
-            game.houses[0].production_queue.back().unwrap().class_id,
+            game.houses[0].last_queued().unwrap().class_id,
             cnc_core::ClassId::VehicleE2
         );
         // Default build times from unit_build_time (mirrors old ra_unit_build_seconds)
@@ -9910,11 +9910,11 @@ mod tests {
     fn ra_produce_unit_queues_locally() {
         let mut app = RaLauncherApp::new(RendererKind::Software, 320, 240, 0);
         app.start_skirmish();
-        let before = app.game.houses[0].production_queue.len();
+        let before = app.game.houses[0].total_queued();
         app.produce_unit(cnc_core::ClassId::InfantryE1);
         assert_eq!(app.pending_commands.len(), 1);
         assert_eq!(app.drain_pending_commands(), 1);
-        assert_eq!(app.game.houses[0].production_queue.len(), before + 1);
+        assert_eq!(app.game.houses[0].total_queued(), before + 1);
         assert!(app.network.is_none());
     }
 

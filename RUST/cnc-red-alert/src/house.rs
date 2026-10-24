@@ -244,6 +244,45 @@ impl House {
         Ok(())
     }
 
+    /// First queued item across all factory queues (barracks, then war
+    /// factory, then shipyard, then helipad), for HUD display.
+    pub fn first_queued(&self) -> Option<&ProductionItem> {
+        [
+            FactoryType::Barracks,
+            FactoryType::WarFactory,
+            FactoryType::Shipyard,
+            FactoryType::Helipad,
+        ]
+        .iter()
+        .find_map(|factory| self.queue_for_ref(*factory).front())
+    }
+
+    /// Total number of items queued across all factory queues.
+    pub fn total_queued(&self) -> usize {
+        [
+            FactoryType::Barracks,
+            FactoryType::WarFactory,
+            FactoryType::Shipyard,
+            FactoryType::Helipad,
+        ]
+        .iter()
+        .map(|factory| self.queue_for_ref(*factory).len())
+        .sum()
+    }
+
+    /// Last queued item across all factory queues (reverse factory order of
+    /// [`first_queued`]), for tests asserting queue tails.
+    pub fn last_queued(&self) -> Option<&ProductionItem> {
+        [
+            FactoryType::Helipad,
+            FactoryType::Shipyard,
+            FactoryType::WarFactory,
+            FactoryType::Barracks,
+        ]
+        .iter()
+        .find_map(|factory| self.queue_for_ref(*factory).back())
+    }
+
     /// Queue an item in barracks (infantry).
     pub fn queue_barracks(&mut self, item: ProductionItem) -> Result<(), QueueError> {
         self.queue_in(FactoryType::Barracks, item)
