@@ -199,10 +199,10 @@ pub fn run_per_house_ai(game: &mut Game, delta_time: Fixed16_16) {
         let mut ai_state = HouseAIState::new(owner, difficulty);
         ai_state.iq = house.iq;
         ai_state.special_flags = SpecialFlags {
-            build_threshold: game.rules.general.max_iq,
-            shroud_off: false,
-            one_tick_strikes: false,
-            game_speed: 0,
+            build_threshold: game.rules.special_flags.build_threshold,
+            shroud_off: game.rules.special_flags.shroud_off,
+            one_tick_strikes: game.rules.special_flags.one_tick_strikes,
+            game_speed: game.rules.special_flags.game_speed,
         };
 
         // Run expert AI using shared framework

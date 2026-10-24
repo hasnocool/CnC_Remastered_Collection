@@ -564,6 +564,9 @@ pub struct RulesDatabase {
     pub categories: BTreeMap<String, Vec<String>>,
     /// Non-fatal problems found while loading (missing referenced sections).
     pub warnings: Vec<String>,
+    /// SPECIAL.CPP-style gameplay toggles (build threshold, shroud-off,
+    /// one-tick strikes, speed modifier) shared by both engines (todo 36).
+    pub special_flags: SpecialFlags,
 }
 
 impl RulesDatabase {

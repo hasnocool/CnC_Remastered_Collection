@@ -903,7 +903,11 @@ impl Game {
     }
 
     /// HOUSE.CPP Can_Build: the house build level must cover the type level.
+    /// The special-flags build threshold (todo 36/43) caps the effective
+    /// level; 0 means no cap.
     pub fn meets_tech_level(&self, owner: u8, required: u8) -> bool {
+        let cap = self.rules.special_flags.build_threshold;
+        let required = if cap > 0 { required.min(cap) } else { required };
         self.houses
             .get(owner as usize)
             .is_some_and(|house| required <= house.tech_level)

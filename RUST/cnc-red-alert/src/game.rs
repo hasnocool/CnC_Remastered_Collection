@@ -2167,9 +2167,10 @@ impl Game {
     }
 
     /// Draw the map, ore, structures, units and shots through any renderer.
-    /// Turn fog of war on for this game (it starts fully revealed).
+    /// Turn fog of war on for this game (it starts fully revealed). The
+    /// special-flags `shroud_off` toggle (todo 36/43) forces full reveal.
     pub fn enable_shroud(&mut self) {
-        if self.shroud_off {
+        if self.shroud_off || self.rules.special_flags.shroud_off {
             self.shroud = cnc_core::Shroud::fully_revealed(self.map.width, self.map.height);
         } else {
             self.shroud = cnc_core::Shroud::new(self.map.width, self.map.height);
