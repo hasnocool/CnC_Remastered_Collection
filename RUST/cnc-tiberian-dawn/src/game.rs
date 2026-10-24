@@ -451,6 +451,44 @@ pub struct SidebarOption {
     /// Unmet Prerequisite= tokens, for tooltips and diagnostics.
     pub missing_prerequisites: Vec<String>,
 }
+/// Radar/minimap state for the sidebar.
+/// Mirrors SIDEBAR.CPP: BUTTON_ZOOM (radar toggle), IsRadarActive, low-power kill switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct RadarState {
+    /// Whether the radar structure is built and active for this house.
+    pub active: bool,
+    /// Low-power kill switch: when house power < drain, radar is disabled.
+    pub low_power_disabled: bool,
+    /// Current zoom mode: 0 = normal, 1 = zoomed, 2 = player status (MP only).
+    pub zoom_mode: u8,
+}
+
+impl RadarState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Update radar state based on house power and radar structure presence.
+    pub fn update(&mut self, has_radar: bool, power: i32, max_power: i32) {
+        let _was_active = self.active;
+        self.active = has_radar && power >= max_power;
+        self.low_power_disabled = has_radar && power < max_power;
+        // Don't auto-reset zoom_mode on power loss; keep last mode but disable radar
+    }
+
+    /// Whether the minimap should be visible (radar active and not low-power disabled).
+    pub fn is_minimap_enabled(&self) -> bool {
+        self.active && !self.low_power_disabled
+    }
+}
+
+/// Production queue entry for the sidebar UI.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProductionQueueEntry {
+    pub buildable_name: String,
+    pub progress: u8, // 0..100
+    pub time_remaining_ticks: u32,
+}
 
 /// The playable game session: simulation state plus rendering entry point.
 /// HOUSE.CPP SourceType: where a house reinforcements arrive from.
@@ -554,6 +592,10 @@ pub struct Game {
     /// Elapsed time when "insufficient funds" may next be spoken.
     pub(crate) next_funds_speak: Fixed16_16,
     pub(crate) pending_blasts: Vec<PendingBlast>,
+    /// Radar/minimap state per house (sidebar depth).
+    pub radar_state: Vec<RadarState>,
+    /// Production queue UI for current house.
+    pub production_queue: Vec<ProductionQueueEntry>,
     /// Observational event sink; `None` unless a host attached a bus.
     pub(crate) event_source: Option<cnc_events::EventSource>,
     /// Latch so the mission outcome is published exactly once.
@@ -612,6 +654,8 @@ impl Game {
             next_base_attack_speak: Fixed16_16::ZERO,
             next_funds_speak: Fixed16_16::ZERO,
             pending_blasts: Vec::new(),
+            radar_state: Vec::new(),
+            production_queue: Vec::new(),
             // Observational only: no bus until a host calls set_event_bus.
             event_source: None,
             mission_outcome_emitted: false,

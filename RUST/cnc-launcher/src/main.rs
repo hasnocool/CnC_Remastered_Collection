@@ -10906,6 +10906,32 @@ mod tests {
         assert_eq!(app.game.ai.owner, 0);
         assert_eq!(app.game.houses[1].country, Some(Country::Russia));
     }
+    #[test]
+    fn minimap_reflects_shroud() {
+        use cnc_tiberian_dawn::game::Game;
+        let mut game = Game::new("test", 16, 16);
+        game.enable_shroud();
+        // Initially, only starting position is visible
+        let visible = game.shroud.is_visible(0, cnc_core::Vec2i::new(5, 5));
+        assert!(!visible);
+        // Reveal area around starting base
+        game.shroud.reveal(0, cnc_core::Vec2i::new(8, 8), 2);
+        assert!(game.shroud.is_visible(0, cnc_core::Vec2i::new(8, 8)));
+        assert!(game.shroud.is_visible(0, cnc_core::Vec2i::new(9, 8)));
+        assert!(!game.shroud.is_visible(0, cnc_core::Vec2i::new(10, 10)));
+    }
+    #[test]
+    fn power_out_blanks_radar() {
+        use cnc_tiberian_dawn::game::RadarState;
+        let mut radar = RadarState::new();
+        // Simulate radar built with sufficient power
+        radar.update(true, 100, 50);
+        assert!(radar.is_minimap_enabled());
+        // Power drops below drain
+        radar.update(true, 30, 50);
+        assert!(!radar.is_minimap_enabled());
+        assert!(radar.low_power_disabled);
+    }
 
     #[test]
     fn main_menu_navigates_and_launches_local_game() {
