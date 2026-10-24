@@ -125,6 +125,13 @@ pub struct House {
     pub credits_spent: i64,
     /// Number of silos owned (each adds SILO_CAPACITY to credit storage).
     silo_count: usize,
+    /// Alliance bitfield: bit N set means this house is allied with house N.
+    /// Mirror of original HOUSE.CPP `Allies` field.
+    pub allies: u32,
+    /// Whether AI is enabled for this house.
+    pub ai_enabled: bool,
+    /// Multiplayer spawn slot (start-location index); `None` for campaign houses.
+    pub spawn_slot: Option<u8>,
 }
 
 impl House {
@@ -143,6 +150,9 @@ impl House {
             tech_level: 98,
             credits_spent: 0,
             silo_count: 0,
+            allies: 0,
+            ai_enabled: true,
+            spawn_slot: None,
         }
     }
 
@@ -150,6 +160,12 @@ impl House {
     pub fn with_country(mut self, country: Country) -> Self {
         self.country = Some(country);
         self.faction = country.faction();
+        self
+    }
+
+    /// Assign a multiplayer spawn slot (start location index).
+    pub fn with_spawn_slot(mut self, slot: u8) -> Self {
+        self.spawn_slot = Some(slot);
         self
     }
 
@@ -488,6 +504,38 @@ impl House {
     pub fn can_build_unique_structure(&self, class_id: ClassId) -> bool {
         self.country
             .is_some_and(|country| country.unique_structure() == class_id)
+    }
+
+    /// Check if this house is allied with another house.
+    pub fn is_ally(&self, other: usize) -> bool {
+        if other == 0 {
+            (self.allies & 1) != 0
+        } else {
+            (self.allies & (1u32 << other)) != 0
+        }
+    }
+
+    /// Make another house an ally (sets the bit in allies bitfield).
+    pub fn make_ally(&mut self, other: usize) {
+        if other == 0 {
+            self.allies |= 1;
+        } else {
+            self.allies |= 1u32 << other;
+        }
+    }
+
+    /// Make another house an enemy (clears the bit in allies bitfield).
+    pub fn make_enemy(&mut self, other: usize) {
+        if other == 0 {
+            self.allies &= !1;
+        } else {
+            self.allies &= !(1u32 << other);
+        }
+    }
+
+    /// Enable or disable AI for this house.
+    pub fn set_ai_enabled(&mut self, enabled: bool) {
+        self.ai_enabled = enabled;
     }
 }
 

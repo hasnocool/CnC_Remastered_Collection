@@ -118,12 +118,13 @@ fn ra_rng_state_round_trips_through_save() {
     );
 
     let text = game.to_save_string();
+    // v3 added per-house alliance/AI state; v2 rng line still present.
     assert!(
         text.starts_with(
-            "RA_SAVE\t2
+            "RA_SAVE\t3
 "
         ),
-        "the format version was bumped in the same change as the rng line"
+        "save format version should be 3 (rng + alliances)"
     );
     assert!(text.contains(&format!("rng\t{SEED}\t{}", game.rng.state())));
 

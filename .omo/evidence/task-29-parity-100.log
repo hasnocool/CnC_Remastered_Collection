@@ -1,0 +1,43 @@
+# task-29-parity-100.log — RA multi-house + alliances
+
+## Audit row
+PARITY_AUDIT §5 houses row (cited by plan todo 29: game.rs:651 2-owner model, ai owner 1 at :676 — anchors shifted after todos 22–28 landed; live anchors: `Game::base` two-house vec at game.rs:1055–1060, `set_player_owner` inverse at :1298, `AiCommander::new(1)` at :1079).
+
+## Change summary
+1. **Alliance sets on House** (`house.rs`): `allies: u32` bitfield (mirror of original REDALERT/HOUSE.CPP `Allies` field, `Is_Ally` = `(1<<house) & Allies`), `make_ally`/`make_enemy`/`is_ally`, plus `ai_enabled` flag and `spawn_slot: Option<u8>` with `with_spawn_slot` builder.
+2. **N houses** (`game.rs`): `Game::add_house(id, name, faction)` appends a house with the next spawn slot + DEFAULT_CREDITS and resizes `ra_low_power_announced`; `make_ally`/`make_enemy`/`are_allied`/`set_ai_enabled` on Game; 8-entry `HOUSE_COLORS` palette replacing the 2-way `owner_color` branch (owner % 8, no panic for any index).
+3. **Alliance-aware targeting** (`game.rs`): `enemies_of(owner)` now filters out allied owners (units + structures); `threat_cells(owner)` skips allied units/structures; AI attack target selection skips allies. Original semantics per HOUSE.CPP Make_Ally/Is_Ally ("an allied house will not be considered a threat or potential target").
+4. **Per-house AI**: `update_ai` iterates all houses with `ai_enabled`, skipping the player house; legacy `disable_ai()` sentinel (`ai.owner == usize::MAX`) still disables AI entirely (launcher human-vs-human path at main.rs:6268,6305 preserved). `set_ai_tempo`/`ai.owner` save line unchanged.
+5. **Save format v3**: `housecount` line + per-house `allies`/`ai_enabled` on the `house` line. v1/v2 saves still load (alliances default none, AI on). RNG round-trip test updated to expect v3 (deliberate behavior change; coverage unchanged, 14 rng_determinism tests still pass).
+6. **OOB house index**: `spawn_unit`/`spawn_structure` returned 0 for OOB owner (existing check verified by new test); `threat_cells`, `enemies_of`, `are_allied` return empty/false for OOB — no panic anywhere.
+
+## NOT changed (per plan guardrails)
+- `Game::new`/`new_with_seed` still build the 2-house 1v1 skirmish (base vec unchanged).
+- Launcher HUD `house.first_queued()` path (main.rs:7598, `get().and_then()`) untouched and green.
+- `GameCommand::Produce` / `queue_unit` UnitRole→FactoryType routing untouched.
+- Single-player 2-house defaults unchanged (214 pre-existing RA lib tests green).
+
+## TDD evidence
+Failing first (no `add_house`/`make_ally` methods):
+```
+error[E0599]: no method named `add_house` found for struct `game::Game`
+error[E0599]: no method named `make_ally` found for struct `game::Game`
+```
+Green after implementation.
+
+## New tests (cnc-red-alert/src/game.rs)
+- `four_house_skirmish_boots` — 4-house roster, credits, unique spawn slots, colors resolve for every owner
+- `allied_units_never_friendly_fire` — allied units absent from `enemies_of` both directions
+- `oob_house_index_returns_error` — OOB spawn returns 0 id, no panic
+- `two_v_two_with_alliances` — 2v2 team resolution: allies invisible to each other, both opponents visible
+- `alliances_round_trip_through_save` — v3 save restores alliances + per-house ai_enabled
+
+## Gates (CARGO_BUILD_JOBS=2, from RUST/)
+- `cargo fmt --check` → exit 0
+- `cargo clippy -p cnc-red-alert -p cnc-launcher --all-targets -- -D warnings` → exit 0 (fixed one `manual_is_multiple_of`)
+- `cargo test -p cnc-red-alert -p cnc-launcher` → 427 passed, 0 failed (215 RA lib + 14 rng + 1 campaign + launcher suites)
+
+## Files touched
+- RUST/cnc-red-alert/src/house.rs (allies bitfield, ai_enabled, spawn_slot)
+- RUST/cnc-red-alert/src/game.rs (multi-house API, alliance-aware targeting, save v3)
+- RUST/cnc-red-alert/tests/rng_determinism.rs (v3 expectation)

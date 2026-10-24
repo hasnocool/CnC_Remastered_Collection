@@ -21,8 +21,10 @@ use crate::superweapon::{Superweapon, SuperweaponError, GPS, IRON_CURTAIN_SECOND
 use crate::tesla::TeslaCoil;
 
 /// Compact text save format version. v2 added the `rng` line (the seeded
-/// simulation cursor): v1 saves still load and start from the default seed.
-pub const SAVE_VERSION: u32 = 2;
+/// simulation cursor); v3 added the `allies` field on each `house` line plus
+/// per-house `ai_enabled` state. v1/v2 saves still load (alliances default to
+/// none, AI on for the single AI commander).
+pub const SAVE_VERSION: u32 = 3;
 
 /// Starting credits for each skirmish house.
 pub const DEFAULT_CREDITS: i32 = 10_000;
@@ -1299,8 +1301,9 @@ impl Game {
     }
 
     fn setup_skirmish(&mut self) {
-        for house in &mut self.houses {
+        for (slot, house) in self.houses.iter_mut().enumerate() {
             house.add_credits(DEFAULT_CREDITS);
+            house.spawn_slot = Some(slot as u8);
         }
         let base0 = Vec2i::new(2, 2);
         let base1 = Vec2i::new(self.map.width as i32 - 5, self.map.height as i32 - 5);
@@ -1334,6 +1337,58 @@ impl Game {
 
     pub fn house_mut(&mut self, owner: usize) -> Option<&mut House> {
         self.houses.get_mut(owner)
+    }
+    /// Add a new house to the game. Returns the house index. The new house
+    /// gets the next spawn slot and the default credit balance.
+    pub fn add_house(&mut self, id: ClassId, name: String, faction: Faction) -> usize {
+        let index = self.houses.len();
+        let slot = self
+            .houses
+            .iter()
+            .filter_map(|house| house.spawn_slot)
+            .max()
+            .map_or(0, |max| max + 1);
+        let mut house = House::new(id, name, faction).with_spawn_slot(slot);
+        house.add_credits(DEFAULT_CREDITS);
+        self.houses.push(house);
+        // Ensure low power announcement tracking covers the new house
+        self.ra_low_power_announced.resize(self.houses.len(), false);
+        index
+    }
+
+    /// Make house A an ally of house B (bidirectional).
+    pub fn make_ally(&mut self, a: usize, b: usize) {
+        if let Some(house_a) = self.houses.get_mut(a) {
+            house_a.make_ally(b);
+        }
+        if let Some(house_b) = self.houses.get_mut(b) {
+            house_b.make_ally(a);
+        }
+    }
+
+    /// Make house A an enemy of house B (bidirectional).
+    pub fn make_enemy(&mut self, a: usize, b: usize) {
+        if let Some(house_a) = self.houses.get_mut(a) {
+            house_a.make_enemy(b);
+        }
+        if let Some(house_b) = self.houses.get_mut(b) {
+            house_b.make_enemy(a);
+        }
+    }
+
+    /// Check if two houses are allied.
+    pub fn are_allied(&self, a: usize, b: usize) -> bool {
+        if a >= self.houses.len() || b >= self.houses.len() {
+            return false;
+        }
+        self.houses[a].is_ally(b)
+    }
+
+    /// Enable or disable AI for a specific house.
+    pub fn set_ai_enabled(&mut self, owner: usize, enabled: bool) {
+        if let Some(house) = self.houses.get_mut(owner) {
+            house.set_ai_enabled(enabled);
+        }
     }
 
     pub fn spawn_unit(&mut self, owner: usize, class_id: ClassId, cell: Vec2i) -> u32 {
@@ -2416,12 +2471,16 @@ impl Game {
     }
 
     /// Cells near enemy units/structures that should be avoided (threat map).
-    /// Used by pathfinding to prefer safer routes.
+    /// Used by pathfinding to prefer safer routes. Allied houses do not project threat.
     fn threat_cells(&self, owner: usize) -> HashSet<(i32, i32)> {
         let mut threat = HashSet::new();
-        // Enemy structures project threat
+        if owner >= self.houses.len() {
+            return threat;
+        }
+        let house = &self.houses[owner];
+        // Enemy structures project threat (if not allied)
         for structure in &self.structures {
-            if structure.is_alive() && structure.owner != owner {
+            if structure.is_alive() && structure.owner != owner && !house.is_ally(structure.owner) {
                 threat.insert((structure.cell.x, structure.cell.y));
                 // Adjacent cells also threatened
                 for dx in -1..=1 {
@@ -2434,9 +2493,13 @@ impl Game {
                 }
             }
         }
-        // Enemy combat units project threat
+        // Enemy combat units project threat (if not allied)
         for unit in &self.units {
-            if unit.is_alive() && unit.is_combat() && unit.owner != owner {
+            if unit.is_alive()
+                && unit.is_combat()
+                && unit.owner != owner
+                && !house.is_ally(unit.owner)
+            {
                 threat.insert((unit.cell.x, unit.cell.y));
                 for dx in -1..=1 {
                     for dy in -1..=1 {
@@ -2777,61 +2840,84 @@ impl Game {
         }
     }
 
-    /// Deterministic skirmish AI: build units and periodically push toward the
-    /// player's base.
+    /// Deterministic skirmish AI: build units and periodically push toward
+    /// enemy bases. Runs for each house with AI enabled (except the player's).
     fn update_ai(&mut self, delta: Fixed16_16) {
-        let owner = self.ai.owner;
-        if owner >= self.houses.len() || self.outcome.is_some() {
+        if self.outcome.is_some() || self.ai.owner == usize::MAX {
+            // usize::MAX is the disable_ai() sentinel: no AI at all.
             return;
         }
-        self.ai.queue_timer -= delta;
-        if self.ai.queue_timer <= Fixed16_16::ZERO {
-            self.ai.queue_timer = Fixed16_16::from_int(12);
-            let credits = self.houses[owner].credits;
-            let (class_id, seconds) = if credits >= 900 {
-                (ClassId::VehicleE2, 8)
-            } else {
-                (ClassId::InfantryE1, 4)
-            };
-            self.queue_unit(owner, class_id, seconds);
-        }
-
-        self.ai.attack_timer -= delta;
-        if self.ai.attack_timer > Fixed16_16::ZERO {
-            return;
-        }
-        self.ai.attack_timer = Fixed16_16::from_int(25);
-        let target = self
-            .structures
-            .iter()
-            .find(|structure| structure.owner != owner && structure.is_alive())
-            .map(|structure| structure.position)
-            .or_else(|| {
-                self.units
-                    .iter()
-                    .find(|unit| unit.owner != owner && unit.is_alive())
-                    .map(|unit| unit.position)
-            });
-        let Some(target) = target else {
-            return;
-        };
-        let goal = world_to_cell(target);
-        let blocked = self.blocked_cells();
-        let threat = self.threat_cells(owner);
-        for unit in &mut self.units {
-            if unit.owner != owner || !unit.is_alive() || !unit.path.is_empty() {
+        // Run AI for each house that has AI enabled and is not the player
+        for owner in 0..self.houses.len() {
+            if owner == self.player_owner {
                 continue;
             }
-            let class = unit.role.move_class();
-            if let Some(goal) = nearest_passable(&self.map, class, goal) {
-                if let Some(path) = find_path(&self.map, class, &blocked, unit.cell, goal, &threat)
-                {
-                    unit.path = path.into();
+            // Check if AI is enabled for this house (immutable borrow ends here)
+            let ai_enabled = self.houses[owner].ai_enabled;
+            if !ai_enabled {
+                continue;
+            }
+            // Queue production
+            self.ai.queue_timer -= delta;
+            if self.ai.queue_timer <= Fixed16_16::ZERO {
+                self.ai.queue_timer = Fixed16_16::from_int(12);
+                let credits = self.houses[owner].credits;
+                let (class_id, seconds) = if credits >= 900 {
+                    (ClassId::VehicleE2, 8)
+                } else {
+                    (ClassId::InfantryE1, 4)
+                };
+                self.queue_unit(owner, class_id, seconds);
+            }
+
+            // Attack logic
+            self.ai.attack_timer -= delta;
+            if self.ai.attack_timer > Fixed16_16::ZERO {
+                continue;
+            }
+            self.ai.attack_timer = Fixed16_16::from_int(25);
+            // Find a target: enemy structure or unit (not allied)
+            // We need to check allies without holding a borrow across mutable calls
+            let target = {
+                let house = &self.houses[owner];
+                self.structures
+                    .iter()
+                    .find(|structure| {
+                        structure.owner != owner
+                            && structure.is_alive()
+                            && !house.is_ally(structure.owner)
+                    })
+                    .map(|structure| structure.position)
+                    .or_else(|| {
+                        self.units
+                            .iter()
+                            .find(|unit| {
+                                unit.owner != owner && unit.is_alive() && !house.is_ally(unit.owner)
+                            })
+                            .map(|unit| unit.position)
+                    })
+            };
+            let Some(target) = target else {
+                continue;
+            };
+            let goal = world_to_cell(target);
+            let blocked = self.blocked_cells();
+            let threat = self.threat_cells(owner);
+            for unit in &mut self.units {
+                if unit.owner != owner || !unit.is_alive() || !unit.path.is_empty() {
+                    continue;
+                }
+                let class = unit.role.move_class();
+                if let Some(goal) = nearest_passable(&self.map, class, goal) {
+                    if let Some(path) =
+                        find_path(&self.map, class, &blocked, unit.cell, goal, &threat)
+                    {
+                        unit.path = path.into();
+                    }
                 }
             }
         }
     }
-
     /// Drive the scenario's `[TeamTypes]` roster. No-op without types.
     pub fn update_team_manager(&mut self) {
         if self.team_manager.is_empty() {
@@ -3473,10 +3559,13 @@ impl Game {
     }
 
     fn enemies_of(&self, owner: usize) -> Vec<EnemyInfo> {
+        let house = &self.houses[owner];
         let units = self
             .units
             .iter()
-            .filter(|unit| unit.owner != owner && unit.is_targetable())
+            .filter(|unit| {
+                unit.owner != owner && unit.is_targetable() && !house.is_ally(unit.owner)
+            })
             .map(|unit| EnemyInfo {
                 target: TargetRef::Unit(unit.id),
                 position: unit.position,
@@ -3484,7 +3573,9 @@ impl Game {
         let structures = self
             .structures
             .iter()
-            .filter(|structure| structure.owner != owner && structure.is_alive())
+            .filter(|structure| {
+                structure.owner != owner && structure.is_alive() && !house.is_ally(structure.owner)
+            })
             .map(|structure| EnemyInfo {
                 target: TargetRef::Structure(structure.id),
                 position: structure.position,
@@ -4033,12 +4124,20 @@ fn owner_index(owner: Option<ClassId>) -> usize {
     }
 }
 
+/// Multiplayer color palette for RA houses (indexed by house slot).
+const HOUSE_COLORS: [[f32; 4]; 8] = [
+    [0.30, 0.55, 0.95, 1.0], // Allied blue
+    [0.90, 0.30, 0.25, 1.0], // Soviet red
+    [0.30, 0.90, 0.40, 1.0], // Green
+    [0.95, 0.80, 0.20, 1.0], // Yellow
+    [0.70, 0.40, 0.95, 1.0], // Purple
+    [0.95, 0.50, 0.20, 1.0], // Orange
+    [0.20, 0.85, 0.90, 1.0], // Cyan
+    [0.90, 0.50, 0.85, 1.0], // Pink
+];
+
 fn owner_color(owner: usize) -> [f32; 4] {
-    if owner == 0 {
-        [0.30, 0.55, 0.95, 1.0]
-    } else {
-        [0.90, 0.30, 0.25, 1.0]
-    }
+    HOUSE_COLORS[owner % HOUSE_COLORS.len()]
 }
 
 fn nearest_enemy(
@@ -4108,6 +4207,9 @@ impl Game {
             }
         ));
         out.push_str(&format!("map\t{}\t{}\n", self.map.width, self.map.height));
+        // v3: house count so N-house games restore their full roster; older
+        // saves omit the line and default to the 2-house base.
+        out.push_str(&format!("housecount\t{}\n", self.houses.len()));
         // v2: the seeded simulation RNG cursor is part of the saved state.
         out.push_str(&format!("rng\t{}\t{}\n", self.rng.seed(), self.rng.state()));
         let terrain: Vec<String> = self
@@ -4121,8 +4223,11 @@ impl Game {
         out.push_str(&format!("ore\t{}\n", ore.join(",")));
         for (index, house) in self.houses.iter().enumerate() {
             out.push_str(&format!(
-                "house\t{index}\t{}\t{}\n",
-                house.credits, house.power
+                "house\t{index}\t{}\t{}\t{}\t{}\n",
+                house.credits,
+                house.power,
+                house.allies,
+                u8::from(house.ai_enabled)
             ));
         }
         for unit in &self.units {
@@ -4203,8 +4308,9 @@ impl Game {
     pub fn from_save_string(text: &str) -> Result<Self, String> {
         let mut lines = text.lines();
         // v1 saves predate the seeded RNG and load from the default stream.
+        // v2 adds the rng line; v3 adds per-house alliance + AI state.
         match lines.next() {
-            Some("RA_SAVE\t1") | Some("RA_SAVE\t2") => {}
+            Some("RA_SAVE\t1") | Some("RA_SAVE\t2") | Some("RA_SAVE\t3") => {}
             _ => return Err("not an RA save file".to_string()),
         }
         let mut width = 0u32;
@@ -4214,7 +4320,8 @@ impl Game {
         let mut elapsed = Fixed16_16::ZERO;
         let mut player = 0usize;
         let mut outcome = None;
-        let mut houses: Vec<(i32, i32)> = Vec::new();
+        let mut houses: Vec<(i32, i32, u32, bool)> = Vec::new();
+        let mut house_count = 0usize;
         let mut units = Vec::new();
         let mut structures = Vec::new();
         let mut triggers = Vec::new();
@@ -4266,8 +4373,27 @@ impl Game {
                         _ => None,
                     };
                 }
+                "housecount" if fields.len() >= 2 => {
+                    house_count = fields[1].parse().unwrap_or(2);
+                }
                 "house" if fields.len() >= 4 => {
-                    houses.push((parse_i32(fields[2])?, parse_i32(fields[3])?));
+                    // v3 saves carry alliance + AI-enabled state per house;
+                    // older saves default to no allies, AI enabled.
+                    let allies = fields
+                        .get(4)
+                        .and_then(|f| f.parse::<u32>().ok())
+                        .unwrap_or(0);
+                    let ai_enabled = fields
+                        .get(5)
+                        .and_then(|f| f.parse::<u8>().ok())
+                        .map(|flag| flag != 0)
+                        .unwrap_or(true);
+                    houses.push((
+                        parse_i32(fields[2])?,
+                        parse_i32(fields[3])?,
+                        allies,
+                        ai_enabled,
+                    ));
                 }
                 "unit" if fields.len() >= 13 => {
                     let id = parse_u32(fields[1])?;
@@ -4367,6 +4493,22 @@ impl Game {
         }
         let mut game = Self::base(width, height);
         game.map = Map::blank(width, height);
+        // v3: restore the full N-house roster before applying per-house
+        // state. Extra houses mirror the base factions in slot order.
+        while game.houses.len() < house_count {
+            let index = game.houses.len();
+            let faction = if index.is_multiple_of(2) {
+                Faction::Allied
+            } else {
+                Faction::Soviet
+            };
+            let class_id = if faction == Faction::Allied {
+                ClassId::HouseAllies
+            } else {
+                ClassId::HouseSoviet
+            };
+            game.add_house(class_id, format!("House{index}"), faction);
+        }
         for (index, cell) in game.map.terrain.iter_mut().enumerate() {
             if let Some(terrain) = terrain.get(index) {
                 *cell = *terrain;
@@ -4377,10 +4519,12 @@ impl Game {
                 game.map.ore[index] = amount;
             }
         }
-        for (index, (credits, power)) in houses.into_iter().enumerate() {
+        for (index, (credits, power, allies, ai_enabled)) in houses.into_iter().enumerate() {
             if let Some(house) = game.houses.get_mut(index) {
                 house.credits = credits;
                 house.power = power;
+                house.allies = allies;
+                house.ai_enabled = ai_enabled;
             }
         }
         game.units = units;
@@ -7586,6 +7730,104 @@ Player=Allies
             Some(TargetRef::Unit(enemy1_id)),
             "hunt targets nearest enemy"
         );
+    }
+
+    #[test]
+    fn four_house_skirmish_boots() {
+        let mut game = Game::new(40, 40);
+        game.add_house(ClassId::HouseAllies, "Allies2".to_string(), Faction::Allied);
+        game.add_house(
+            ClassId::HouseSoviet,
+            "Soviets2".to_string(),
+            Faction::Soviet,
+        );
+        assert_eq!(game.houses.len(), 4);
+        for house in &game.houses {
+            assert!(house.credits > 0);
+        }
+        // Each house owns a distinct spawn slot.
+        let mut slots: Vec<u8> = game.houses.iter().filter_map(|h| h.spawn_slot).collect();
+        slots.sort_unstable();
+        slots.dedup();
+        assert_eq!(slots.len(), 4, "spawn slots must be unique across houses");
+        // Multi-house colors resolve without panicking for every slot.
+        for owner in 0..game.houses.len() {
+            let _color = owner_color(owner);
+        }
+    }
+
+    #[test]
+    fn allied_units_never_friendly_fire() {
+        let mut game = Game::new(40, 40);
+        game.add_house(ClassId::HouseAllies, "Allies2".to_string(), Faction::Allied);
+        game.make_ally(0, 2);
+        game.make_ally(2, 0);
+        let unit0 = game.spawn_unit(0, ClassId::VehicleE2, Vec2i::new(10, 10));
+        let unit2 = game.spawn_unit(2, ClassId::VehicleE2, Vec2i::new(11, 10));
+        let enemies = game.enemies_of(0);
+        assert!(!enemies
+            .iter()
+            .any(|e| matches!(e.target, TargetRef::Unit(u) if u == unit2)));
+        let enemies = game.enemies_of(2);
+        assert!(!enemies
+            .iter()
+            .any(|e| matches!(e.target, TargetRef::Unit(u) if u == unit0)));
+    }
+
+    #[test]
+    fn oob_house_index_returns_error() {
+        let mut game = Game::new(40, 40);
+        let result = game.spawn_unit(10, ClassId::VehicleE2, Vec2i::new(10, 10));
+        assert_eq!(result, 0);
+        let result = game.spawn_structure(10, ClassId::PowerPlant, Vec2i::new(10, 10));
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn two_v_two_with_alliances() {
+        let mut game = Game::new(40, 40);
+        game.add_house(ClassId::HouseAllies, "Allies2".to_string(), Faction::Allied);
+        game.add_house(
+            ClassId::HouseSoviet,
+            "Soviets2".to_string(),
+            Faction::Soviet,
+        );
+        game.make_ally(0, 2);
+        game.make_ally(2, 0);
+        game.make_ally(1, 3);
+        game.make_ally(3, 1);
+        let _unit0 = game.spawn_unit(0, ClassId::VehicleE2, Vec2i::new(5, 5));
+        let unit2 = game.spawn_unit(2, ClassId::VehicleE2, Vec2i::new(6, 5));
+        let unit1 = game.spawn_unit(1, ClassId::VehicleE2, Vec2i::new(30, 30));
+        let unit3 = game.spawn_unit(3, ClassId::VehicleE2, Vec2i::new(31, 30));
+        let enemies0 = game.enemies_of(0);
+        assert!(!enemies0
+            .iter()
+            .any(|e| matches!(e.target, TargetRef::Unit(u) if u == unit2)));
+        assert!(enemies0
+            .iter()
+            .any(|e| matches!(e.target, TargetRef::Unit(u) if u == unit1 || u == unit3)));
+    }
+
+    #[test]
+    fn alliances_round_trip_through_save() {
+        let mut game = Game::new(40, 40);
+        game.add_house(ClassId::HouseAllies, "Allies2".to_string(), Faction::Allied);
+        game.add_house(
+            ClassId::HouseSoviet,
+            "Soviets2".to_string(),
+            Faction::Soviet,
+        );
+        game.make_ally(0, 2);
+        game.make_ally(2, 0);
+        game.set_ai_enabled(3, false);
+        let saved = game.to_save_string();
+        let loaded = Game::from_save_string(&saved).unwrap();
+        assert_eq!(loaded.houses.len(), 4);
+        assert!(loaded.houses[0].is_ally(2));
+        assert!(loaded.houses[2].is_ally(0));
+        assert!(!loaded.houses[0].is_ally(1), "enemies stay enemies");
+        assert!(!loaded.houses[3].ai_enabled, "ai_enabled persists");
     }
 
     #[test]
