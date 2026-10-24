@@ -1,0 +1,16 @@
+feat(ra): infantry specials, crates, vortex
+
+This commit implements RA specials I (non-shroud-dependent):
+
+1. Engineer building capture (IsCaptureable gate per BDATA)
+2. Attack dogs (kill infantry in one bite)
+3. Medics (heal infantry)
+4. Tanya demolition (C4 on structures)
+5. MAD tank (seismic charge + self-destruct sequence)
+6. Spy/Thief wired into Game command flow
+8. Crates (money/unit/invulnerability)
+9. Chronal vortex (ramp through base destroying in sequence)
+
+All specials are deterministic across identical games. The `ra_specials_each_deterministic` test validates each special individually and ensures overall determinism.
+
+Evidence log: .omo/evidence/task-30-parity-100.log
