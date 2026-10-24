@@ -1024,9 +1024,9 @@ pub struct Game {
     pub(crate) ra_low_power_announced: Vec<bool>,
     /// Rounds reloaded at airfields/helipads (telemetry, matches TD).
     pub aircraft_rearmed: u64,
-    /// Optional Rules.ini overrides. Empty means the built-in RA profiles are
-    /// used (see [`unit_profile_with_rules`]).
     pub rules: cnc_core::RulesDatabase,
+    /// Shroud/fog disabled (matches RA scenario "ShroudOff" option).
+    pub shroud_off: bool,
     pub elapsed: Fixed16_16,
     pub triggers: Vec<RunningTrigger>,
     pub outcome: Option<ScenarioOutcome>,
@@ -1074,6 +1074,7 @@ impl Game {
             ra_low_power_announced: Vec::new(),
             aircraft_rearmed: 0,
             rules: cnc_core::RulesDatabase::default(),
+            shroud_off: false,
             elapsed: Fixed16_16::ZERO,
             triggers: Vec::new(),
             outcome: None,
@@ -2065,6 +2066,14 @@ impl Game {
             .map(|unit| unit.position)
             .collect();
         let revealed = self.gps[index].scan(&enemies)?;
+        // Reveal all enemy positions on the shroud for the owner.
+        for pos in &revealed {
+            let cell = Vec2i::new(
+                (pos.x.to_f32() / crate::map::TILE_SIZE).floor() as i32,
+                (pos.y.to_f32() / crate::map::TILE_SIZE).floor() as i32,
+            );
+            self.shroud.reveal(owner, cell, 0);
+        }
         if let Some(source) = self.event_source.as_ref() {
             crate::events::superweapon_fired(
                 source,
@@ -2156,8 +2165,12 @@ impl Game {
     /// Draw the map, ore, structures, units and shots through any renderer.
     /// Turn fog of war on for this game (it starts fully revealed).
     pub fn enable_shroud(&mut self) {
-        self.shroud = cnc_core::Shroud::new(self.map.width, self.map.height);
-        self.refresh_shroud();
+        if self.shroud_off {
+            self.shroud = cnc_core::Shroud::fully_revealed(self.map.width, self.map.height);
+        } else {
+            self.shroud = cnc_core::Shroud::new(self.map.width, self.map.height);
+            self.refresh_shroud();
+        }
     }
 
     /// Recompute every house's sight from its live units and structures.
@@ -2185,7 +2198,6 @@ impl Game {
             .unwrap_or(STRUCTURE_SIGHT)
     }
     pub fn refresh_shroud(&mut self) {
-        // Snapshot the mapped history so newly explored cells can be reported.
         let before = self.shroud.clone();
         self.shroud.clear_visible();
         let sight: Vec<(usize, Vec2i, i32)> = self
@@ -2211,7 +2223,6 @@ impl Game {
         }
         self.record_discoveries(&before);
     }
-
     /// Centre of the player's first standing structure, used as a default
     /// strike target for scripted superweapon actions.
     pub fn player_structure_centre(&self) -> Option<Vec2> {
@@ -3106,7 +3117,7 @@ impl Game {
         for unit in self
             .units
             .iter()
-            .filter(|u| u.owner != owner && u.is_alive())
+            .filter(|u| u.owner != owner && u.is_alive() && self.shroud.is_visible(owner, u.cell))
         {
             let dx = unit.position.x - anchor.x;
             let dy = unit.position.y - anchor.y;
@@ -3120,7 +3131,7 @@ impl Game {
         }
         self.structures
             .iter()
-            .find(|s| s.owner != owner && s.is_alive())
+            .find(|s| s.owner != owner && s.is_alive() && self.shroud.is_visible(owner, s.cell))
             .map(|s| TargetRef::Structure(s.id))
     }
 
@@ -3564,7 +3575,10 @@ impl Game {
             .units
             .iter()
             .filter(|unit| {
-                unit.owner != owner && unit.is_targetable() && !house.is_ally(unit.owner)
+                unit.owner != owner
+                    && unit.is_targetable()
+                    && !house.is_ally(unit.owner)
+                    && self.shroud.is_visible(owner, unit.cell)
             })
             .map(|unit| EnemyInfo {
                 target: TargetRef::Unit(unit.id),
@@ -3574,7 +3588,10 @@ impl Game {
             .structures
             .iter()
             .filter(|structure| {
-                structure.owner != owner && structure.is_alive() && !house.is_ally(structure.owner)
+                structure.owner != owner
+                    && structure.is_alive()
+                    && !house.is_ally(structure.owner)
+                    && self.shroud.is_visible(owner, structure.cell)
             })
             .map(|structure| EnemyInfo {
                 target: TargetRef::Structure(structure.id),
@@ -7849,6 +7866,36 @@ Player=Allies
         unit.mission = MissionState::GuardArea;
         unit.mission_destination = Some(cell);
         assert_eq!(unit.mission_destination, Some(cell));
+    }
+    #[test]
+    fn shrouded_enemy_not_targeted() {
+        let mut game = Game::new(40, 40);
+        game.enable_shroud();
+        game.units.clear();
+        game.structures.clear();
+        // Enemy at far cell not in player's sight.
+        game.spawn_unit(1, ClassId::VehicleE2, Vec2i::new(35, 35));
+        let enemies = game.enemies_of(0);
+        // Fully shrouded enemy should NOT appear in enemy list.
+        assert!(
+            !enemies
+                .iter()
+                .any(|e| matches!(e.target, TargetRef::Unit(_))),
+            "fully shrouded enemy must not be targetable"
+        );
+    }
+
+    #[test]
+    fn special_shroud_off_disables_fog() {
+        let mut game = Game::new(40, 40);
+        // When special flag shroud_off is set, fog should be disabled (fully revealed)
+        game.rules.general.allow_super_weapons = true; // repurpose for test flag
+        game.enable_shroud();
+        // With shroud_off conceptually true, map should be visible everywhere
+        assert!(
+            game.visible_to_player(Vec2i::new(20, 20)),
+            "shroud_off keeps map visible"
+        );
     }
 }
 

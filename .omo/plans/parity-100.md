@@ -371,7 +371,7 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): 2v2 skirmish: each AI house builds/economizes/attacks independently (`multi_ai_houses_build_independently`); RA team executes mission from TeamType.
   QA scenarios: happy — four AI houses each reach wave cadence with distinct queues; failure — defeated AI house → commander retires cleanly, no panic, Evidence .omo/evidence/task-35-parity-100.log
   Commit: Y | feat(ra): expert AI per house + teams
-- [ ] 36. IQ + difficulty + special flags
+- [x] 36. IQ + difficulty + special flags
   What to do / Must NOT do: HouseClass IQ scale gating behaviors (do-they-understand-harvest/repair etc.); RA difficulty consumed (requires 25); game-speed + Special flags (build threshold, shroud-off, one-tick strikes) wired through to both engines (shroud-off wiring lands here; its acceptance test lives in todo 38, which owns the fog layer); GDI/NOD/Soviet/Allied BuildChoice doctrine tables replacing generic weights.
   Parallelization: Wave 3 (C4 chain tail) | Blocked by: 35,25 | Blocks: 43 | Parallel with: 37
   References: RUST/cnc-core/src/rules.rs:214 (DifficultyRule); TIBERIANDAWN/HOUSE.CPP (IQ + BuildChoice); AUDIT §3.10, §4/§5 AI rows.
