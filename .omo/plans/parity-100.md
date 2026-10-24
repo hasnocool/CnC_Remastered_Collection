@@ -322,21 +322,21 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): attacked guard retaliates then returns to post (`guard_retaliates_then_returns`); Hunt engages nearest enemy.
   QA scenarios: happy — full guard→attack→return cycle deterministic; failure — invalid transition → logged no-op, state machine stable, Evidence .omo/evidence/task-28-parity-100.log
   Commit: Y | feat(ra): mission state machine
-- [ ] 29. RA multi-house + alliances
+- [x] 29. RA multi-house + alliances
   What to do / Must NOT do: Break the hard-coded 2-owner model (game.rs:651, ai owner 1 at :676); N houses with colors/spawn slots; alliance sets; per-house AI enable. Do NOT change single-player 2-house defaults.
   Parallelization: Wave 2 (RA chain) | Blocked by: 28 | Blocks: 30,35 | Parallel with: 14–21 (TD chain)
   References: RUST/cnc-red-alert/src/game.rs:651,676; RUST/cnc-red-alert/src/house.rs; AUDIT §5 houses row.
   Acceptance criteria (agent-executable): 4-player skirmish boots from scenario (`four_house_skirmish_boots`); allied units never friendly-fire.
   QA scenarios: happy — 2v2 with alliances resolves correctly; failure — house index OOB → deterministic error, Evidence .omo/evidence/task-29-parity-100.log
   Commit: Y | feat(ra): multi-house support
-- [ ] 30. RA specials I (non-shroud-dependent)
+- [x] 30. RA specials I (non-shroud-dependent)
   What to do / Must NOT do: Engineer building capture (IsCaptureable gate per BDATA), attack dogs, medics, Tanya demolition, MAD tank (seismic charge + self-destruct sequence), Spy/Thief wired into Game command flow (spy.rs exists isolated — infiltrate/steal effects land in sim), crates (CRATE.CPP money/unit/invulnerability), chronal vortex (VORTEX.CPP ramp). Do NOT do GPS/paradrops here (todo 38 owns them — shroud/transport dependencies, Metis finding 7).
   Parallelization: Wave 2 (RA chain) | Blocked by: 29 | Blocks: 31 | Parallel with: 14–21 (TD chain)
   References: RUST/cnc-red-alert/src/spy.rs (201 L, tests, unwired); REDALERT/CRATE.CPP, VORTEX.CPP; AUDIT §3.7, §3.10 (MAD tank listed), §5 specials row.
   Acceptance criteria (agent-executable): engineer captures structure ownership; dog kills infantry in one bite; crate pickups grant pinned effects; vortex ramps through base destroying in sequence; MAD tank charge/detonation sequence deterministic (named test `ra_specials_each_deterministic` covering each).
   QA scenarios: happy — each special deterministic across identical games; failure — capture refused on IsCaptureable=false, Evidence .omo/evidence/task-30-parity-100.log
   Commit: Y | feat(ra): infantry specials, crates, vortex
-- [ ] 31. RA carry-over + replay recording
+- [x] 31. RA carry-over + replay recording
   What to do / Must NOT do: Port TD carryover semantics to RA (lift `carryover.rs` to cnc-core or twin it — decision: twin in RA crate, matching RA save being text-based); RA replay record path via LiveSession (from_replay exists; record side missing for RA); extract replay record/playback into the `cnc-replayer` crate so TD + RA both consume it (retires the skeleton status — closes audit §7 replayer row). Includes RNG seed in header (22). Do NOT change TD carryover behavior.
   Parallelization: Wave 2 (RA chain tail) | Blocked by: 30 | Blocks: 13,53 | Parallel with: 14–21 (TD chain)
   References: RUST/cnc-tiberian-dawn/src/carryover.rs (CNCCARRY reference); RUST/cnc-tiberian-dawn/src/network.rs from_replay; RUST/cnc-launcher replay paths (main.rs:5902–6454); RUST/cnc-replayer/codemap.md (skeleton); AUDIT §5 save/replay row, §3.10, §7.
@@ -357,14 +357,14 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): attacking a guarded structure fires its ATTACKED trigger once (`attacked_trigger_fires_once`); discovery trigger fires on first sight of attached house.
   QA scenarios: happy — cell-bound trigger fires when unit enters; failure — re-attack within cooldown → no refire, Evidence .omo/evidence/task-33-parity-100.log
   Commit: Y | feat: attached trigger model
-- [ ] 34. TD TeamType/TaskForce engine
+- [x] 34. TD TeamType/TaskForce engine
   What to do / Must NOT do: Replace the empty planner stubs (ai.rs:133–147) with cnc-core TeamType/TaskForce-driven teams: team formation from members, mission assignment, AUTOCREATE reinforcement, defense_groups/attack_groups actually populated and dispatched. Uses loaded TeamTypes (todo 8/9 data + todo 33 events). Closes AUDIT §3.2 TD half.
   Parallelization: Wave 3 (C4 chain) | Blocked by: 33,8 (TeamType data) | Blocks: 35 | Parallel with: 37 (C5 chain)
   References: RUST/cnc-core/src/entity.rs:616+ (TeamType/TaskForce/TeamMember parsers, 25 tests, zero consumers); RUST/cnc-tiberian-dawn/src/ai.rs:133–147 (no-op stubs), :316–452 (planner to keep); TIBERIANDAWN/TEAM.CPP, TEAMTYPE.CPP; AUDIT §3.2.
   Acceptance criteria (agent-executable): scenario TeamTypes spawn teams on AUTOCREATE (`teamtype_autocreate_spawns_team`); defense group intercepts a raider entering its zone.
   QA scenarios: happy — two-team scenario executes both objectives deterministically; failure — TeamType with zero members → skipped with warning, Evidence .omo/evidence/task-34-parity-100.log
   Commit: Y | feat(td): team-based AI
-- [ ] 35. RA teams + Expert_AI + multi-AI
+- [x] 35. RA teams + Expert_AI + multi-AI
   What to do / Must NOT do: Parameterize `run_expert_ai` (currently TD-only, TD ai.rs:311) as a shared house-commander driving RA houses (lift to cnc-core or mirror in RA — decision: extract to cnc-core/src/house_ai.rs, consumed by both engines); one commander per house (requires todo-29 multi-house); RA TeamTypes spawn teams like todo 34. Corrects PARITY.md §3.3 over-claim. Closes AUDIT §3.2 RA half, §5 AI row.
   Parallelization: Wave 3 (C4 chain) | Blocked by: 34,29,9 (RA TeamType data) | Blocks: 36,38 | Parallel with: 37
   References: RUST/cnc-tiberian-dawn/src/ai.rs:311–452 (urgency ladder, 10 tests); RUST/cnc-red-alert/src/game.rs:1787–1830 (hard-coded cadence to replace) and AI/house init near :676 (anchor re-verified at todo 1); AUDIT §3.2, §5; Metis finding 3.

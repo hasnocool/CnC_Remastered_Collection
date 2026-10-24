@@ -5,6 +5,7 @@ pub mod color;
 pub mod entity;
 pub mod fixed;
 pub mod float_bias;
+pub mod house_ai;
 pub mod ini;
 pub mod math;
 pub mod object_pool;
@@ -18,7 +19,6 @@ pub mod trigger_apply;
 pub mod trigger_attach;
 pub mod trigger_records;
 pub mod visibility;
-
 // Re-exports
 pub use class_id::ClassId;
 pub use color::{PaletteIndex, PlayerRemap, ARGB8888, RGB555, RGB565, RGB888};
@@ -29,14 +29,18 @@ pub use entity::{
 };
 pub use fixed::Fixed16_16;
 pub use float_bias::FloatBias;
+pub use house_ai::{
+    choose_weighted, run_expert_ai, AIDifficulty, BaseBuildingRole, BuildTask, HouseAIConfig,
+    HouseAIState, ProductionWeight,
+};
 pub use ini::{IniFile, IniSection, IniValue};
 pub use math::{Bounds, Mat2x2, Mat3x3, Rect, Vec2, Vec2i, Vec3, Vec3i};
 pub use object_pool::{ObjectPool, PoolError, PoolHandle, PoolStats, ThreadLocalPool};
 pub use palette::Palette;
 pub use pointers::{CodePointers, DecodePointers};
 pub use rules::{
-    DifficultyLevel, DifficultyRule, GeneralRules, HouseRule, RulesDatabase, TypeRule, WarheadRule,
-    WeaponRule,
+    BuildChoice, DifficultyLevel, DifficultyRule, GeneralRules, HouseRule, RulesDatabase,
+    SpecialFlags, TypeRule, WarheadRule, WeaponRule,
 };
 pub use serialization::{BinaryReader, BinaryWriter, Serializable};
 pub use shroud::{Shroud, MAX_HOUSES};

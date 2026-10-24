@@ -297,6 +297,65 @@ impl DifficultyRule {
     }
 }
 
+/// Special gameplay flags consumed by both engine AI systems.
+/// Mirrors the RA Rules.ini / scenario options: build threshold (tech cap),
+/// shroud-off (fog disabled), one-tick strikes, and game-speed modifier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SpecialFlags {
+    /// Maximum buildable tech level (0 = no cap). Matches `BuildLevel`.
+    pub build_threshold: u8,
+    /// Shroud / fog disabled (`IsShadowGrow` / `ShroudOff`).
+    pub shroud_off: bool,
+    /// One-tick strikes enabled (instant attack execution).
+    pub one_tick_strikes: bool,
+    /// Game speed modifier (0 = default, positive = faster, negative = slower).
+    pub game_speed: i8,
+}
+
+/// Per-faction BuildChoice doctrine table (replaces generic production weights).
+/// GDI = balanced infantry + medium tanks; NOD = stealth + bikes; Soviet = heavy tanks;
+/// Allied = infantry + light armor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct BuildChoice {
+    /// Weight multiplier for infantry production in this doctrine.
+    pub infantry_weight: u32,
+    /// Weight multiplier for medium/heavy tank production.
+    pub tank_weight: u32,
+    /// Weight multiplier for aircraft production.
+    pub air_weight: u32,
+}
+
+impl BuildChoice {
+    pub fn gdi() -> Self {
+        Self {
+            infantry_weight: 40,
+            tank_weight: 30,
+            air_weight: 14,
+        }
+    }
+    pub fn nod() -> Self {
+        Self {
+            infantry_weight: 40,
+            tank_weight: 28,
+            air_weight: 14,
+        }
+    }
+    pub fn soviet() -> Self {
+        Self {
+            infantry_weight: 35,
+            tank_weight: 35,
+            air_weight: 10,
+        }
+    }
+    pub fn allied() -> Self {
+        Self {
+            infantry_weight: 45,
+            tank_weight: 25,
+            air_weight: 12,
+        }
+    }
+}
+
 /// One weapon section, e.g. [Cannon105] in Rules.ini / CONST.CPP.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WeaponRule {

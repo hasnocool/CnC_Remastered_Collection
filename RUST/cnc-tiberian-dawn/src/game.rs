@@ -3,6 +3,8 @@
 //! Owns the map, houses, units and buildings, advances a small demo
 //! simulation and renders the whole scene through cnc_renderer.
 
+use crate::ai::run_expert_ai;
+use crate::Building;
 use cnc_asset::SpriteAtlas;
 use cnc_core::rules::RulesDatabase;
 use cnc_core::{ClassId, Fixed16_16, Vec2, Vec2i};
@@ -14,8 +16,7 @@ use std::sync::OnceLock;
 /// (`CNC_TILESET_DIR` / `CNC_TILESET_PALETTE` environment overrides apply).
 static TD_TILESET: OnceLock<Option<cnc_asset::tileset_pack::TilesetPack>> = OnceLock::new();
 
-use crate::ai::{run_expert_ai, AIDifficulty, AI};
-use crate::building::Building;
+use crate::ai::{AIDifficulty, AI};
 use crate::house::House;
 use crate::house::ProductionItem;
 use crate::map::{Map, TILE_SIZE};
@@ -2114,6 +2115,7 @@ impl Game {
             if !enabled {
                 continue;
             }
+            // Use shared house AI with TD config
             run_expert_ai(self, ai, delta_time);
             crate::ai::run_team_manager(self, owner, ai.tick_counter);
         }
@@ -4351,12 +4353,13 @@ impl cnc_core::trigger_apply::TriggerHost for Game {
     }
 
     fn autocreate(&mut self, house: u8, _team: Option<u16>) -> bool {
-        // The team engine (parity todo 34) consumes this flag; until then the
-        // action arms the house AI so the script's intent is visible.
+        // TACTION_AUTOCREATE: alert the house so its `Autocreate=yes` team
+        // types start spawning (TEAMTYPE.CPP `IsAutocreate` + `IsAlerted`).
         let Some(entry) = self.houses.get_mut(usize::from(house)) else {
             return self.reject("Autocreate Begins");
         };
         entry.ai_enabled = true;
+        entry.autocreate = true;
         true
     }
 

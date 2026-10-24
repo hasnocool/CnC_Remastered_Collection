@@ -4,6 +4,8 @@
 //! keeps its own data model: two factions, five countries, naval and air
 //! branches, country superweapons and infiltration.
 
+pub mod ai;
+pub mod carryover;
 pub mod crates;
 pub mod dog;
 pub mod engineer;

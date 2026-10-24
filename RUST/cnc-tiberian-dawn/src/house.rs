@@ -44,6 +44,10 @@ pub struct House {
     /// Build level gating Rules.ini TechLevel. Multiplayer/skirmish uses 98
     /// (everything buildable); scenarios may lower it via the scenario setup.
     pub tech_level: u8,
+    /// AI IQ level — mirrors HOUSE.CPP `IQ` (HOUSE.H:869).
+    /// Controls what behaviors the AI understands: harvest, repair, production, etc.
+    #[serde(default)]
+    pub iq: u8,
     pub ai_enabled: bool,
     /// Difficulty bias for this house — `HouseClass::Assign_Handicap` (HOUSE.CPP:239).
     ///
@@ -77,9 +81,20 @@ pub struct House {
     /// One canonical field, deliberately: the original keeps a single bitmask,
     /// so every accessor spelling ([`House::allies_list`],
     /// [`House::alliance_members_list`], [`House::members_list`], …) reads this
+    /// The set of houses allied with this one — `HouseClass::Allies`
+    /// (HOUSE.H:688, a bitmask; exposed by `Get_Allies`, HOUSE.H:447).
+    ///
+    /// One canonical field, deliberately: the original keeps a single bitmask,
+    /// so every accessor spelling ([`House::allies_list`],
+    /// [`House::alliance_members_list`], [`House::members_list`], …) reads this
     /// same set and no second copy has to be kept in sync.
     #[serde(default)]
     pub allies: Vec<u8>,
+    /// `Autocreate` flag — set by `TACTION_AUTOCREATE` (ACTION_AUTOCREATE).
+    /// When true, the house's `Autocreate=yes` team types will spawn.
+    /// Mirrors `HouseClass::IsAlerted` in the original (HOUSE.CPP).
+    #[serde(default)]
+    pub autocreate: bool,
 }
 
 impl House {
@@ -109,6 +124,8 @@ impl House {
             credit_display: 0,
             credit_countdown: 0,
             allies: Vec::new(),
+            autocreate: false,
+            iq: 0,
         }
     }
     pub fn add_credits(&mut self, amount: i32) {

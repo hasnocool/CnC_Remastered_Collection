@@ -106,7 +106,6 @@ pub enum QueueError {
 /// Silo capacity per silo (RA original: 2000 credits per silo).
 pub const SILO_CAPACITY: i32 = 2000;
 
-/// House state shared by campaign and skirmish games.
 #[derive(Debug, Clone)]
 pub struct House {
     pub id: ClassId,
@@ -130,6 +129,9 @@ pub struct House {
     pub allies: u32,
     /// Whether AI is enabled for this house.
     pub ai_enabled: bool,
+    /// AI IQ level — mirrors HOUSE.CPP `IQ` (HOUSE.H:869).
+    /// Controls what behaviors the AI understands: harvest, repair, production, etc.
+    pub iq: u8,
     /// Multiplayer spawn slot (start-location index); `None` for campaign houses.
     pub spawn_slot: Option<u8>,
 }
@@ -152,6 +154,7 @@ impl House {
             silo_count: 0,
             allies: 0,
             ai_enabled: true,
+            iq: 0,
             spawn_slot: None,
         }
     }

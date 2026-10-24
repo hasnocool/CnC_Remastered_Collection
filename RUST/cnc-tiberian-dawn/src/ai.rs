@@ -45,6 +45,11 @@ pub struct AI {
     pub next_attack_at: Fixed16_16,
     /// RA `Check_Fire_Sale` runs once per game.
     pub fire_sale_done: bool,
+    /// AI IQ level from the house — mirrors HOUSE.CPP IQ.
+    /// Gates AI behaviors: harvest (IQ >= IQHarvester), repair/sell (IQ >= IQRepairSell),
+    /// production (IQ >= IQProduction), aircraft (IQ >= IQAircraft), etc.
+    #[serde(default)]
+    pub iq: u8,
 }
 
 /// Deterministic stand-in for the `Random_Pick` the original uses to scatter
@@ -181,6 +186,15 @@ impl AI {
             AIDifficulty::Brutal => Fixed16_16::from_f32(30.0),
         };
 
+        // Default IQ mirrors HOUSE.CPP: computer players get MaxIQ (5).
+        // Easy difficulty gets slightly reduced IQ to gate advanced behaviors.
+        let iq = match difficulty {
+            AIDifficulty::Easy => 3, // Below IQProduction (4-5) to gate high-tech
+            AIDifficulty::Normal => 5,
+            AIDifficulty::Hard => 5,
+            AIDifficulty::Brutal => 5,
+        };
+
         Self {
             house_id,
             difficulty,
@@ -201,6 +215,7 @@ impl AI {
             tick_counter: 0,
             next_attack_at: Fixed16_16::from_f32(30.0),
             fire_sale_done: false,
+            iq,
         }
     }
 
@@ -274,6 +289,11 @@ impl AI {
         credits: i32,
     ) -> Vec<ProductionWeight> {
         let aggression = self.aggression();
+        let _max_iq = rules.general.max_iq;
+        let iq_production = rules.general.iq_production;
+        let _iq_harvester = rules.general.iq_harvester;
+        let _iq_aircraft = rules.general.iq_aircraft;
+        let _iq_repair_sell = rules.general.iq_repair_sell;
         let mut weights = Vec::new();
 
         for unit in UnitType::ALL {
@@ -305,6 +325,12 @@ impl AI {
                 .map(|level| level.clamp(0, u8::MAX as i32) as u8)
                 .unwrap_or(stats.tech_level);
             if required_level > tech_level || cost > credits {
+                continue;
+            }
+
+            // IQ gate: high-tech units require sufficient IQ (IQProduction threshold)
+            // HOUSE.CPP: AI with IQ < IQProduction doesn't understand advanced production
+            if required_level >= 5 && self.iq < iq_production {
                 continue;
             }
 
@@ -1114,5 +1140,16 @@ mod tests {
                 .iter()
                 .any(|option| option.unit == UnitType::Harvester));
         }
+    }
+    #[test]
+    fn iq_gates_advanced_behavior() {
+        let ai_easy = AI::new(0, AIDifficulty::Easy);
+        let rules = RulesDatabase::default();
+        let owned = [StructureType::WarFactory, StructureType::Barracks];
+        let weights = ai_easy.production_weights(&rules, 10, true, &owned, 20000);
+        assert!(
+            !weights.iter().any(|w| w.unit == UnitType::MammothTank),
+            "Easy AI should not build MammothTank due to IQ gate"
+        );
     }
 }

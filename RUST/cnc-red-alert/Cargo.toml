@@ -12,6 +12,7 @@ cnc-audio = { path = "../cnc-audio" }
 cnc-asset = { path = "../cnc-asset" }
 cnc-events = { path = "../cnc-events" }
 anyhow = { workspace = true }
+bincode = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }

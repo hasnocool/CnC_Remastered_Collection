@@ -256,6 +256,10 @@ pub struct TeamType {
     pub objective: TeamObjective,
     /// `Active=` INI flag (matches at scenario start).
     pub active_at_start: bool,
+    /// `Autocreate=` INI flag: team only spawns once the owning house
+    /// is alerted (`TACTION_AUTOCREATE`, original `IsAutocreate`).
+    #[serde(default)]
+    pub autocreate: bool,
 }
 
 impl TeamType {
@@ -271,6 +275,7 @@ impl TeamType {
             },
             objective: TeamObjective::None,
             active_at_start: true,
+            autocreate: false,
         }
     }
 
@@ -283,6 +288,12 @@ impl TeamType {
     /// Set the `Active=` scenario-start flag.
     pub fn with_active_at_start(mut self, active: bool) -> Self {
         self.active_at_start = active;
+        self
+    }
+
+    /// Set the `Autocreate=` flag (teams spawn only when house is alerted).
+    pub fn with_autocreate(mut self, autocreate: bool) -> Self {
+        self.autocreate = autocreate;
         self
     }
 
@@ -302,12 +313,13 @@ impl fmt::Display for TeamType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "TeamType({} '{}' owner={:?} units={} objective={})",
+            "TeamType({} '{}' owner={:?} units={} objective={} autocreate={})",
             self.id,
             self.name,
             self.owner,
             self.unit_count(),
-            self.objective
+            self.objective,
+            self.autocreate
         )
     }
 }
@@ -671,6 +683,7 @@ pub fn team_types_from_ini(ini: &IniFile) -> Result<Vec<TeamType>> {
             taskforce,
             objective,
             active_at_start: section_bool(section, "Active", true),
+            autocreate: section_bool(section, "Autocreate", false),
         });
     }
     Ok(types)

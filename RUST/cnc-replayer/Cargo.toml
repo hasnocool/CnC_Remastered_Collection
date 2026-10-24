@@ -1,0 +1,19 @@
+[package]
+name = "cnc-replayer"
+version = { workspace = true }
+description = "Shared replay record/playback for C&C lockstep simulation"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nvgithub/cnc-remastered"
+
+[dependencies]
+cnc-core = { workspace = true }
+cnc-tiberian-dawn = { path = "../cnc-tiberian-dawn" }
+cnc-red-alert = { path = "../cnc-red-alert" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = "1.4"
