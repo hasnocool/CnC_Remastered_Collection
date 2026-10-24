@@ -6,7 +6,7 @@
 
 use crate::map::{ImportKind, MapModel, MapObject};
 use anyhow::Context;
-use cnc_core::ClassId;
+use cnc_core::{ClassId, RulesDatabase};
 use std::path::{Path, PathBuf};
 
 /// Terrain theater a map is authored for.
@@ -27,6 +27,17 @@ impl Theater {
             Self::Urban => "Urban",
         }
     }
+}
+
+/// Object data loaded from RulesDatabase for editor catalog.
+#[derive(Debug, Clone)]
+pub struct ObjectData {
+    pub name: String,
+    pub prerequisite: Vec<ClassId>,
+    pub cost: i32,
+    pub build_time: i32,
+    pub owner: Vec<ClassId>,
+    pub display_name: Option<String>,
 }
 
 /// Rules the editor needs from the game being edited.
@@ -76,11 +87,31 @@ pub trait GamePlugin: Send + Sync {
         format!("{class_id:?}")
     }
 
+    /// Get object data including prerequisites, cost, etc. from RulesDatabase.
+    /// Returns None for unknown/hardcoded types.
+    fn get_object_data(&self, _class_id: ClassId) -> Option<ObjectData> {
+        None
+    }
+
     /// Faction hint shown in the palette when an object is side-locked.
     fn object_side(&self, _class_id: ClassId) -> Option<&'static str> {
         None
     }
 
+    /// Available trigger events for the trigger dialog (from todo-32 enums).
+    fn available_trigger_events(&self) -> Vec<cnc_core::trigger_records::EventKind> {
+        vec![]
+    }
+
+    /// Available trigger actions for the trigger dialog (from todo-32 enums).
+    fn available_trigger_actions(&self) -> Vec<cnc_core::trigger_records::ActionKind> {
+        vec![]
+    }
+
+    /// Load catalog from RulesDatabase. Default implementation uses hardcoded available_objects().
+    fn load_catalog_from_rules(&mut self, _rules: &RulesDatabase) {
+        // Default: do nothing, use hardcoded available_objects()
+    }
     /// Open a scenario from disk, dispatching on its extension/dialect.
     fn load_map(&self, path: &Path) -> anyhow::Result<MapModel> {
         load_scenario(path).map(|(model, _kind)| model)
@@ -182,18 +213,24 @@ pub fn save_scenario(model: &MapModel, path: &Path) -> anyhow::Result<Vec<PathBu
 }
 
 /// Tiberian Dawn (GDI/Nod) plugin.
-pub struct TiberianDawnPlugin;
+pub struct TiberianDawnPlugin {
+    /// Catalog loaded from RulesDatabase, falls back to hardcoded if not loaded.
+    catalog: Vec<ClassId>,
+    /// Object data loaded from RulesDatabase.
+    object_data: std::collections::HashMap<ClassId, ObjectData>,
+}
 
-impl GamePlugin for TiberianDawnPlugin {
-    fn name(&self) -> &str {
-        "Tiberian Dawn"
+impl Default for TiberianDawnPlugin {
+    fn default() -> Self {
+        Self {
+            catalog: Self::hardcoded_catalog(),
+            object_data: std::collections::HashMap::new(),
+        }
     }
+}
 
-    fn available_terrains(&self) -> Vec<String> {
-        vec!["Temperate".into(), "Snow".into(), "Desert".into()]
-    }
-
-    fn available_objects(&self) -> Vec<ClassId> {
+impl TiberianDawnPlugin {
+    fn hardcoded_catalog() -> Vec<ClassId> {
         vec![
             ClassId::InfantryE1,
             ClassId::InfantryE2,
@@ -214,6 +251,99 @@ impl GamePlugin for TiberianDawnPlugin {
         ]
     }
 
+    /// Map INI type name to ClassId.
+    fn type_name_to_class_id(name: &str) -> Option<ClassId> {
+        match name {
+            "E1" => Some(ClassId::InfantryE1),
+            "E2" => Some(ClassId::InfantryE2),
+            "E3" => Some(ClassId::InfantryE3),
+            "E4" => Some(ClassId::InfantryE4),
+            "E5" => Some(ClassId::InfantryE5),
+            "E6" => Some(ClassId::InfantryE6),
+            "E7" => Some(ClassId::InfantryE7),
+            "E8" => Some(ClassId::InfantryE8),
+            "E9" => Some(ClassId::InfantryE9),
+            "E10" => Some(ClassId::InfantryE10),
+            "E11" => Some(ClassId::InfantryE11),
+            "LTNK" => Some(ClassId::VehicleE1),
+            "MTNK" => Some(ClassId::VehicleE2),
+            "HTNK" => Some(ClassId::VehicleE3),
+            "MAMM" => Some(ClassId::VehicleE4),
+            "APC" => Some(ClassId::VehicleE5),
+            "HARV" => Some(ClassId::VehicleE6),
+            "MCV" => Some(ClassId::VehicleE7),
+            "RANG" => Some(ClassId::VehicleE8),
+            "HUMV" => Some(ClassId::VehicleE9),
+            "MLRS" => Some(ClassId::VehicleE10),
+            "ARTY" => Some(ClassId::VehicleE11),
+            "V2" => Some(ClassId::VehicleE12),
+            "ORCA" => Some(ClassId::AircraftE1),
+            "TRAN" => Some(ClassId::AircraftE2),
+            "HELI" => Some(ClassId::AircraftE1),
+            "A10" => Some(ClassId::AircraftE4),
+            "YAK" => Some(ClassId::AircraftE6),
+            "FACT" => Some(ClassId::ConstructionYard),
+            "POWR" => Some(ClassId::PowerPlant),
+            "BARR" => Some(ClassId::Barracks),
+            "WARF" => Some(ClassId::WarFactory),
+            "HPAD" => Some(ClassId::Helipad),
+            "RADR" => Some(ClassId::Radar),
+            "MSIL" => Some(ClassId::MissileSilo),
+            "AFLD" => Some(ClassId::Airfield),
+            "SAM" => Some(ClassId::AA_Gun),
+            "SILO" => Some(ClassId::Silo),
+            "BIOL" => Some(ClassId::BioLab),
+            "TECH" => Some(ClassId::TechCenter),
+            "TEMP" => Some(ClassId::ConstructionYard),
+            "HAND" => Some(ClassId::ConstructionYard),
+            "EYE" => Some(ClassId::Radar),
+            "NAPU" => Some(ClassId::PowerPlant),
+            "GATE" => Some(ClassId::AA_Gun),
+            "TURR" => Some(ClassId::AA_Gun),
+            "GTWR" => Some(ClassId::AA_Gun),
+            "ATWR" => Some(ClassId::AA_Gun),
+            "OBEL" => Some(ClassId::AA_Gun),
+            _ => None,
+        }
+    }
+
+    /// Parse prerequisite string into ClassId vector.
+    fn parse_prerequisites(prereq_str: &str) -> Vec<ClassId> {
+        prereq_str
+            .split(',')
+            .filter_map(|s| Self::type_name_to_class_id(s.trim()))
+            .collect()
+    }
+
+    /// Parse owner string into ClassId vector.
+    fn parse_owners(owner_str: &str) -> Vec<ClassId> {
+        owner_str
+            .split(',')
+            .filter_map(|s| match s.trim() {
+                "GDI" => Some(ClassId::HouseGDI),
+                "Nod" => Some(ClassId::HouseNod),
+                "Allies" => Some(ClassId::HouseAllies),
+                "Soviet" => Some(ClassId::HouseSoviet),
+                "Neutral" => Some(ClassId::House),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+impl GamePlugin for TiberianDawnPlugin {
+    fn name(&self) -> &str {
+        "Tiberian Dawn"
+    }
+
+    fn available_terrains(&self) -> Vec<String> {
+        vec!["Temperate".into(), "Snow".into(), "Desert".into()]
+    }
+
+    fn available_objects(&self) -> Vec<ClassId> {
+        self.catalog.clone()
+    }
+
     fn default_credits(&self) -> i32 {
         5_000
     }
@@ -224,21 +354,167 @@ impl GamePlugin for TiberianDawnPlugin {
             _ => None,
         }
     }
+
+    fn get_object_data(&self, class_id: ClassId) -> Option<ObjectData> {
+        self.object_data.get(&class_id).cloned()
+    }
+
+    fn available_trigger_events(&self) -> Vec<cnc_core::trigger_records::EventKind> {
+        use cnc_core::trigger_records::EventKind;
+        vec![
+            EventKind::None,
+            EventKind::PlayerEntered,
+            EventKind::Spied,
+            EventKind::Thieved,
+            EventKind::Discovered,
+            EventKind::HouseDiscovered,
+            EventKind::Attacked,
+            EventKind::Destroyed,
+            EventKind::Any,
+            EventKind::UnitsDestroyed,
+            EventKind::BuildingsDestroyed,
+            EventKind::AllDestroyed,
+            EventKind::Credits,
+            EventKind::ElapsedTime,
+            EventKind::MissionTimerExpired,
+            EventKind::BuildingsDestroyedCount,
+            EventKind::UnitsDestroyedCount,
+            EventKind::NoFactories,
+            EventKind::EvacCivilian,
+            EventKind::Build,
+            EventKind::BuildUnit,
+            EventKind::BuildInfantry,
+            EventKind::BuildAircraft,
+            EventKind::LeavesMap,
+            EventKind::EntersZone,
+            EventKind::CrossHorizontal,
+            EventKind::CrossVertical,
+            EventKind::GlobalSet,
+            EventKind::GlobalClear,
+            EventKind::FakesDestroyed,
+            EventKind::LowPower,
+            EventKind::AllBridgesDestroyed,
+            EventKind::BuildingExists,
+        ]
+    }
+
+    fn available_trigger_actions(&self) -> Vec<cnc_core::trigger_records::ActionKind> {
+        use cnc_core::trigger_records::ActionKind;
+        vec![
+            ActionKind::None,
+            ActionKind::Win,
+            ActionKind::Lose,
+            ActionKind::BeginProduction,
+            ActionKind::CreateTeam,
+            ActionKind::DestroyTeam,
+            ActionKind::AllHunt,
+            ActionKind::Reinforcements,
+            ActionKind::DropZone,
+            ActionKind::FireSale,
+            ActionKind::PlayMovie,
+            ActionKind::TextTrigger,
+            ActionKind::DestroyTrigger,
+            ActionKind::Autocreate,
+            ActionKind::WinLose,
+            ActionKind::AllowWin,
+            ActionKind::RevealAll,
+            ActionKind::RevealSome,
+            ActionKind::RevealZone,
+            ActionKind::PlaySound,
+            ActionKind::PlayMusic,
+            ActionKind::PlaySpeech,
+            ActionKind::ForceTrigger,
+            ActionKind::StartTimer,
+            ActionKind::StopTimer,
+            ActionKind::ExtendTimer,
+            ActionKind::ShortenTimer,
+            ActionKind::SetTimer,
+            ActionKind::SetGlobal,
+            ActionKind::ClearGlobal,
+            ActionKind::BaseBuilding,
+            ActionKind::CreepShadow,
+            ActionKind::DestroyObject,
+            ActionKind::OneTimeSpecial,
+            ActionKind::FullSpecial,
+            ActionKind::PreferredTarget,
+            ActionKind::LaunchNukes,
+        ]
+    }
+
+    fn load_catalog_from_rules(&mut self, rules: &RulesDatabase) {
+        let mut catalog = Vec::new();
+        let mut object_data = std::collections::HashMap::new();
+
+        // Iterate over all categories: Infantry, Units, Aircraft, Buildings, Structures
+        for category in ["Infantry", "Units", "Aircraft", "Buildings", "Structures"] {
+            if let Some(names) = rules.categories.get(category) {
+                for name in names {
+                    if let Some(class_id) = Self::type_name_to_class_id(name) {
+                        if let Some(type_rule) = rules.type_rule(name) {
+                            let prerequisites = type_rule.prerequisite.clone();
+                            let owners = type_rule.owner.clone();
+                            let cost = type_rule.cost.unwrap_or(0);
+                            let build_time = rules.type_build_time(name).unwrap_or(0);
+                            let display_name = type_rule.display_name.clone();
+
+                            object_data.insert(
+                                class_id,
+                                ObjectData {
+                                    name: name.clone(),
+                                    prerequisite: Self::parse_prerequisites(
+                                        &prerequisites.join(","),
+                                    ),
+                                    cost,
+                                    build_time,
+                                    owner: Self::parse_owners(&owners.join(",")),
+                                    display_name,
+                                },
+                            );
+                            catalog.push(class_id);
+                        } else {
+                            eprintln!("Warning: type '{}' listed in [{}] but no type rule found, skipping", name, category);
+                        }
+                    } else {
+                        eprintln!(
+                            "Warning: unknown type '{}' in [{}] category, skipping",
+                            name, category
+                        );
+                    }
+                }
+            }
+        }
+
+        // Fall back to hardcoded if no types were loaded
+        if catalog.is_empty() {
+            eprintln!(
+                "Warning: no types loaded from RulesDatabase, falling back to hardcoded catalog"
+            );
+            catalog = Self::hardcoded_catalog();
+        }
+
+        self.catalog = catalog;
+        self.object_data = object_data;
+    }
+}
+/// Red Alert (Allied/Soviet) plugin.
+pub struct RedAlertPlugin {
+    /// Catalog loaded from RulesDatabase, falls back to hardcoded if not loaded.
+    catalog: Vec<ClassId>,
+    /// Object data loaded from RulesDatabase.
+    object_data: std::collections::HashMap<ClassId, ObjectData>,
 }
 
-/// Red Alert (Allied/Soviet) plugin.
-pub struct RedAlertPlugin;
-
-impl GamePlugin for RedAlertPlugin {
-    fn name(&self) -> &str {
-        "Red Alert"
+impl Default for RedAlertPlugin {
+    fn default() -> Self {
+        Self {
+            catalog: Self::hardcoded_catalog(),
+            object_data: std::collections::HashMap::new(),
+        }
     }
+}
 
-    fn available_terrains(&self) -> Vec<String> {
-        vec!["Temperate".into(), "Snow".into(), "Urban".into()]
-    }
-
-    fn available_objects(&self) -> Vec<ClassId> {
+impl RedAlertPlugin {
+    fn hardcoded_catalog() -> Vec<ClassId> {
         vec![
             ClassId::InfantryE1,
             ClassId::InfantryE2,
@@ -266,6 +542,99 @@ impl GamePlugin for RedAlertPlugin {
         ]
     }
 
+    /// Map INI type name to ClassId (RA specific mappings).
+    fn type_name_to_class_id(name: &str) -> Option<ClassId> {
+        match name {
+            "E1" => Some(ClassId::InfantryE1),
+            "E2" => Some(ClassId::InfantryE2),
+            "E3" => Some(ClassId::InfantryE3),
+            "E4" => Some(ClassId::InfantryE4),
+            "E5" => Some(ClassId::InfantryE5),
+            "E6" => Some(ClassId::InfantryE6),
+            "E7" => Some(ClassId::InfantryE7),
+            "E8" => Some(ClassId::InfantryE8),
+            "E9" => Some(ClassId::InfantryE9),
+            "E10" => Some(ClassId::InfantryE10),
+            "E11" => Some(ClassId::InfantryE11),
+            "LTNK" => Some(ClassId::VehicleE1),
+            "MTNK" => Some(ClassId::VehicleE2),
+            "HTNK" => Some(ClassId::VehicleE3),
+            "MAMM" => Some(ClassId::VehicleE4),
+            "APC" => Some(ClassId::VehicleE5),
+            "HARV" => Some(ClassId::VehicleE6),
+            "MCV" => Some(ClassId::VehicleE7),
+            "RANG" => Some(ClassId::VehicleE8),
+            "HUMV" => Some(ClassId::VehicleE9),
+            "MLRS" => Some(ClassId::VehicleE10),
+            "ARTY" => Some(ClassId::VehicleE11),
+            "V2" => Some(ClassId::VehicleE12),
+            "TESL" => Some(ClassId::VehicleE14),
+            "HELI" => Some(ClassId::AircraftE1),
+            "TRAN" => Some(ClassId::AircraftE2),
+            "YAK" => Some(ClassId::AircraftE6),
+            "MIG" => Some(ClassId::AircraftE7),
+            "CHIN" => Some(ClassId::AircraftE8),
+            "GNBO" => Some(ClassId::ShipE1),
+            "DSHK" => Some(ClassId::ShipE2),
+            "CRUS" => Some(ClassId::ShipE3),
+            "SUB" => Some(ClassId::ShipE4),
+            "TST" => Some(ClassId::ShipE5),
+            "CARR" => Some(ClassId::ShipE6),
+            "FACT" => Some(ClassId::ConstructionYard),
+            "POWR" => Some(ClassId::PowerPlant),
+            "APWR" => Some(ClassId::PowerPlant),
+            "NAPU" => Some(ClassId::PowerPlant),
+            "BARR" => Some(ClassId::Barracks),
+            "WARF" => Some(ClassId::WarFactory),
+            "HPAD" => Some(ClassId::Helipad),
+            "NAYD" => Some(ClassId::NavalYard),
+            "SUBP" => Some(ClassId::SubPen),
+            "GAP" => Some(ClassId::GapGenerator),
+            "CHRO" => Some(ClassId::Chronosphere),
+            "IRON" => Some(ClassId::IronCurtain),
+            "MSIL" => Some(ClassId::MissileSilo),
+            "GSIL" => Some(ClassId::GapGenerator),
+            _ => None,
+        }
+    }
+
+    /// Parse prerequisite string into ClassId vector.
+    fn parse_prerequisites(prereq_str: &str) -> Vec<ClassId> {
+        prereq_str
+            .split(',')
+            .filter_map(|s| Self::type_name_to_class_id(s.trim()))
+            .collect()
+    }
+
+    /// Parse owner string into ClassId vector.
+    fn parse_owners(owner_str: &str) -> Vec<ClassId> {
+        owner_str
+            .split(',')
+            .filter_map(|s| match s.trim() {
+                "GDI" => Some(ClassId::HouseGDI),
+                "Nod" => Some(ClassId::HouseNod),
+                "Allies" => Some(ClassId::HouseAllies),
+                "Soviet" => Some(ClassId::HouseSoviet),
+                "Neutral" => Some(ClassId::House),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+impl GamePlugin for RedAlertPlugin {
+    fn name(&self) -> &str {
+        "Red Alert"
+    }
+
+    fn available_terrains(&self) -> Vec<String> {
+        vec!["Temperate".into(), "Snow".into(), "Urban".into()]
+    }
+
+    fn available_objects(&self) -> Vec<ClassId> {
+        self.catalog.clone()
+    }
+
     fn supports_naval(&self) -> bool {
         true
     }
@@ -289,8 +658,155 @@ impl GamePlugin for RedAlertPlugin {
             ("Chronosphere", "elapsed:600", "message:Chronosphere ready"),
         ]
     }
-}
 
+    fn get_object_data(&self, class_id: ClassId) -> Option<ObjectData> {
+        self.object_data.get(&class_id).cloned()
+    }
+
+    fn available_trigger_events(&self) -> Vec<cnc_core::trigger_records::EventKind> {
+        use cnc_core::trigger_records::EventKind;
+        vec![
+            EventKind::None,
+            EventKind::PlayerEntered,
+            EventKind::Spied,
+            EventKind::Thieved,
+            EventKind::Discovered,
+            EventKind::HouseDiscovered,
+            EventKind::Attacked,
+            EventKind::Destroyed,
+            EventKind::Any,
+            EventKind::UnitsDestroyed,
+            EventKind::BuildingsDestroyed,
+            EventKind::AllDestroyed,
+            EventKind::Credits,
+            EventKind::ElapsedTime,
+            EventKind::MissionTimerExpired,
+            EventKind::BuildingsDestroyedCount,
+            EventKind::UnitsDestroyedCount,
+            EventKind::NoFactories,
+            EventKind::EvacCivilian,
+            EventKind::Build,
+            EventKind::BuildUnit,
+            EventKind::BuildInfantry,
+            EventKind::BuildAircraft,
+            EventKind::LeavesMap,
+            EventKind::EntersZone,
+            EventKind::CrossHorizontal,
+            EventKind::CrossVertical,
+            EventKind::GlobalSet,
+            EventKind::GlobalClear,
+            EventKind::FakesDestroyed,
+            EventKind::LowPower,
+            EventKind::AllBridgesDestroyed,
+            EventKind::BuildingExists,
+        ]
+    }
+
+    fn available_trigger_actions(&self) -> Vec<cnc_core::trigger_records::ActionKind> {
+        use cnc_core::trigger_records::ActionKind;
+        vec![
+            ActionKind::None,
+            ActionKind::Win,
+            ActionKind::Lose,
+            ActionKind::BeginProduction,
+            ActionKind::CreateTeam,
+            ActionKind::DestroyTeam,
+            ActionKind::AllHunt,
+            ActionKind::Reinforcements,
+            ActionKind::DropZone,
+            ActionKind::FireSale,
+            ActionKind::PlayMovie,
+            ActionKind::TextTrigger,
+            ActionKind::DestroyTrigger,
+            ActionKind::Autocreate,
+            ActionKind::WinLose,
+            ActionKind::AllowWin,
+            ActionKind::RevealAll,
+            ActionKind::RevealSome,
+            ActionKind::RevealZone,
+            ActionKind::PlaySound,
+            ActionKind::PlayMusic,
+            ActionKind::PlaySpeech,
+            ActionKind::ForceTrigger,
+            ActionKind::StartTimer,
+            ActionKind::StopTimer,
+            ActionKind::ExtendTimer,
+            ActionKind::ShortenTimer,
+            ActionKind::SetTimer,
+            ActionKind::SetGlobal,
+            ActionKind::ClearGlobal,
+            ActionKind::BaseBuilding,
+            ActionKind::CreepShadow,
+            ActionKind::DestroyObject,
+            ActionKind::OneTimeSpecial,
+            ActionKind::FullSpecial,
+            ActionKind::PreferredTarget,
+            ActionKind::LaunchNukes,
+        ]
+    }
+
+    fn load_catalog_from_rules(&mut self, rules: &RulesDatabase) {
+        let mut catalog = Vec::new();
+        let mut object_data = std::collections::HashMap::new();
+
+        // Iterate over all categories: Infantry, Units, Aircraft, Buildings, Structures
+        for category in [
+            "Infantry",
+            "Units",
+            "Aircraft",
+            "Buildings",
+            "Structures",
+            "Ships",
+        ] {
+            if let Some(names) = rules.categories.get(category) {
+                for name in names {
+                    if let Some(class_id) = Self::type_name_to_class_id(name) {
+                        if let Some(type_rule) = rules.type_rule(name) {
+                            let prerequisites = type_rule.prerequisite.clone();
+                            let owners = type_rule.owner.clone();
+                            let cost = type_rule.cost.unwrap_or(0);
+                            let build_time = rules.type_build_time(name).unwrap_or(0);
+                            let display_name = type_rule.display_name.clone();
+
+                            object_data.insert(
+                                class_id,
+                                ObjectData {
+                                    name: name.clone(),
+                                    prerequisite: Self::parse_prerequisites(
+                                        &prerequisites.join(","),
+                                    ),
+                                    cost,
+                                    build_time,
+                                    owner: Self::parse_owners(&owners.join(",")),
+                                    display_name,
+                                },
+                            );
+                            catalog.push(class_id);
+                        } else {
+                            eprintln!("Warning: type '{}' listed in [{}] but no type rule found, skipping", name, category);
+                        }
+                    } else {
+                        eprintln!(
+                            "Warning: unknown type '{}' in [{}] category, skipping",
+                            name, category
+                        );
+                    }
+                }
+            }
+        }
+
+        // Fall back to hardcoded if no types were loaded
+        if catalog.is_empty() {
+            eprintln!(
+                "Warning: no types loaded from RulesDatabase, falling back to hardcoded catalog"
+            );
+            catalog = Self::hardcoded_catalog();
+        }
+
+        self.catalog = catalog;
+        self.object_data = object_data;
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,7 +814,7 @@ mod tests {
 
     #[test]
     fn plugins_expose_side_locked_objects() {
-        let td = TiberianDawnPlugin;
+        let td = TiberianDawnPlugin::default();
         assert_eq!(td.object_side(ClassId::VehicleE2), Some("GDI"));
         assert_eq!(td.object_side(ClassId::AircraftE1), Some("GDI"));
         assert_eq!(td.object_side(ClassId::PowerPlant), None);
@@ -307,7 +823,7 @@ mod tests {
             None,
             "Jeep/Buggy share a class"
         );
-        let ra = RedAlertPlugin;
+        let ra = RedAlertPlugin::default();
         assert_eq!(ra.object_side(ClassId::Chronosphere), Some("Allies"));
         assert_eq!(ra.object_side(ClassId::TeslaCoil), Some("Soviet"));
         assert_eq!(ra.object_side(ClassId::PowerPlant), None);
@@ -315,8 +831,8 @@ mod tests {
 
     #[test]
     fn plugins_expose_distinct_catalogs() {
-        let td = TiberianDawnPlugin;
-        let ra = RedAlertPlugin;
+        let td = TiberianDawnPlugin::default();
+        let ra = RedAlertPlugin::default();
         assert_eq!(td.name(), "Tiberian Dawn");
         assert_ne!(td.available_objects(), ra.available_objects());
         assert!(ra.available_objects().contains(&ClassId::ShipE4));
@@ -327,16 +843,18 @@ mod tests {
 
     #[test]
     fn theaters_and_templates_are_derived() {
-        let ra = RedAlertPlugin;
+        let ra = RedAlertPlugin::default();
         assert!(ra.theaters().contains(&Theater::Urban));
-        assert!(!TiberianDawnPlugin.theaters().contains(&Theater::Urban));
+        assert!(!TiberianDawnPlugin::default()
+            .theaters()
+            .contains(&Theater::Urban));
         assert!(ra.trigger_templates().len() >= 3);
     }
 
     #[test]
     fn object_validation_checks_bounds_and_house_owner() {
         let model = MapModel::new(8, 8);
-        let plugin = TiberianDawnPlugin;
+        let plugin = TiberianDawnPlugin::default();
         let mut object = MapObject {
             id: 1,
             class_id: ClassId::InfantryE1,

@@ -634,8 +634,8 @@ impl EditorState {
 
     pub fn plugin(&self) -> Box<dyn GamePlugin> {
         match self.plugin_index {
-            0 => Box::new(TiberianDawnPlugin),
-            _ => Box::new(RedAlertPlugin),
+            0 => Box::new(TiberianDawnPlugin::default()),
+            _ => Box::new(RedAlertPlugin::default()),
         }
     }
 
