@@ -4,12 +4,17 @@
 //! keeps its own data model: two factions, five countries, naval and air
 //! branches, country superweapons and infiltration.
 
+pub mod crates;
+pub mod dog;
+pub mod engineer;
 pub mod events;
 pub mod game;
 pub mod gapgen;
 pub mod house;
+pub mod madtank;
 pub mod map;
 pub mod mcv;
+pub mod medic;
 pub mod original_scenario;
 pub mod pathfind;
 pub mod render;
@@ -19,7 +24,9 @@ pub mod scenario;
 pub mod scenario_mpr;
 pub mod spy;
 pub mod superweapon;
+pub mod tanya;
 pub mod tesla;
+pub mod vortex;
 
 pub use events::{names as event_names, OutcomeKind as EventOutcomeKind, SuperweaponKind};
 pub use game::{

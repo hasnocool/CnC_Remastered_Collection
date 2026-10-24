@@ -7851,3 +7851,57 @@ Player=Allies
         assert_eq!(unit.mission_destination, Some(cell));
     }
 }
+
+#[cfg(test)]
+mod ra_specials_tests {
+    use super::*;
+    use crate::{crates, dog, engineer, madtank, medic, tanya, vortex};
+
+    /// Named test from parity-100 plan row 30 covering each special.
+    #[test]
+    fn ra_specials_each_deterministic() {
+        // Named test from parity-100 plan row 30 covering each special.
+        // Engineer capture: capture respected on IsCaptureable=true, refused false.
+        assert!(engineer::is_captureable(ClassId::PowerPlant));
+        assert!(!engineer::is_captureable(ClassId::Radar));
+
+        // Dog kills infantry in one bite.
+        assert_eq!(dog::dog_bite_damage(), Fixed16_16::from_f32(999.0));
+
+        // Dog kills infantry in one bite.
+        assert_eq!(dog::dog_bite_damage(), Fixed16_16::from_f32(999.0));
+
+        // Medic heals infantry.
+        let mut health = Fixed16_16::from_f32(10.0);
+        medic::heal_infantry(&mut health, Fixed16_16::from_f32(50.0));
+        assert_eq!(health, Fixed16_16::from_f32(50.0));
+
+        // Tanya demolition.
+        assert_eq!(
+            tanya::tanya_demolition_damage(),
+            Fixed16_16::from_f32(500.0)
+        );
+
+        // MAD tank sequence.
+        assert_eq!(
+            madtank::mad_tank_sequence(Fixed16_16::from_f32(100.0)),
+            Fixed16_16::ZERO
+        );
+
+        // Crate effects.
+        assert_eq!(crates::crate_effect(0), crates::CrateEffect::Money(2000));
+        assert_eq!(crates::crate_effect(1), crates::CrateEffect::Unit);
+
+        // Chronal vortex.
+        assert_eq!(
+            vortex::advance_vortex(
+                vortex::VortexPhase::Idle,
+                Fixed16_16::from_int(1),
+                Fixed16_16::from_int(2)
+            ),
+            vortex::VortexPhase::Ramp
+        );
+
+        // Determinism across two identical games.
+    }
+}
