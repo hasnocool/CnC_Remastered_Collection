@@ -6,6 +6,7 @@ pub mod events_subscriber;
 pub mod lobby;
 pub mod lobby_screen;
 pub mod menu;
+pub mod movie;
 pub mod options;
 pub mod ready;
 /// End-of-mission scoring, shared by the launcher shell and the campaign flow.

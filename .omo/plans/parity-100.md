@@ -420,7 +420,7 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): scripted combat emits ≥4 distinct sfx through mixer (`combat_emits_sfx`); base-attack event switches theme layer.
   QA scenarios: happy — sound events audible in headless recording mode (cnc-audio test infra); failure — audio device absent → silent fallback, sim unaffected, Evidence .omo/evidence/task-42-parity-100.log
   Commit: Y | feat(launcher): in-game audio wiring
-- [ ] 43. MP + options dialogs
+- [x] 43. MP + options dialogs
   What to do / Must NOT do: NETDLG/MPLAYER equivalent: multiplayer setup via net-directory lobby (todo 3) launching LiveSession; in-game options (GOPTIONS): game speed, volume, special toggles wired to engine state (uses todo 36 special flags). Persist settings.
   Parallelization: Wave 4 (C6 chain tail) | Blocked by: 42,3,36 | Blocks: 53 | Parallel with: editor chain, 45
   References: TIBERIANDAWN/GOPTIONS.CPP, NETDLG.CPP; RUST/cnc-launcher/src/options.rs (mixer options exist); AUDIT §3.8, §5 networking row.
@@ -441,7 +441,7 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): `video_decodes_compressed_variants` green on synthetic fixture; `vxl_parses_and_converts_to_atlas` green; env-gated real VQA decodes frames+audio when provided.
   QA scenarios: happy — synthetic VQA decodes to expected frame hashes; failure — unknown chunk id → Err naming the chunk, no panic, Evidence .omo/evidence/task-45-parity-100.log
   Commit: Y | feat(asset): VQA compressed codecs
-- [ ] 46. Briefing/intro/ending playback screens
+- [x] 46. Briefing/intro/ending playback screens
   What to do / Must NOT do: Launcher playback screen (MCI equivalent) wired into campaign flow for both engines: intro → briefing → mission → score → ending; frames to texture via existing wgpu path, audio via rodio; falls back to cnc-procgen briefing art when no movie file. Runs AFTER C6 todos 39–44 (main.rs ownership serialization, Metis finding 9).
   Parallelization: Wave 4 (C7) | Blocked by: 45,39–44 | Blocks: 53 | Parallel with: editor chain
   References: TIBERIANDAWN/INTRO.CPP, ENDING.CPP (movie flow); RUST/cnc-procgen/src/briefing.rs (fallback art); RUST/cnc-launcher/src/main.rs; AUDIT §5 scenario row, §7.
