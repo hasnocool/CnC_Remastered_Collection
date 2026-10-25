@@ -295,6 +295,7 @@ fn build_label(buildable: Buildable) -> &'static str {
         Buildable::Unit(UnitType::Trex) => "T-Rex",
         Buildable::Unit(UnitType::Raptor) => "Raptor",
         Buildable::Unit(UnitType::Stegosaurus) => "Stegosaurus",
+        Buildable::Unit(UnitType::Gunboat) => "Gunboat",
         Buildable::Structure(StructureType::ConstructionYard) => "Con Yard",
         Buildable::Structure(StructureType::PowerPlant) => "Power Plant",
         Buildable::Structure(StructureType::Refinery) => "Refinery",

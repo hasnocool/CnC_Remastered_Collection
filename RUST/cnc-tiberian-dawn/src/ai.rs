@@ -402,6 +402,7 @@ const fn base_weight(unit: UnitType) -> u32 {
         UnitType::Trex => 20,
         UnitType::Raptor => 15,
         UnitType::Stegosaurus => 10,
+        UnitType::Gunboat => 18,
     }
 }
 

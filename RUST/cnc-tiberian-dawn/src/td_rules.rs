@@ -652,6 +652,8 @@ pub enum UnitType {
     Flamethrower,
     /// IDATA.CPP:486-528, INI name "E5": chem warrior infantry.
     ChemWarrior,
+    /// The only TD warship: gunboat (ClassId::ShipE1).
+    Gunboat,
     /// AADATA.CPP:148-287, INI name "C17": transport aircraft (C-17 Chinook).
     Chinook,
     /// UDATA.CPP:1095-1110, INI name "TRIC": triceratops dinosaur.
@@ -663,10 +665,9 @@ pub enum UnitType {
     /// UDATA.CPP:1245-1298, INI name "STEG": stegosaurus dinosaur.
     Stegosaurus,
 }
-
 impl UnitType {
     /// Every modelled unit, in stable sidebar order.
-    pub const ALL: [UnitType; 25] = [
+    pub const ALL: [UnitType; 26] = [
         UnitType::InfantryE1,
         UnitType::Engineer,
         UnitType::Commando,
@@ -687,6 +688,7 @@ impl UnitType {
         UnitType::RocketSoldier,
         UnitType::Flamethrower,
         UnitType::ChemWarrior,
+        UnitType::Gunboat,
         UnitType::Chinook,
         UnitType::Triceratops,
         UnitType::Trex,
@@ -1021,6 +1023,21 @@ impl UnitType {
                 is_aircraft: false,
                 ammo: 0,
             },
+            UnitType::Gunboat => UnitStats {
+                strength: 400,
+                max_speed_mph: 24,
+                weapon: Some(WeaponType::Cannon105),
+                armor: ArmorType::Steel,
+                is_infantry: false,
+                cost: 1000,
+                tech_level: 3,
+                sight_range: 3,
+                has_turret: true,
+                rot_degrees_per_tick: 5,
+                two_shooter: false,
+                is_aircraft: false,
+                ammo: 0,
+            },
             UnitType::Chinook => UnitStats {
                 strength: 25,
                 max_speed_mph: 50,
@@ -1124,6 +1141,7 @@ impl UnitType {
             UnitType::RocketSoldier => "E3",
             UnitType::Flamethrower => "E4",
             UnitType::ChemWarrior => "E5",
+            UnitType::Gunboat => "GUNB",
             UnitType::Chinook => "C17",
             UnitType::Triceratops => "TRIC",
             UnitType::Trex => "TREX",
@@ -1155,6 +1173,7 @@ pub const fn unit_class_id(unit_type: UnitType) -> ClassId {
         UnitType::RocketSoldier => ClassId::InfantryE1,
         UnitType::Flamethrower => ClassId::InfantryE1,
         UnitType::ChemWarrior => ClassId::InfantryE1,
+        UnitType::Gunboat => ClassId::ShipE1,
         UnitType::Chinook => ClassId::AircraftE1,
         UnitType::Triceratops => ClassId::VehicleE1,
         UnitType::Trex => ClassId::VehicleE1,
@@ -1181,6 +1200,7 @@ pub fn unit_type_for_class(class_id: ClassId) -> Option<UnitType> {
         ClassId::VehicleE6 => Some(UnitType::Harvester),
         ClassId::AircraftE1 => Some(UnitType::Orca),
         ClassId::AircraftE2 => Some(UnitType::Apache),
+        ClassId::ShipE1 => Some(UnitType::Gunboat),
         _ => None,
     }
 }
@@ -1275,9 +1295,11 @@ pub fn owner_token_allows(tokens: &[String], is_gdi: bool) -> bool {
 /// Hard-coded TD unit ownership, used when Rules.ini omits `Owner=`.
 pub const fn default_unit_owner(unit: UnitType, is_gdi: bool) -> bool {
     match unit {
-        UnitType::InfantryE1 | UnitType::Engineer | UnitType::Commando | UnitType::Harvester => {
-            true
-        }
+        UnitType::InfantryE1
+        | UnitType::Engineer
+        | UnitType::Commando
+        | UnitType::Harvester
+        | UnitType::Gunboat => true,
         UnitType::MediumTank | UnitType::MammothTank | UnitType::Jeep | UnitType::Orca => is_gdi,
         UnitType::Buggy | UnitType::Apache => !is_gdi,
         UnitType::APC | UnitType::Artillery | UnitType::MLRS => is_gdi,

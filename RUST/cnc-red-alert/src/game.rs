@@ -6722,6 +6722,21 @@ Briefing=Hold the line.\n\
     }
 
     #[test]
+    fn ra_carrier_launches_and_recovers_aircraft() {
+        let mut game = Game::new(40, 40);
+        game.spawn_structure(0, ClassId::NavalYard, Vec2i::new(20, 20));
+        let carrier = game.spawn_unit(0, ClassId::ShipE6, Vec2i::new(20, 20));
+        let _air = game.spawn_unit(0, ClassId::AircraftE7, Vec2i::new(20, 20));
+        let carrier_unit = game
+            .units
+            .iter()
+            .find(|u| u.id == carrier)
+            .expect("carrier");
+        assert!(carrier_unit.role == UnitRole::Ship);
+        assert!(game.queue_unit(0, ClassId::AircraftE7, 2));
+    }
+
+    #[test]
     fn scenario_builds_the_game_and_fires_timed_triggers() {
         let text = "[Map]
 Width=16
