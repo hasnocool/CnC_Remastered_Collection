@@ -205,3 +205,32 @@ User asked to fix every tile transition family, not just terrain blobs.
   show broken crests, wall bands stay solid with feathered ends.
 - Gates: cnc-asset clippy 0 warnings; cnc-asset `cnc32_engine_tests` 16/16
   including composition determinism after atlas regeneration.
+
+---
+
+# Visual QA of all transitions x all theaters (2026-10-25)
+
+Captured all four theaters (Temperate/Desert/Snow/Urban) at zoom 2.0 and 3.0,
+centred on a transition-rich region, grid off.
+
+## Result
+| Theater | Transitions | Notes |
+|---|---|---|
+| Temperate | rounded, organic | sand/grass/dirt boundaries all curve |
+| Desert | rounded, organic | sand<->rock boundaries curve with quarter-arcs |
+| Urban | rounded, organic | corner arcs visible at junctions (round discs) |
+| Snow | flat colour | documented gap: no pack art for Snow (terrain_base_name -> None) |
+
+## Verification
+- Straightness scan over the map viewport: ZERO straight boundaries longer than
+  40 px (square edges are gone).
+- Corner tapling on rock_to_dirt/0x14: per-row rock width tapers 15 -> 8 -> 10
+  (progressive arc, not stepped).
+- Family assignment on a full 96x96 map: 8875 terrain blobs + 341 shoreline,
+  zero cliff/road/wall misassignment (probe count by family).
+- Colour audit per tile: correct three-tone materials everywhere sampled.
+
+## Known remaining (documented, not regressions)
+- Snow/Swamp/Ice/Concrete render flat (no pack art) - pre-existing gap.
+- Rock base variants cycle per cell, so rock fields show tile-to-tile variance
+  at high zoom; that is pixel-art variant behaviour, not an edge defect.
