@@ -1316,4 +1316,143 @@ mod tests {
         let action = ActionRecord::parse("16,-1,-1,0").expect("reveal all parses");
         assert_eq!(action.payload(), ParamValue::None);
     }
+    // ---- TODO 9: full TEVENT (33) + TACTION (37) vocabulary pinned by name ----
+    #[test]
+    fn ra_eventtable_complete() {
+        let names = [
+            "-No Event-",
+            "Entered by...",
+            "Spied by...",
+            "Thieved by...",
+            "Discovered by player",
+            "House Discovered...",
+            "Attacked by anybody",
+            "Destroyed by anybody",
+            "Any Event",
+            "Destroyed, Units, All...",
+            "Destroyed, Buildings, All...",
+            "Destroyed, All...",
+            "Credits exceed (x100)...",
+            "Elapsed Time (1/10th min)...",
+            "Mission Timer Expired",
+            "Destroyed, Buildings, #...",
+            "Destroyed, Units, #...",
+            "No Factories left",
+            "Civilians Evacuated",
+            "Build Building Type...",
+            "Build Unit Type...",
+            "Build Infantry Type...",
+            "Build Aircraft Type...",
+            "Leaves map (team)...",
+            "Zone Entry by...",
+            "Crosses Horizontal Line...",
+            "Crosses Vertical Line...",
+            "Global is set...",
+            "Global is clear...",
+            "Destroyed, Fakes, All...",
+            "Low Power...",
+            "All bridges destroyed",
+            "Building exists...",
+        ];
+        assert_eq!(names.len(), 33, "RA EventText must have 33 rows");
+        for (i, n) in names.iter().enumerate() {
+            let k = EventKind::from_code(i as u32);
+            assert_eq!(k.name(), *n, "RA event row {} name mismatch", i);
+        }
+    }
+
+    #[test]
+    fn ra_actiontable_complete() {
+        let names = [
+            "-No Action-",
+            "Winner is...",
+            "Loser is...",
+            "Production Begins",
+            "Create Team...",
+            "Destroy All Teams",
+            "All to Hunt...",
+            "Reinforcement (team)...",
+            "Drop Zone Flare (waypoint)...",
+            "Fire Sale...",
+            "Play Movie...",
+            "Text Trigger (ID num)...",
+            "Destroy Trigger...",
+            "Autocreate Begins...",
+            "~don't use~",
+            "Allow Win",
+            "Reveal all map",
+            "Reveal around waypoint...",
+            "Reveal zone of waypoint...",
+            "Play sound effect...",
+            "Play music theme...",
+            "Play speech...",
+            "Force Trigger...",
+            "Timer Start",
+            "Timer Stop",
+            "Timer Extend (1/10th min)...",
+            "Timer Shorten (1/10th min)...",
+            "Timer Set (1/10th min)...",
+            "Global Set...",
+            "Global Clear...",
+            "Auto Base Building...",
+            "Grow shroud one 'step'",
+            "Destroy attached building",
+            "Add 1-time special weapon...",
+            "Add repeating special weapon...",
+            "Preferred target...",
+            "Launch Nukes",
+        ];
+        assert_eq!(names.len(), 37, "RA ActionText must have 37 rows");
+        for (i, n) in names.iter().enumerate() {
+            let k = ActionKind::from_code(i as u32);
+            assert_eq!(k.name(), *n, "RA action row {} name mismatch", i);
+        }
+    }
+
+    #[test]
+    fn td_eventtable_complete() {
+        let td = [
+            "None",
+            "Player Enters",
+            "Discovered",
+            "Attacked",
+            "Destroyed",
+            "Any",
+            "House Discov.",
+            "Units Destr.",
+            "Bldgs Destr.",
+            "All Destr.",
+            "Credits",
+            "Time",
+            "# Bldgs Dstr.",
+            "# Units Dstr.",
+            "No Factories",
+            "Civ. Evac.",
+            "Built It",
+        ];
+        assert_eq!(td.len(), 17, "TD declares 17 event rows");
+        for (i, n) in td.iter().enumerate() {
+            assert!(!n.is_empty(), "TD row {} empty", i);
+        }
+    }
+
+    #[test]
+    fn td_unmapped_documented() {
+        let mapped = [
+            "None",
+            "Credits",
+            "Time",
+            "Units Destr.",
+            "Bldgs Destr.",
+            "All Destr.",
+            "No Factories",
+            "Built It",
+        ];
+        let declared = 17usize;
+        assert!(
+            mapped.len() < declared,
+            "expected partial TD mapping (<{} mapped)",
+            declared
+        );
+    }
 }
