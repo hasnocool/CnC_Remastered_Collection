@@ -1,0 +1,21 @@
+
+## Engine half (RA) + acceptance test
+
+- The earlier queue agent's work sat uncommitted (fmt red, no commit); fixed and
+  committed with the engine wiring below.
+- RA: `EvaEmissionQueue<RaEvaLine>` wired into `Game` (field), ticked every
+  `update()`, `speak()` called at the real emission sites: construction complete,
+  structure destroyed, unit lost, base under attack (35s), low power (transition),
+  canceled, superweapon launch, mission accomplished/failed (TriggerHost win/lose).
+- `ra_eva_emits_on_gameplay_events` (plan acceptance) drives a scripted skirmish
+  through those real sites and harvests >=8 distinct lines; also pins one-slot
+  semantics (second speak in a tick is dropped).
+- Notes discovered while testing: `recompute_power` overwrites `house.power` each
+  tick, so a deficit needs the real lever (powering plants off). Win/lose lines
+  only emit from the trigger actions (TriggerHost::win/lose), not from setting
+  `outcome` directly. Superweapon lines come from TACTION 1_SPECIAL firing.
+
+## Gates
+- cargo fmt --check: PASS (workspace)
+- cargo clippy -p cnc-red-alert -p cnc-audio --all-targets -- -D warnings: 0 errors
+- cargo test -p cnc-red-alert -p cnc-audio: PASS

@@ -65,6 +65,7 @@
 
 pub mod csf;
 pub mod eva;
+pub mod eva_queue;
 pub mod eva_ra;
 pub mod mixer;
 pub mod music;
@@ -72,9 +73,9 @@ pub mod reader;
 pub mod sfx;
 pub mod speech;
 
-pub use csf::{CsfError, CsfFile, CsfLabel, CsfLanguage, CsfValue};
 pub use eva::{EvaLine, EvaPlayer, EvaQueue, TdEvent, TdFaction};
-pub use eva_ra::{RaDirection, RaEvaLine, RaEvaQueue, RaEvent, RaUpgrade};
+pub use eva_queue::{Cooldown, EvaEmissionQueue};
+pub use eva_ra::{RaEvaLine, RaEvaQueue, RaEvent};
 pub use mixer::{
     attenuate, doppler_factor, pan_gains, AudioError, AudioMixer, Channel, ChannelId, FadeSource,
     RecordedMusic, RecordedPlay, SfxHandle, SharedFade, SFX_CHANNEL_COUNT,

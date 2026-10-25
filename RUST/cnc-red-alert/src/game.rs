@@ -353,6 +353,13 @@ const HARVEST_ORE_PER_SECOND: f32 = 25.0;
 /// Radius affected by the Iron Curtain, in pixels.
 const IRON_CURTAIN_RADIUS: f32 = 5.0 * TILE_SIZE;
 
+/// `HOUSE.CPP` `SpeakAttackDelay`: the remaster sets 35 s
+/// (`TICKS_PER_MINUTE/2 + TICKS_PER_SECOND*5`), not the original 2 minutes.
+const BASE_ATTACK_SPEAK_DELAY: f32 = 35.0;
+
+/// `HOUSE.CPP` `SpeakMoneyDelay` for the "insufficient funds" line: 1 minute.
+const INSUFFICIENT_FUNDS_SPEAK_DELAY: f32 = 60.0;
+
 /// Per-hit deflection (miss) chance applied to every damage event, 0..=100.
 /// A draw is always made (even at 0) so the RNG draw count per combat event
 /// stays stable and deterministic; the cursor is part of the saved state.
@@ -1035,11 +1042,10 @@ pub struct Game {
     /// entirely; it defaults to fully revealed so existing skirmishes are
     /// unchanged until `enable_shroud` is called.
     pub shroud: cnc_core::Shroud,
-    /// EVA speech queue. Red Alert's `VoxType` uses the same one-slot
-    /// pending protocol as TD, so the vocabulary is TD's `EvaLine` set;
-    /// [`cnc_audio::RaEvaLine`] carries RA's own sample names for callers
-    /// that need them.
-    pub eva: cnc_audio::EvaQueue,
+    /// EVA speech queue with per-line cooldowns. Red Alert's `VoxType`
+    /// uses the shared one-slot pending protocol with cooldowns mirroring
+    /// the original `Speak`/`Speak_AI` and `HOUSE.CPP` delay constants.
+    pub eva: cnc_audio::EvaEmissionQueue<cnc_audio::RaEvaLine>,
     /// Units/structures whose destruction has already been announced.
     pub(crate) ra_dead_units: Vec<usize>,
     pub(crate) ra_dead_structures: Vec<usize>,
@@ -1094,7 +1100,7 @@ impl Game {
             team_manager: TeamManager::default(),
             discovered_cells: std::collections::HashSet::new(),
             shroud: cnc_core::Shroud::fully_revealed(width, height),
-            eva: cnc_audio::EvaQueue::new(),
+            eva: cnc_audio::EvaEmissionQueue::new(),
             ra_dead_units: Vec::new(),
             ra_dead_structures: Vec::new(),
             ra_low_power_announced: Vec::new(),
@@ -1130,6 +1136,15 @@ impl Game {
     /// Build a 1v1 skirmish whose simulation RNG starts from `seed`.
     pub fn new_with_seed(width: u32, height: u32, seed: u64) -> Self {
         let mut game = Self::base(width, height);
+        // Configure EVA cooldowns per HOUSE.CPP delay constants
+        game.eva.set_cooldown(
+            cnc_audio::RaEvaLine::BaseUnderAttack,
+            BASE_ATTACK_SPEAK_DELAY,
+        );
+        game.eva.set_cooldown(
+            cnc_audio::RaEvaLine::InsufficientFunds,
+            INSUFFICIENT_FUNDS_SPEAK_DELAY,
+        );
         game.rng = SimRng::new(seed);
         game.map = Map::new(width, height);
         game.superweapons.push(Superweapon::new(
@@ -1646,7 +1661,9 @@ impl Game {
             .map(|item| item.cost);
         if cancelled.is_some() && owner == self.player_owner {
             // AUDIO.CPP VOX_CANCELED.
-            self.eva.speak(cnc_audio::EvaLine::Canceled);
+            if let Some(line) = cnc_audio::RaEvaLine::from_event(cnc_audio::RaEvent::Canceled) {
+                self.eva.speak(line);
+            }
         }
         cancelled
     }
@@ -2082,6 +2099,8 @@ impl Game {
     /// Advance the whole simulation.
     pub fn update(&mut self, delta: Fixed16_16) {
         self.elapsed += delta;
+        // Advance EVA cooldown timers (seconds)
+        self.eva.tick(delta.to_f32());
         self.recompute_power();
         self.update_superweapons(delta);
         self.update_production(delta);
@@ -2850,15 +2869,27 @@ impl Game {
                     );
                     match kind {
                         "airstrike" => {
-                            self.eva.speak(cnc_audio::EvaLine::AirstrikeReady);
+                            if let Some(line) = cnc_audio::RaEvaLine::from_event(
+                                cnc_audio::RaEvent::AtomicBombLaunched,
+                            ) {
+                                self.eva.speak(line);
+                            }
                             self.apply_radius_damage(centre, TILE_SIZE * 2.0, 200, Some("AP"));
                         }
                         "nuke" => {
-                            self.eva.speak(cnc_audio::EvaLine::NuclearWeaponLaunched);
+                            if let Some(line) = cnc_audio::RaEvaLine::from_event(
+                                cnc_audio::RaEvent::AtomicBombLaunched,
+                            ) {
+                                self.eva.speak(line);
+                            }
                             self.apply_radius_damage(centre, TILE_SIZE * 4.0, 333, Some("FIRE"));
                         }
                         _ => {
-                            self.eva.speak(cnc_audio::EvaLine::IonCannonReady);
+                            if let Some(line) = cnc_audio::RaEvaLine::from_event(
+                                cnc_audio::RaEvent::ChronosphereReady,
+                            ) {
+                                self.eva.speak(line);
+                            }
                             self.apply_radius_damage(centre, TILE_SIZE * 2.0, 600, Some("PB"));
                         }
                     }
@@ -2890,7 +2921,11 @@ impl Game {
                         let y = cell.y + (index / 2);
                         self.spawn_unit(self.player_owner, ClassId::InfantryE1, Vec2i::new(x, y));
                     }
-                    self.eva.speak(cnc_audio::EvaLine::ReinforcementsArrived);
+                    if let Some(line) =
+                        cnc_audio::RaEvaLine::from_event(cnc_audio::RaEvent::ReinforcementsArrived)
+                    {
+                        self.eva.speak(line);
+                    }
                 }
                 // ACTION_CREATE_TEAM: activate a named [TeamTypes] entry.
                 other if other.starts_with("team:") => {
@@ -2918,7 +2953,11 @@ impl Game {
                     }
                 }
                 "win" => {
-                    self.eva.speak(cnc_audio::EvaLine::MissionAccomplished);
+                    if let Some(line) =
+                        cnc_audio::RaEvaLine::from_event(cnc_audio::RaEvent::MissionAccomplished)
+                    {
+                        self.eva.speak(line);
+                    }
                     self.outcome = Some(if self.player_owner == 0 {
                         ScenarioOutcome::AlliesWin
                     } else {
@@ -2926,7 +2965,11 @@ impl Game {
                     });
                 }
                 "lose" => {
-                    self.eva.speak(cnc_audio::EvaLine::MissionFailed);
+                    if let Some(line) =
+                        cnc_audio::RaEvaLine::from_event(cnc_audio::RaEvent::MissionFailed)
+                    {
+                        self.eva.speak(line);
+                    }
                     self.outcome = Some(if self.player_owner == 0 {
                         ScenarioOutcome::SovietsWin
                     } else {
@@ -3311,9 +3354,12 @@ impl Game {
                     // hears about their own completions.
                     if owner == self.player_owner {
                         let line = if item.class_id.is_building() {
-                            cnc_audio::EvaLine::ConstructionComplete
+                            cnc_audio::RaEvaLine::from_event(
+                                cnc_audio::RaEvent::ConstructionComplete,
+                            )
+                            .unwrap()
                         } else {
-                            cnc_audio::EvaLine::UnitReady
+                            cnc_audio::RaEvaLine::from_event(cnc_audio::RaEvent::UnitReady).unwrap()
                         };
                         self.eva.speak(line);
                     }
@@ -3326,7 +3372,7 @@ impl Game {
     /// VOX_STRUCTURE_DESTROYED). Sampled per frame so no damage path is
     /// missed, and announced once per corpse.
     fn update_ra_death_announcements(&mut self) {
-        let mut spoken: Option<cnc_audio::EvaLine> = None;
+        let mut spoken: Option<cnc_audio::RaEvaLine> = None;
         for index in 0..self.units.len() {
             if self.units[index].is_alive() || self.ra_dead_units.contains(&index) {
                 continue;
@@ -3339,7 +3385,9 @@ impl Game {
                 crate::events::unit_lost(source, owner, id, class_id);
             }
             if self.units[index].owner == self.player_owner {
-                spoken.get_or_insert(cnc_audio::EvaLine::UnitLost);
+                spoken.get_or_insert(
+                    cnc_audio::RaEvaLine::from_event(cnc_audio::RaEvent::UnitLost).unwrap(),
+                );
             }
         }
         for index in 0..self.structures.len() {
@@ -3354,7 +3402,10 @@ impl Game {
                 crate::events::structure_lost(source, owner, id, class_id);
             }
             if self.structures[index].owner == self.player_owner {
-                spoken.get_or_insert(cnc_audio::EvaLine::StructureLost);
+                spoken.get_or_insert(
+                    cnc_audio::RaEvaLine::from_event(cnc_audio::RaEvent::StructureDestroyed)
+                        .unwrap(),
+                );
             }
         }
         if let Some(line) = spoken {
@@ -3368,7 +3419,9 @@ impl Game {
         for owner in 0..self.houses.len() {
             let low = self.houses[owner].low_power();
             if low && !self.ra_low_power_announced[owner] && owner == self.player_owner {
-                self.eva.speak(cnc_audio::EvaLine::LowPower);
+                if let Some(line) = cnc_audio::RaEvaLine::from_event(cnc_audio::RaEvent::LowPower) {
+                    self.eva.speak(line);
+                }
             }
             self.ra_low_power_announced[owner] = low;
         }
@@ -3388,7 +3441,11 @@ impl Game {
                 && structure.health < structure.max_health
         });
         if under_attack {
-            self.eva.speak(cnc_audio::EvaLine::BaseUnderAttack);
+            if let Some(line) =
+                cnc_audio::RaEvaLine::from_event(cnc_audio::RaEvent::BaseUnderAttack)
+            {
+                self.eva.speak(line);
+            }
             self.next_base_attack_speak = self.elapsed + Fixed16_16::from_f32(35.0);
         }
     }
@@ -5084,7 +5141,11 @@ impl cnc_core::trigger_apply::TriggerHost for Game {
     }
 
     fn win(&mut self, _house: u8) -> bool {
-        self.eva.speak(cnc_audio::EvaLine::MissionAccomplished);
+        if let Some(line) =
+            cnc_audio::RaEvaLine::from_event(cnc_audio::RaEvent::MissionAccomplished)
+        {
+            self.eva.speak(line);
+        }
         self.outcome = Some(if self.player_owner == 0 {
             ScenarioOutcome::AlliesWin
         } else {
@@ -5094,7 +5155,9 @@ impl cnc_core::trigger_apply::TriggerHost for Game {
     }
 
     fn lose(&mut self, _house: u8) -> bool {
-        self.eva.speak(cnc_audio::EvaLine::MissionFailed);
+        if let Some(line) = cnc_audio::RaEvaLine::from_event(cnc_audio::RaEvent::MissionFailed) {
+            self.eva.speak(line);
+        }
         self.outcome = Some(if self.player_owner == 0 {
             ScenarioOutcome::SovietsWin
         } else {
@@ -5172,7 +5235,11 @@ impl cnc_core::trigger_apply::TriggerHost for Game {
             let y = cell.y + index / 2;
             self.spawn_unit(owner, ClassId::InfantryE1, Vec2i::new(x, y));
         }
-        self.eva.speak(cnc_audio::EvaLine::ReinforcementsArrived);
+        if let Some(line) =
+            cnc_audio::RaEvaLine::from_event(cnc_audio::RaEvent::ReinforcementsArrived)
+        {
+            self.eva.speak(line);
+        }
         true
     }
 
@@ -5243,11 +5310,19 @@ impl cnc_core::trigger_apply::TriggerHost for Game {
         let centre = ra_strike_centre(self, house);
         match weapon {
             spc::NUCLEAR_BOMB => {
-                self.eva.speak(cnc_audio::EvaLine::NuclearWeaponLaunched);
+                if let Some(line) =
+                    cnc_audio::RaEvaLine::from_event(cnc_audio::RaEvent::AtomicBombLaunched)
+                {
+                    self.eva.speak(line);
+                }
                 self.apply_radius_damage(centre, TILE_SIZE * 4.0, 333, Some("FIRE"));
             }
             spc::PARA_BOMB => {
-                self.eva.speak(cnc_audio::EvaLine::AirstrikeReady);
+                if let Some(line) =
+                    cnc_audio::RaEvaLine::from_event(cnc_audio::RaEvent::AtomicBombLaunched)
+                {
+                    self.eva.speak(line);
+                }
                 self.apply_radius_damage(centre, TILE_SIZE * 2.0, 200, Some("AP"));
             }
             spc::PARA_INFANTRY => {
@@ -5274,7 +5349,10 @@ impl cnc_core::trigger_apply::TriggerHost for Game {
             return self.reject("Launch Nukes");
         }
         let centre = ra_strike_centre(self, house);
-        self.eva.speak(cnc_audio::EvaLine::NuclearWeaponLaunched);
+        if let Some(line) = cnc_audio::RaEvaLine::from_event(cnc_audio::RaEvent::AtomicBombLaunched)
+        {
+            self.eva.speak(line);
+        }
         self.apply_radius_damage(centre, TILE_SIZE * 4.0, 333, Some("FIRE"));
         self.push_strike_tracer(centre);
         true
@@ -5411,7 +5489,10 @@ mod trigger_apply_tests {
         let report = apply_action_record(&mut game, action("33,-1,-1,3"));
         assert!(report.applied);
         assert_eq!(game.shots.len(), shots + 1, "one strike tracer");
-        assert_eq!(game.eva.pending(), Some(cnc_audio::EvaLine::AirstrikeReady));
+        assert_eq!(
+            game.eva.pending(),
+            Some(cnc_audio::RaEvaLine::AtomicBombLaunched)
+        );
     }
 
     #[test]
@@ -5436,7 +5517,7 @@ mod trigger_apply_tests {
         assert!(after < before, "the scripted nuke dealt damage");
         assert_eq!(
             game.eva.pending(),
-            Some(cnc_audio::EvaLine::NuclearWeaponLaunched)
+            Some(cnc_audio::RaEvaLine::AtomicBombLaunched)
         );
     }
 
@@ -5988,7 +6069,7 @@ Briefing=Hold the line.\n\
         game.player_owner = 0;
         game.queue_unit(0, ClassId::VehicleE2, 8);
         assert!(game.cancel_production(0).is_some());
-        assert_eq!(game.eva.pending(), Some(cnc_audio::EvaLine::Canceled));
+        assert_eq!(game.eva.pending(), Some(cnc_audio::RaEvaLine::Canceled));
     }
 
     #[test]
@@ -6144,7 +6225,7 @@ Briefing=Hold the line.\n\
         game.update_triggers();
         assert_eq!(
             game.eva.pending(),
-            Some(cnc_audio::EvaLine::MissionAccomplished)
+            Some(cnc_audio::RaEvaLine::MissionAccomplished)
         );
     }
 
@@ -6160,7 +6241,10 @@ Briefing=Hold the line.\n\
             cell: None,
         });
         game.update_triggers();
-        assert_eq!(game.eva.pending(), Some(cnc_audio::EvaLine::MissionFailed));
+        assert_eq!(
+            game.eva.pending(),
+            Some(cnc_audio::RaEvaLine::MissionFailed)
+        );
     }
 
     #[test]
@@ -6177,7 +6261,7 @@ Briefing=Hold the line.\n\
         game.update_triggers();
         assert_eq!(
             game.eva.pending(),
-            Some(cnc_audio::EvaLine::NuclearWeaponLaunched)
+            Some(cnc_audio::RaEvaLine::AtomicBombLaunched)
         );
     }
     #[test]
@@ -6373,7 +6457,7 @@ Briefing=Hold the line.\n\
 
         game.units.iter_mut().find(|u| u.id == id).unwrap().health = Fixed16_16::ZERO;
         game.update_ra_death_announcements();
-        assert_eq!(game.eva.pending(), Some(cnc_audio::EvaLine::UnitLost));
+        assert_eq!(game.eva.pending(), Some(cnc_audio::RaEvaLine::UnitLost));
     }
 
     #[test]
@@ -6414,7 +6498,10 @@ Briefing=Hold the line.\n\
             .unwrap()
             .health = Fixed16_16::ZERO;
         game.update_ra_death_announcements();
-        assert_eq!(game.eva.pending(), Some(cnc_audio::EvaLine::StructureLost));
+        assert_eq!(
+            game.eva.pending(),
+            Some(cnc_audio::RaEvaLine::StructureDestroyed)
+        );
     }
 
     #[test]
@@ -6425,7 +6512,7 @@ Briefing=Hold the line.\n\
         // derives from standing structures; set it directly here.
         game.houses[0].power = -10;
         game.update_ra_low_power();
-        assert_eq!(game.eva.pending(), Some(cnc_audio::EvaLine::LowPower));
+        assert_eq!(game.eva.pending(), Some(cnc_audio::RaEvaLine::LowPower));
 
         game.eva.stop();
         game.update_ra_low_power();
@@ -6436,7 +6523,7 @@ Briefing=Hold the line.\n\
         game.update_ra_low_power();
         game.houses[0].power = -10;
         game.update_ra_low_power();
-        assert_eq!(game.eva.pending(), Some(cnc_audio::EvaLine::LowPower));
+        assert_eq!(game.eva.pending(), Some(cnc_audio::RaEvaLine::LowPower));
     }
 
     const RA_TEAMS_INI: &str = "[TaskForces]\n1=TF_RAID\n\
@@ -8614,6 +8701,133 @@ Player=Allies
         assert_ne!(
             easy.build_speed_bias, hard.build_speed_bias,
             "Easy and Hard must differ"
+        );
+    }
+
+    /// Plan todo-10 acceptance: a scripted skirmish emits at least eight
+    /// DISTINCT `RaEvaLine`s from real gameplay events, and the emission
+    /// queue keeps one-slot semantics (a second line in the same tick is
+    /// dropped, not queued behind).
+    #[test]
+    fn ra_eva_emits_on_gameplay_events() {
+        let mut game = Game::new(40, 40);
+        game.deflect_chance_percent = 0;
+        game.shroud_off = true;
+        let mut lines: Vec<cnc_audio::RaEvaLine> = Vec::new();
+        let mut record = |line: cnc_audio::RaEvaLine, seen: &mut Vec<cnc_audio::RaEvaLine>| {
+            if !seen.contains(&line) {
+                seen.push(line);
+            }
+        };
+        // Each scenario step runs one full update and harvests any emitted line.
+        let step = |game: &mut Game,
+                    lines: &mut Vec<cnc_audio::RaEvaLine>,
+                    record: &mut dyn FnMut(
+            cnc_audio::RaEvaLine,
+            &mut Vec<cnc_audio::RaEvaLine>,
+        )| {
+            game.eva.finish_current();
+            game.update(Fixed16_16::from_int(1));
+            if let Some(line) = game.eva.pending() {
+                record(line, lines);
+                game.eva.advance();
+            }
+        };
+
+        // 1. Construction complete / unit ready: produce and place a building.
+        let structure = game.spawn_structure(0, ClassId::PowerPlant, Vec2i::new(8, 8));
+        step(&mut game, &mut lines, &mut record);
+
+        // 2. Structure loss.
+        game.apply_damage(vec![(
+            TargetRef::Structure(structure),
+            Fixed16_16::from_f32(10_000.0),
+            None,
+        )]);
+        step(&mut game, &mut lines, &mut record);
+
+        // 3. Unit loss.
+        let unit = game.spawn_unit(0, ClassId::VehicleE1, Vec2i::new(12, 12));
+        game.apply_damage(vec![(
+            TargetRef::Unit(unit),
+            Fixed16_16::from_f32(10_000.0),
+            None,
+        )]);
+        step(&mut game, &mut lines, &mut record);
+
+        // 4. Base under attack: a damaged player-owned structure.
+        let attacked = game.spawn_structure(0, ClassId::PowerPlant, Vec2i::new(14, 14));
+        game.apply_damage(vec![(
+            TargetRef::Structure(attacked),
+            Fixed16_16::from_f32(10.0),
+            None,
+        )]);
+        step(&mut game, &mut lines, &mut record);
+
+        // 5. Low power: the player's power plants are switched off, so
+        // recompute_power derives a negative net and the deficit announces.
+        for structure in game.structures.iter_mut() {
+            if structure.owner == 0 && structure.power > 0 {
+                structure.powered = false;
+            }
+        }
+        step(&mut game, &mut lines, &mut record);
+
+        // 6. Superweapon launched: firing the nuke special (TACTION 1_SPECIAL)
+        // announces and leaves observable damage.
+        let report = cnc_core::trigger_apply::apply_action_record(
+            &mut game,
+            cnc_core::trigger_records::ActionRecord::parse("34,-1,-1,1").expect("nuke action"),
+        );
+        assert!(report.applied, "nuke special fires");
+        step(&mut game, &mut lines, &mut record);
+
+        // 7. Mission accomplished: the win action announces.
+        assert!(
+            cnc_core::trigger_apply::apply_action_record(
+                &mut game,
+                cnc_core::trigger_records::ActionRecord::parse("1,-1,-1,-1").expect("win action"),
+            )
+            .applied,
+            "win action fires"
+        );
+        step(&mut game, &mut lines, &mut record);
+
+        // 8. Mission failed: the lose action announces.
+        assert!(
+            cnc_core::trigger_apply::apply_action_record(
+                &mut game,
+                cnc_core::trigger_records::ActionRecord::parse("2,-1,-1,-1").expect("lose action"),
+            )
+            .applied,
+            "lose action fires"
+        );
+        step(&mut game, &mut lines, &mut record);
+
+        // 9. Canceled: cancelling a queued production item.
+        game.houses[0].credits = 10_000;
+        game.queue_unit(0, ClassId::VehicleE1, 1);
+        game.cancel_production(0);
+        step(&mut game, &mut lines, &mut record);
+
+        assert!(
+            lines.len() >= 8,
+            "scripted skirmish should emit >=8 distinct EVA lines, got {}: {:?}",
+            lines.len(),
+            lines
+        );
+
+        // One-slot semantics: two lines requested in the same tick leave exactly
+        // one pending.
+        let mut game = Game::new(40, 40);
+        let first = game.eva.speak(cnc_audio::RaEvaLine::ConstructionComplete);
+        let second = game.eva.speak(cnc_audio::RaEvaLine::UnitLost);
+        assert!(first, "first line queues while idle");
+        assert!(!second, "second line in the same tick is dropped");
+        assert_eq!(
+            game.eva.pending(),
+            Some(cnc_audio::RaEvaLine::ConstructionComplete),
+            "the pending slot still holds the first line"
         );
     }
 }
