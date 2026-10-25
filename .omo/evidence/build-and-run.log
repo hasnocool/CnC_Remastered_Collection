@@ -1,0 +1,26 @@
+# Build + headless run verification (2026-10-25)
+
+## Build
+- `CARGO_BUILD_JOBS=2 cargo build -p cnc-launcher -p cnc-map-editor` — Finished
+  dev profile in 53.35s, 0 errors. Binaries at RUST/target/debug/{cnc-launcher,
+  cnc-map-editor}.
+
+## Launcher (headless)
+- `./target/debug/cnc-launcher --frames 3` → exit 0 after ~30s. Log shows the TD
+  demo scene simulating (harvester unloads, credits 575→700).
+- CLI verified via `--help`: mission/scenario/campaign/replay/net-role/menu
+  modes; wgpu default with software fallback.
+
+## Map editor (two entry points)
+- `cargo run -p cnc-map-editor --example tileset_render` → exit 0,
+  saved /tmp/opencode/tileset_qa.png (2616x1312 RGBA PNG, two-panel tileset QA
+  harness: left exact cell size, right +0.5 half-texel, per InRepo pack).
+- `./target/debug/cnc-map-editor --headless --screenshot ... --frames 2` → exit
+  0, "headless self-test OK", saved /tmp/opencode/editor_headless.png
+  (1400x900 RGBA PNG). It also emitted a stray RUST/maps/headless_map.ini
+  (72 KB self-test product) which was removed; working tree clean after.
+
+## Notes
+- Full GUI run requires a display/wayland session; headless modes above exercise
+  the same sim/UI draw paths (the editor example explicitly mirrors
+  `tiles::base_draw` + `ui_tile_rect` used by the editor UI).
