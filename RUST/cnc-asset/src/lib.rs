@@ -37,6 +37,7 @@ pub use convert::{BatchOptions, BatchReport, SpriteSheet};
 pub use font::{FontFile, FontGlyph, NO_DATA_OFFSET};
 pub use megafile::{Megafile, SubFileData};
 pub use palette::PalFile;
+pub use registry::{AssetHandle, AssetRegistry, PreloadResult, PreloadTask, PreloadedAssets};
 pub use shape::{ShpFile, ShpFrame};
 pub use string_table::CsfFile;
 pub use tileset_pack::TilesetPack;

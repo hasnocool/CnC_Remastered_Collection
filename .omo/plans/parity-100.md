@@ -483,7 +483,7 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): each brush paints + undoes in one step; tileset loads from fixture MIX (`tileset_loads_from_mix`); player-remap colors render distinctly.
   QA scenarios: happy — ore brush sizes 1/2/3 paint proportional cells; failure — missing theater tileset → fallback family + warning, Evidence .omo/evidence/task-51-parity-100.log
   Commit: Y | feat(editor): full toolset + mix tilesets + team colors
-- [ ] 52. MEG/PGM export + WWCompression encode + validation + trigger dialog
+- [x] 52. MEG/PGM export + WWCompression encode + validation + trigger dialog
   What to do / Must NOT do: .MEG/.BIN/.PGM export (Megafile/MegafileBuilder analog), WWCompression encode for MapPack/OverlayPack write-back (todo 7 provides LCW; add PKLITE container shape only if required by format); rule-aware map validation (required structures/houses, trigger wiring) using todo-50 registries; full trigger dialog with event/action pickers + cell-binding tool (select cell → assign trigger).
   Parallelization: Wave 4 (C9 serial chain tail) | Blocked by: 51,7 (LCW write-back) | Blocks: 53 | Parallel with: C6 chain, 45
   References: CnCTDRAMapEditor/Utility/{Megafile.cs,MegafileBuilder.cs,WWCompression.cs}; CnCTDRAMapEditor/Dialogs/TriggersDialog.cs (510L); AUDIT §6 (export/validation/trigger rows).
