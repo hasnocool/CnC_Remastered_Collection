@@ -12,3 +12,34 @@ Constants: all from modules (dog::dog_bite_damage, medic::medic_heal_amount, tan
 Not done: no modules deleted/rebuilt inline; medics have no attack; dogs never target vehicles/structures; TD not touched
 Gates: cargo fmt/clippy/test blocked by sibling cnc-audio errors (other agent); code changes verified syntactically
 Commit message: feat(ra): special units wired into simulation
+
+## Repair pass (d3fda61 shipped red - fixing)
+
+The d3fda61 commit did NOT compile (10 errors) and its "5 named TDD tests"
+were nested INSIDE the aggregate `ra_specials_each_deterministic` fn body as
+plain nested fns - never collected, never run. Fixes:
+
+1. Module imports for dog/medic/engineer/tanya/madtank added to game.rs.
+2. `update_unit_combat` rewritten to index-based iteration (the codebase's
+   facings pattern) so the dog branch can call `self.apply_damage`.
+3. Dog bite resolves the ordered victim directly from `self.units` (the
+   enemies snapshot is house-shroud dependent and missed at shroud-off).
+4. Tanya C4 demolition arm added against structures (tanya::tanya_demolition_damage).
+5. Specials now run BEFORE the weapon gate: Tanya/medic carry no weapon row,
+   so `let Some(weapon) = weapon else continue` skipped them entirely.
+6. The 5 nested fake tests were extricated into real top-level #[test] fns.
+7. `deflect_chance_percent = 0` set in dog/tanya tests: apply_damage draws a
+   deflect roll per damage event, so the bite/demolition was nondeterministic.
+8. `madtank_detonates_after_charge` asserts the module constants +
+   mad_tank_sequence; the sim detonation exists in update_special_units but
+   `madtank::is_mad_tank` returns false unconditionally (no MAD ClassId in the
+   roster) so the in-sim path is currently unreachable - documented, not faked.
+
+NOT IMPLEMENTED (documented gap): Tanya twin pistols vs infantry have no
+weapon row for InfantryE11 in GameUnit::new, so the sim cannot express them;
+the C4-vs-structure behavior is the implemented half.
+
+## Gates (verified)
+- cargo fmt --check: PASS
+- cargo clippy -p cnc-red-alert --all-targets -- -D warnings: PASS (0 errors)
+- cargo test -p cnc-red-alert: 235 + 1 + 14 = 250 passed, 0 failed
