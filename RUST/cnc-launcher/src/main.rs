@@ -7574,7 +7574,7 @@ impl RaLauncherApp {
             self.audio_director.route_batch(&self.mixer, &events);
             // Theme escalation: a damaged player structure switches the
             // music layer to combat (THEME.CPP On_Base_Attack analogue).
-            if self.game.eva.pending() == Some(cnc_audio::EvaLine::BaseUnderAttack) {
+            if self.game.eva.pending() == Some(cnc_audio::RaEvaLine::BaseUnderAttack) {
                 self.theme_queue.on_base_attack();
             }
         }
