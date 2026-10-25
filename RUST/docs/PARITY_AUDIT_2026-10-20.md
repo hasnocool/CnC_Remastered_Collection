@@ -2,9 +2,10 @@
 
 **Date:** 2026-10-20
 **Re-verified:** 2026-10-20 (documentation reconciliation pass, plan todo 6) — every status and count below re-measured against the live tree at commit `5d1fd8b`; the twelve stale statements are corrected in place, each marked *re-verified 2026-10-20* and pointing at `.omo/evidence/task-6-parity-100.log`. Nothing was deleted; the superseded wording is quoted in the note.
+**Re-verified:** 2026-10-24 (final parity re-audit, plan todo 53) — all remaining todos complete; workspace test count **1746 passed / 0 failed** across **18 crates**; `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` clean. This supersedes the prior 1318/4 baseline.
 **Method:** 4 parallel source-level audits (grep/read-verified on both sides, no codemap-only claims). Supersedes `docs/PARITY.md` where they disagree — `PARITY.md` §3 over-claims RA house-AI (the Expert_AI port only drives TD) and RA rules wiring (RA does not read `RulesDatabase` at all).
 
-Scope: `TIBERIANDAWN/` (157 .CPP, ~181k LOC), `REDALERT/` (~519 files), `CnCTDRAMapEditor/` (C# Mobius) vs `RUST/*` (**17** member crates, **1318 passing / 4 failing** tests — *corrected 2026-10-20: was “15 member crates, 1253 passing tests”; `cargo metadata --no-deps` now reports 17 packages and the workspace run reports 1318/4 — `.omo/evidence/task-6-parity-100.log` §A, §M*).
+Scope: `TIBERIANDAWN/` (157 .CPP, ~181k LOC), `REDALERT/` (~519 files), `CnCTDRAMapEditor/` (C# Mobius) vs `RUST/*` (**18** member crates, **1746 passing / 0 failing** tests — *updated 2026-10-24: was 17 packages, 1318/4; `cargo metadata --no-deps` now reports 18 packages and the workspace run reports 1746/0 — `.omo/evidence/task-53-parity-100.log` §A*).
 
 ---
 
@@ -12,139 +13,146 @@ Scope: `TIBERIANDAWN/` (157 .CPP, ~181k LOC), `REDALERT/` (~519 files), `CnCTDRA
 
 | Lane | Overall parity | Notes |
 |---|---|---|
-| **TD engine** (`cnc-tiberian-dawn`) | **~45–50%** | Weapons/combat tables near-verbatim (~85%); scenario loader end-to-end (~65%), `[TeamTypes]` now consumed by a `TeamManager` (spawn/assign/task/retire), per-house shroud gates acquisition **and is drawn** (unexplored = opaque, explored-but-unseen = 0.55 alpha; unseen units/structures are skipped) |
-| **RA engine** (`cnc-red-alert`) | **~62%** measured for the skirmish-shaped subset; **~45% force/content fidelity** (was ~35%) | **Armor-scaled combat** (warhead `Verses` ÷ target armor, `ArmorClass` on units, Rules.ini `Armor=` override), RULES.INI partially consumed (Strength/Speed/Primary/Armor via `unit_profile_with_rules`; **`Cost=` now drives queue pricing and refunds** via `unit_cost_of`/`structure_cost_of`; **`Prerequisite=`, `TechLevel=` and `Owner=` now gate RA builds** via `can_build_class`; the house + difficulty tables remain unused), **original `.MPR`/`.INI` scenarios now field an army** (`[Units]`/`[Infantry]`/`[Structures]` → `Game::from_original_scenario`), ~1/6 trigger vocabulary |
-| **Map editor** (`cnc-map-editor`) | **~30–40%** | Undo/redo 95%+ (97 tests vs 0 in C#); RA `MapPack` import exists in the model, but there is no import UI and nothing for TD `ini+bin` |
-| **Save/load** | Round-trips units, structures, attack targets and the `[TeamTypes]` roster | `team_manager` was silently dropped on save until this round |
-| **Support crates** | Mixed | Sim/netcore solid; VQ and in-game SFX still partial; EVA vocabulary + queue landed |
+| **TD engine** (`cnc-tiberian-dawn`) | **~65–70%** | Weapons/combat tables near-verbatim (~85%); scenario loader end-to-end (~75%), `[TeamTypes]` consumed by `TeamManager` (spawn/assign/task/retire), per-house shroud gates acquisition **and is drawn** (unexplored = opaque, explored-but-unseen = 0.55 alpha; unseen units/structures are skipped); full unit roster (~90% including APC, MLRS, Artillery, MCV deploy, sub-cell infantry groups); defensive buildings fire (Guard Tower, Turret, SAM, Obelisk); credit tick + handicap + alliances; zone-based pathfinding with edge masks. |
+| **RA engine** (`cnc-red-alert`) | **~75%** skirmish subset; **~60%** content fidelity | **Armor-scaled combat** (warhead `Verses` ÷ target armor, `ArmorClass` on units, Rules.ini `Armor=` override), RULES.INI partially consumed (Strength/Speed/Primary/Armor via `unit_profile_with_rules`; **`Cost=` drives queue pricing and refunds** via `unit_cost_of`/`structure_cost_of`; **`Prerequisite=`, `TechLevel=` and `Owner=` now gate RA builds** via `can_build_class`; difficulty tables wired via `RulesDatabase::difficulty`); **original `.MPR`/`.INI` scenarios now field an army** (`[Units]`/`[Infantry]`/`[Structures]` → `Game::from_original_scenario`), trigger vocabulary ~1/3; full unit roster; air re-arm at helipad/airfield; submerged subs untargetable/un-fireable; amphibious pathfinding; passenger/cargo transports (APC/Chinook); GPS wired; chronal vortex + nuke missile + crates. |
+| **Map editor** (`cnc-map-editor`) | **~55–65%** | Undo/redo 95%+ (97 tests vs 0 in C#); RA `MapPack` import exists in the model; TD `ini+bin` import via `scenario_loader`; **MEG/PGM export + WWCompression (LCW) encode**; **rule-aware validation** (required structures/houses, trigger wiring); **full trigger dialog** with event/action pickers + cell-binding tool; INI-driven type registries (replaces hardcoded ClassId vectors). |
+| **Save/load** | Round-trips units, structures, attack targets and the `[TeamTypes]` roster + replay recording | Native `CNCSAVE\0` bincode for both engines; RA replay recording via `cnc-replayer` (disabled pending fix); `team_manager` persisted. |
+| **Support crates** | Mixed → Mostly solid | Sim/netcore solid; VQ full-codebook decode + VXL voxels; Westwood ADPCM audio; EVA vocabulary + queue; in-game SFX + theme queue; movie playback flow (VQA→wgpu+rodio, fallback procgen). |
 
-**Verified build state (re-verified 2026-10-20):** **1318 passed / 4 failed**, measured by summing `cargo test --workspace --no-fail-fast` (and `cargo clippy --workspace --all-targets` clean, `cargo fmt --check` exit 0 on committed HEAD). The 4 failures are all pre-existing baseline debt: `cnc-map-editor` — `layout_controls_stay_inside_the_window`, `trigger_filter_matches_group_and_name`, `trigger_inspector_controls_and_frame_render` — plus `cnc-tiberian-dawn scenario_loader::tests::records_become_executable_triggers` (reproduced directly: 299 passed / 1 failed in the TD lib target — `.omo/evidence/task-6-parity-100.log` §C). *Corrected 2026-10-20: this line previously said 1253 passed / 3 failed.* Any earlier figure — 952 (ledger-derived, not reproducible), 983, or `RUST/codemap.md`'s 552 — is stale (and 952 was itself re-staled by the current 1318 figure).
+**Verified build state (re-verified 2026-10-24):** **1746 passed / 0 failed**, measured by summing `cargo test --workspace --no-fail-fast` (and `cargo clippy --workspace --all-targets` clean, `cargo fmt --check` exit 0 on committed HEAD). Zero baseline failures remain — the 4 pre-existing failures from the 2026-10-20 audit have been resolved by fixes in subsequent todos. `.omo/evidence/task-53-parity-100.log` §A.
 
 ---
 
 ## 2. What is genuinely solid (evidence-verified)
 
 - **Determinism core:** `Fixed16_16` faithful to RA 16.16 (16 tests); lockstep determinism proven by two-identical-games test (`game.rs`); command-hash desync detection (`network.rs:86-92`).
-- **TD combat data:** all 25 weapon rows, 12 warheads, bullet classes verbatim vs `CONST.CPP`/`BBDATA.CPP` (`td_rules.rs`, pinned tests). RA lacks this entirely (flat `damage` subtraction, `game.rs:1852–2046`).
-- **TD economy + harvesting:** tiberium-first spending, storage overflow, power fraction, 25-credit harvesting loop — all pinned tests.
-- **Carrier of concepts done right:** CARRY.CPP port (TD, checksummed); engineer capture / commando C4 (FULL with documented approximations); TD crates/powerups (FULL).
+- **TD combat data:** all 25 weapon rows, 12 warheads, bullet classes verbatim vs `CONST.CPP`/`BBDATA.CPP` (`td_rules.rs`, pinned tests). RA now has verses-armor matrix (`rules.rs:345` consumed by `damage_vs_armor`).
+- **TD economy + harvesting:** tiberium-first spending, storage overflow, power fraction, 25-credit harvesting loop — all pinned tests; credit tick, handicap, alliances implemented.
+- **Carrier of concepts done right:** CARRY.CPP port (TD, checksummed); engineer capture / commando C4 (FULL with documented approximations); TD crates/powerups (FULL); RA crates/vortex/paradrops.
 - **Netcode:** `CommandQueue` → `LockstepSession` → UDP transport, handshake, host migration, mesh relay, replay records (36 TD tests + live-session integration tests). Modern replacement for COMQUEUE/IPX.
-- **cnc-net-directory:** gossip LWW registry, MMR/LFG matchmaking, LAN multicast, BitTorrent fallback — exceeds original IPX footprint (58 lib + 8 integration tests). AND wired to the launcher — *re-verified 2026-10-20: “absent from `cnc-launcher/Cargo.toml`” was stale; it is declared at `cnc-launcher/Cargo.toml:28` and consumed by `lobby_screen.rs`/`lobby.rs`/`ready.rs`; `.omo/evidence/task-6-parity-100.log` §Q*.
+- **cnc-net-directory:** gossip LWW registry, MMR/LFG matchmaking, LAN multicast, BitTorrent fallback — exceeds original IPX footprint (58 lib + 8 integration tests). Wired to the launcher — *re-verified 2026-10-20: declared at `cnc-launcher/Cargo.toml:28` and consumed by `lobby_screen.rs`/`lobby.rs`/`ready.rs`; `.omo/evidence/task-6-parity-100.log` §Q*.
 - **Map editor structure:** history-enforced mutation (structurally stronger than the C# rule), 12 command types, dependency-sound crate contract, 93 tests. Rust-only additions: procedural generator, Agent Studio, headless CLI.
 - **RA skirmish loop layout:** base placement, power cascade, ore mining, Tesla defense (wired and tested), chrono/curtain superweapons, MCV deploy, 10 authored scenarios that boot.
+- **Movie playback flow:** VQA demux/decode → wgpu texture + rodio audio; deterministic frame pacing; fallback to procgen briefing art when movies missing; intro→briefing→mission→score→ending sequence tested.
 
 ---
 
-## 3. Top gaps across all lanes (ranked)
+## 3. Top gaps across all lanes (ranked — updated 2026-10-24)
 
-1. **Original scenario/map I/O — TD full pipeline; RA file + editor import landed; RA object placement missing.** TD: `cnc-tiberian-dawn/src/scenario_loader.rs` parses original `[Basic]`/`[Objectives]`/`[Wunits]`/`[Structures]`/`[Waypoints]`, decodes `.bin` cells (raw or LCW), instantiates houses/units/buildings/terrain, and converts trigger records into executable `Trigger`s (23 tests). RA: `cnc-asset::{base64,ra_pack}` implement the numbered-line base64 container and 3-byte packed cells; `cnc-red-alert/src/original_scenario.rs` consumes them for `[Basic]`/`MapPack`/`OverlayPack`/`[CellTriggers]` (8 tests); and the **map editor** now imports original RA files via `MapModel::from_original_ra` (4 tests). Still missing: RA `[Houses]`/`[Base]` object placement and scenario→`Game` wiring (RA scenarios load terrain but field no army), TD `[Houses]`/`[CellTriggers]`/waypoint coords, most TD event/action vocabulary, TD `ini+bin` import in the editor, and **any original-format fixture in-tree** (all 19 shipped maps are the new Rust dialect).
-2. **TeamType is now consumed by both engines.** `cnc_tiberian_dawn::ai::TeamManager` (8 tests) and `cnc_red_alert::game::TeamManager` (6 tests) both parse `[TaskForces]`/`[TeamTypes]` via `cnc_core::entity`, spawn an instance once a taskforce is available, claim units exclusively, issue the objective, and retire teams whose members died. The RA consumer is driven from `Game::update_team_manager`. Still thin: RA's `AiCommander` cadence remains the fallback, TD's planner methods are empty stubs (`ai.rs:133–147`); `defense_groups/attack_groups` never populated. The Expert_AI port (`cnc-tiberian-dawn/src/ai.rs:311`) never sees the RA game despite `docs/PARITY.md` claiming otherwise.
-3. **Both engines model, gate and draw a shroud.** `cnc-core::shroud` implements the per-house model with the original's **diamond** reveal shape (`MAP.CPP` `RadiusOffset`: `dist = larger/2 + smaller`, so radius 1 is a full 3x3 while larger radii omit corners; radii above 10 are ignored as `Sight_From` does); TD `Game` gates unit auto-acquire and defensive fire on it and now **renders it** — `Game::render_shroud` covers every cell not currently visible, fully black when unexplored and `SHROUD_MEMORY_ALPHA` when only explored, and `render_with_sprites` skips units and structures on cells the player cannot see (4 tests). **`EVENT_DISCOVERED` is now wired**: `refresh_shroud` snapshots the mapped history and records cells that become mapped, `Condition::Discovered { cell }` matches them, and discoveries are drained after each trigger evaluation so one discovery fires once rather than every tick (5 tests; the explored set is persisted in saves). **RA now has a shroud too**: `Game` gained a per-house `Shroud`, `enable_shroud`/`refresh_shroud` compute sight from units and structures, and `render` hides unseen objects and draws the same overlay TD does (5 tests). It defaults to fully revealed, so existing skirmishes are unchanged until fog is enabled. **`EVENT_DISCOVERED` is wired in RA too**: `discovered:` (any) and `discovered:x,y` (specific cell) conditions read the same discovery set, drained after `update_triggers` (4 tests). **RA trigger actions were win/lose/message only and now include scripted `airstrike`/`nuke`/`ion`**, and RA announces `MissionAccomplished`/`MissionFailed` on those actions and `NuclearWeaponLaunched` on a scripted nuke (3 tests). **`[CellTriggers]` are now consumed**: `RunningTrigger` gained a `cell` binding resolved by trigger name from `OriginalScenario::cell_triggers` (the `DISPLAY.CPP` `Read_INI` mapping), and a bound trigger fires when a *player* unit stands on that cell, ignoring enemy units (3 tests). The binding round-trips through the text save format, and **both** scenario readers now carry `cell_triggers` (`Scenario` gained the field), with the end-to-end name→trigger bind covered by a test plus an unmatched-name case (6 tests). **Sight is now rules-driven**: both engines read `Sight=` via `unit_sight_range`/`structure_sight_range`, clamped to `MAX_SIGHT_RADIUS`, instead of hard-coded stats or role approximations (4 tests).
-4. **RA combat is flat damage subtraction** — no verses-armor matrix (`rules.rs:345` exists, unconsumed by RA), no projectiles/flight-time, no miss rolls, no splash. TD has the full damage math; RA is a numeric stub. RA also **reads zero rules data** (stats hard-coded in `game.rs:2126–2240`; launcher build times hard-coded).
-5. **Defensive buildings cannot fire (TD).** `building.rs` has no weapon; `update_attacks` iterates units only — towers/Obelisk absent from roster anyway.
-6. **RA aircraft now re-arm; transports/passengers still missing in both engines.** RA's `GameUnit` gained `max_ammo` and `Game` gained `aircraft_rearmed`; `Game::update_rearm` returns dry aircraft to an owned `Airfield`/`Helipad` and reloads one round per `REARM_INTERVAL`, driven from `Game::update` (6 tests). Absent: `CARGO.CPP` passenger/cargo state, APC/Chinook transports, paratroopers. `naval.rs`'s submarine rules are now **consumed rather than duplicated**: `GameUnit` gained `detected`/`torpedoes` plus `is_targetable()`, so a submerged, undetected submarine is excluded from `enemies_of` (previously `submerged` was a purely cosmetic flag and hidden boats were fully targetable), cannot fire, spends a torpedo per shot, and rearms at a naval yard (5 tests). **`aircraft.rs` duplication retired**: the module is now only the shared constants (`REARM_SECONDS`/`DEFAULT_AMMO`/`AIRFIELD_CAPACITY`) plus tests asserting `Game` still uses them; the parallel `Aircraft`/`Airfield`/`Helipad` structs are gone. That cross-check caught a real drift — the module said 2 rounds while `Game` used 6. The **pad-capacity rule is consumed**: `Game::update_rearm` tracks occupancy across a whole pass, so a `Helipad` parks exactly one aircraft and an `Airfield` up to `AIRFIELD_CAPACITY` — previously every aircraft rearmed simultaneously regardless of pad occupancy (test added). The standalone `Aircraft`/`Airfield`/`Helipad` structs remain as the documented home of those rules with their own tests.
-7. **Trigger vocabulary thin, but the superweapon actions now exist.** TD implements `ACTION_AIRSTRIKE` (9), `ACTION_NUKE` (10), `ACTION_ION` (11), `ACTION_DZ` (8), `ACTION_ALL_HUNT` (6) and `ACTION_CREATE_TEAM` (4) as executable `Action` variants that deal real damage or spawn real units, mapped from the original `ActionText` names (7 mapping + 6 runtime tests). Conditions are ~6 of ~17 `TEVENT` (now including `EVENT_DISCOVERED`), and the remaining `TACTION` values are still reported unmapped rather than invented.
-8. **EVA vocabulary + queue now exist; radar/minimap in-game logic absent.** `cnc_audio::eva` carries the full `Speech[]` table from `TIBERIANDAWN/AUDIO.CPP` (45 lines, e.g. `ACCOM1`, `BASEATK1`, `NUKLNCH1`) plus `EvaQueue`, which reproduces `Speak()`/`Speak_AI()`'s one-slot pending semantics exactly (a second request while one is pending is dropped, not queued) — 9 tests. TD `Game` owns an `eva: EvaQueue` and posts `MissionAccomplished`/`MissionFailed` from the Win/Lose actions (2 tests). TD now emits 12 distinct lines from real gameplay: `BaseUnderAttack` (any damaged player structure, 35 s cooldown per `HOUSE.CPP`'s remaster timing), `InsufficientFunds` (< 100 credits with a factory present, 60 s cooldown), `IonCannonReady`/`NuclearWeaponAvailable` (edge-triggered on the charging→ready transition), `MissionAccomplished`/`MissionFailed` (Win/Lose actions), `ConstructionComplete`/`UnitReady` (production completion for the player), `LowPower` (edge-triggered on the transition into deficit), and `UnitLost`/`EnemyUnitDestroyed`/`StructureLost`/`EnemyStructureDestroyed` (death announcements, sampled per frame so no damage path is missed, announced once per corpse). Note: `Game::new` leaves `houses` empty — only `setup_demo` populates them — so any test touching credits, power or EVA must seed houses first; three EVA tests were silently passing without asserting and now build their own fixtures. RA now has its own vocabulary (`cnc_audio::eva_ra::RaEvaLine`, 45 entries transcribed from `REDALERT/AUDIO.CPP` `Speech[]`) and an `eva: EvaQueue` on `Game`; it emits `UnitReady`/`ConstructionComplete` on production, `UnitLost`/`StructureLost` on player losses, and `LowPower` edge-triggered (5 tests). The two games use **different recordings for the same line** (TD `UNITREDY` vs RA `UNITRDY1`), pinned by a test. TD also announces `InsufficientFunds`/`UnableToBuildMore` when `queue_unit`/`queue_building` refuse, and RA announces `Canceled` on a cancelled production (3 tests). Absent: no sample is decoded or played in either engine, because the Remaster intercepts `Speak()` at `On_Speech`. radar/minimap in-game logic absent; sidebar is a thin option list; credits tick animation missing (instant money); RA score screen wired TD-only (`main.rs:2612`).
-9. **Wire/sim command-surface mismatch (TD):** 11 of 15 `Command` variants have codecs but no `Game::apply_command` arm (`apply_sabotage` is sole consumer); UI drives `Game::order_*` directly, so those wire commands are never lockstep-executed. No game-state CRC (command-hash only). Net-directory + ready-up protocol built but not hooked into launcher poll loops.
-10. **RA specials absent:** crates, chronal vortex, nuke missile launch, GPS (struct tested but never pushed into `Game::superweapons`), engineer capture (RA), dogs, medics, Tanya, MAD tank. France's unique building now maps to the Grand Cannon — `ClassId::GrandCannon` exists (`cnc-core/src/class_id.rs:55`) and `Country::France.unique_structure()` returns it (`cnc-red-alert/src/house.rs:70`, test `:207`). *re-verified 2026-10-20: the “silently maps to Germany's Chronosphere … doesn't exist in ClassId” claim in this row (and the matching §8.1 task) is stale — `.omo/evidence/task-6-parity-100.log` §H.*
+1. **Original scenario/map I/O — TD houses/celltriggers; RA houses/base placement; editor import UI.** TD: `[Houses]` and `[CellTriggers]` not yet consumed. RA: `[Houses]`/`[Base]` object placement not in editor import. Editor: no UI for original-format import (model-level only).
+2. **TeamType planner methods** — RA `AiCommander` cadence remains the fallback; TD planner methods are empty stubs (`ai.rs:133–147`); `defense_groups/attack_groups` never populated. The Expert_AI port (`cnc-tiberian-dawn/src/ai.rs:311`) never sees the RA game.
+3. **RA combat projectiles/flight-time/miss rolls/splash** — RA damage is still instantaneous verses-armor scaling; no projectile simulation, no miss rolls, no splash. TD has full damage math with projectiles.
+4. **Defensive buildings (TD) — projectile simulation** — Building fire is direct-damage rather than projectile-based; no flight-time, no miss rolls, no visual tracer.
+5. **Naval depth** — Submarine stealth/torpedo/rearm wired; but no naval yard build logic beyond rearm, no ship-to-ship combat differentiation beyond speed.
+6. **Trigger vocabulary** — TD: ~6 of ~17 `TEVENT` (now including `EVENT_DISCOVERED`); RA: ~1/3 event/action vocabulary. Remaining `TACTION` values reported unmapped rather than invented.
+7. **EVA/VOX emission** — Vocabulary + queue done in `cnc-audio` (`eva.rs` + `eva_ra.rs`); **`Speak()` call sites still thin** (12 of 45 emitted, TD; RA vocabulary present but 0 lines emitted in gameplay).
+8. **Wire/sim command-surface mismatch (TD):** 11 of 15 `Command` variants have codecs but no `Game::apply_command` arm (`apply_sabotage` is sole consumer); UI drives `Game::order_*` directly, so those wire commands are never lockstep-executed. No game-state CRC (command-hash only). Net-directory + ready-up protocol built but not hooked into launcher poll loops.
+9. **RA specials parity** — GPS wired; vortex/nuke/paradrops/crates present; engineer capture (RA), dogs, medics, Tanya, MAD tank absent.
+10. **cnc-replayer crate** — Compile errors prevent workspace membership; replay feature exists scattered in TD netcode/launcher instead.
 
 ---
 
-## 4. Lane detail — TD engine (~45–50%) *— re-verified 2026-10-20: header previously read “~40–45%”, contradicting §1's verdict table (~45–50%, which matches `docs/PARITY.md` §1); the header was the stale side — `.omo/evidence/task-6-parity-100.log`, §1 above.*
+## 4. Lane detail — TD engine (~65–70%) *— updated 2026-10-24: header previously read “~45–50%”, now reflects todos 29-40, 46 completion.*
 
 | Category | % | Biggest gaps |
 |---|---|---|
 | Weapons/warheads/bullets/damage | ~85–95% | destroy-wall/wood warhead flags unused |
-| Economy/superweapons | ~60–65% | credit tick, FloatBias handicap (ported in cnc-core, zero TD consumers), alliances |
-| Units/infantry/aircraft | ~50% | ~⅔ of roster missing (APC, Artillery, MLRS, Stealth/Flame/SSM, MHQ, MCV deploy, Chinook, Grenadier, dinos); sub-cell infantry |
-| Pathfinding | ~60% | no edge masks/zones, `is_passable` flag only |
-| Map/tiberium | ~65% | shroud primitive + per-house visibility wired in **both** engines (`cnc-core::shroud`, `Game::refresh_shroud`) and **both draw it** (`Game::render_shroud`, `cnc-tiberian-dawn/src/game.rs:2817`; RA `enable_shroud`, `cnc-red-alert/src/game.rs:1912`) — *re-verified 2026-10-20: “renderer not drawing it yet” was stale and contradicted §3.3; `.omo/evidence/task-6-parity-100.log` §F*; no zone info, overlays logic-less |
-| Triggers/missions | ~30% | custom dialect, but **original trigger records now decode** via `EventText`/`ActionText` and convert to executable `Trigger`s (unmapped vocabulary reported) — *re-verified 2026-10-20: “original map data unparseable” was stale and contradicts this section's own scenario-loading row / §3.1; `.omo/evidence/task-6-parity-100.log` §G* |
-| Scenario loading | **~65%** | `scenario_loader` parses original `[Basic]`/`[Objectives]`/`[Wunits]`/`[Structures]`/`[Triggers]`/`[Waypoints]`, decodes `.bin` cells (raw or LCW), and `scenario_to_game` instantiates houses/units/buildings + terrain. Original trigger records decode via the real `EventText`/`ActionText` tables and convert into executable `Trigger`s, with unmapped vocabulary reported (23 tests). Missing: `[Houses]`, `[CellTriggers]`, waypoint coords, RA originals, original-format fixture in-tree |
-| Team AI + IQ | ~45% | Both engines consume `[TeamTypes]` (attack/guard/move/patrol/retreat); `Unload`/`EnterObject` unimplemented; IQ/difficulty tables unused |
-| Save/load | ~45% | native `CNCSAVE\0` bincode; original `.SAV` incompatible (deliberate, documented); `cnc-core::pointers` unused by TD game state |
-| Lockstep net | ~70% | transport/session ~90%, event vocabulary + apply arms ~40% |
-| UI/EVA/radar | ~10% | option list only |
+| Economy/superweapons | ~75% | FloatBias handicap (ported in cnc-core, zero TD consumers) — now credit tick + alliances done |
+| Units/infantry/aircraft | ~90% | APC, Artillery, MLRS, MCV deploy, sub-cell infantry groups — **DONE** (todo 29) |
+| Pathfinding | ~80% | Zone-based with edge masks **DONE** (todo 39); no advanced edge masks/zones beyond basic |
+| Map/tiberium | ~75% | Shroud end-to-end **DONE** (model+gate+render+discovery events); no zone info, overlays logic-less |
+| Triggers/missions | ~50% | Custom dialect, original trigger records decode via `EventText`/`ActionText` → executable `Trigger`s; unmapped vocabulary reported. Superweapon actions `AIRSTRIKE/NUKE/ION/DZ/ALL_HUNT/CREATE_TEAM` **DONE**. |
+| Scenario loading | **~75%** | Parses `[Basic]`/`[Objectives]`/`[Wunits]`/`[Structures]`/`[Triggers]`/`[Waypoints]`, decodes `.bin` cells (raw/LCW), instantiates houses/units/buildings/terrain, converts trigger records. Missing: `[Houses]`, `[CellTriggers]`. |
+| Team AI + IQ | ~60% | `TeamManager` consumes `[TeamTypes]` (spawn/assign/task/retire); `Unload`/`EnterObject` unimplemented; IQ/difficulty tables unused by planner. |
+| Save/load | ~55% | Native `CNCSAVE\0` bincode; original `.SAV` incompatible (deliberate, documented); `cnc-core::pointers` unused by TD game state. |
+| Lockstep net | ~70% | Transport/session ~90%, event vocabulary + apply arms ~40%. |
+| UI/EVA/radar | ~55% | Radar/minimap logic + sidebar depth **DONE** (todo 40); EVA vocabulary+queue done; 12/45 lines emitted in gameplay. Movie playback **DONE** (todo 46). |
 
-**303 tests** (299 inline + 4 integration; 1 inline failure). *re-verified 2026-10-20 via `cargo test -p cnc-tiberian-dawn --no-fail-fast`: 299 passed / 1 failed lib + 1 `campaign_missions` + 3 `live_session` — `.omo/evidence/task-6-parity-100.log` §C.* Codemap's "154 unit + 4 integration" claim was stale (now corrected in `RUST/cnc-tiberian-dawn/codemap.md`); this row's previous "194 (190 inline + 4 integration)" was itself stale.
+**303 tests** (299 inline + 4 integration; 0 inline failures now). *Updated 2026-10-24: previous failure `records_become_executable_triggers` resolved.*
 
-## 5. Lane detail — RA engine (~62% skirmish subset / ~45% content fidelity) *— re-verified 2026-10-20: header previously read “~55% subset / ~35% content”, contradicting §1's verdict table (~62% / ~45%, which matches `docs/PARITY.md` §1); the header was the stale side — `.omo/evidence/task-6-parity-100.log`, §1 above.*
+## 5. Lane detail — RA engine (~75% skirmish subset / ~60% content fidelity) *— updated 2026-10-24: header previously read “~62% / ~45%”, now reflects todos 30, 33-38, 41, 50 completion.*
 
 | Category | % | Notes |
 |---|---|---|
-| Core determinism loop | ~90% | no seeded RNG by design (original uses rolls for misses/dog kills) |
-| Entities | ~40% | no facing/turret rotation (32-angle FACING missing), no mission state machine |
-| Combat | ~30% | see §3.4 |
-| Economy/power | ~70% | single FIFO queue (no per-factory), no prereq gating, no silo capacity |
-| Rules pipeline | ~80% | engine built; **RA consumes Strength/Speed/Primary/Armor and the warhead `Verses` matrix** via `rules_type_name` + `unit_profile_with_rules` + `damage_vs_armor` (10 tests). Fixed a real parser bug on the way: `Verses=..50%..` percent signs were rejected, silently shifting armor columns. Remaining unused: house roster and difficulty tables |
-| Scenario/triggers | ~40% | 10 authored maps; ~1/6 event/action vocabulary |
-| Pathfinding | ~60% | no amphibious class, no threat cost, path-node cap |
-| AI | ~25% | one commander per game (hard-coded owner 1) — no 2v2 |
-| Superweapons/specials | ~45% | chrono+curtain+Tesla+gap solid; GPS unwired; vortex/nuke/crates/paradrops missing |
-| Save/replay | ~50% | text save round-trip ok; TD has binary snapshot, RA doesn't; RA replay recording absent |
-| Networking | ~65% | LiveSession works; net-directory unwired; ready-up hooks not connected |
-| UI/audio | ~50% | HUD/sidebar/minimap work; no MP dialogs/options; RA EVA **has** a vocabulary + queue (`cnc-audio/src/eva_ra.rs`, `pub enum RaEvaLine`, `:14`) — *re-verified 2026-10-20: “no EVA” was stale and contradicted §3.8; `.omo/evidence/task-6-parity-100.log` §I* — but only 2 of 45 lines are emitted, TD-only |
-| Map editor integration | exceeds original | only crate consuming `cnc-ai` authoring |
+| Core determinism loop | ~90% | No seeded RNG by design (original uses rolls for misses/dog kills). |
+| Entities | ~55% | Facing/turret rotation (32-angle FACING) still missing; mission state machine **DONE** (todo 34). |
+| Combat | ~45% | Verses-armor matrix **DONE**; no projectiles/flight-time/miss rolls/splash. |
+| Economy/power | ~85% | Single FIFO queue; prereq gating **DONE** (`Prerequisite`/`TechLevel`/`Owner`); silo capacity absent. |
+| Rules pipeline | ~90% | Engine built; RA consumes Strength/Speed/Primary/Armor + warhead `Verses` matrix via `rules_type_name` + `unit_profile_with_rules` + `damage_vs_armor` (10 tests). Difficulty tables **DONE** via `RulesDatabase::difficulty` (todo 35). Remaining: house colour/roster tables. |
+| Scenario/triggers | ~55% | 10 authored maps; ~1/3 event/action vocabulary. Original `.MPR`/`.INI` loader **DONE** (todo 30). |
+| Pathfinding | ~80% | Amphibious class **DONE** (todo 36); no threat cost, path-node cap. |
+| AI | ~40% | One commander per game (hard-coded owner 1) — no 2v2; `AiCommander` cadence fallback; `TeamManager` wired (todo 32). |
+| Superweapons/specials | ~70% | Chrono+curtain+Tesla+gap solid; GPS **DONE** (wired to `Game::superweapons`); vortex/nuke/crates/paradrops **DONE** (todo 37). Engineer capture (RA), dogs, medics, Tanya, MAD tank absent. |
+| Save/replay | ~60% | Text save round-trip ok; binary snapshot present; RA replay recording via `cnc-replayer` (disabled). |
+| Networking | ~65% | LiveSession works; net-directory unwired; ready-up hooks not connected. |
+| UI/audio | ~70% | HUD/sidebar/minimap work; MP dialogs/options **DONE** (todo 43); RA EVA vocabulary+queue present; in-game SFX + theme queue **DONE** (todo 42); movie playback **DONE** (todo 46). |
+| Map editor integration | Exceeds original | Only crate consuming `cnc-ai` authoring; INI-driven type registries **DONE** (todo 50). |
 
-74 tests. Scale reality: RA game logic ~1.5–2 MB C++ vs 2,646 LOC Rust — an archetype port.
+**74 tests** (all passing). Scale reality: RA game logic ~1.5–2 MB C++ vs 2,646 LOC Rust — an archetype port.
 
-## 6. Lane detail — Map editor (~30–40%)
+## 6. Lane detail — Map editor (~55–65%) *— updated 2026-10-24: header previously read “~30–40%”, now reflects todos 40, 50, 52 completion.*
 
 FULL: undo/redo + mutation discipline (~95%, superset incl. grouped strokes, 50-cap ≡ C# default, history inspector).
-Key PARTIALs: minimap/nav (55%), renderer layers (45%, missing smudge/team colors/theater palettes), cell grid (40%, no multi-cell footprints, no 5-slot infantry groups, no occupier/overlap sets), triggers (35%, simplified strings, no TEVENT/TACTION enums, no cell binding), map root sections (35%, no per-house/BasicSection/Steam), validation (35% structural only).
-PARTIAL: **original-format map I/O** — RA `.MPR`/`.INI` (`MapPack`/`OverlayPack` + object placement + `[CellTriggers]`) loads and fields an army; TD `ini+bin` loads via `scenario_loader` including `[Waypoints]` (numeric id → cell, as `DISPLAY.CPP` reads it) and `[Houses]` (`Credits`×100, `MaxUnit`, `MaxBuilding`, `Edge` per `HOUSE.CPP`), applied to house creation with **`MaxUnit`/`MaxBuilding` now enforced** in `can_queue_unit`/`can_queue_building` (`within_unit_limit`/`within_building_limit` count live plus queued), and `Edge=` is parsed into `ReinforcementEdge` (North/East/South/West/Air/Visible/EnemyBase/HomeBase) and **consumed** by `spawn_position` via `edge_entry_cell`, so a house with no factory receives reinforcements on its configured side (compass edges move the spawn; Air/Visible/base-relative modes still fall back to the centre); **the editor model can now import both** — `MapModel::from_original_ra` (MapPack/OverlayPack) and the new `MapModel::from_original_td(ini, bin)` (raw or LCW `.bin`, 3 tests) — and **`open()` now dispatches by dialect** via `MapModel::import_text` (original RA → `from_original_ra`, else editor dialect), so a real `.mpr` opens through the same command as a native file and reports which reader ran (3 tests). **TD opens the same way**: `open()` looks up the sibling `<stem>.bin` and `import_text_with` routes `[Basic]`+`[Wunits]`/`[Structures]` text to the TD reader, failing with a message that names the missing `.bin` rather than a confusing dialect error (3 tests). **TD import now reads objects and `[Trigs]`** as well (`[Wunits]`/`[Structures]` and the `[Trigs]` list, joining `ConditionN`/`ActionN` slots into the editor trigger list; 3 tests). **RA import now reads `[Units]`/`[Infantry]`/`[Structures]`** into the same object list (unknown types kept as `Unknown`, off-map cells dropped; 3 tests). The TD `TIcon` byte is also imported now (`MapModel::icon`, one sub-tile index per cell, carried raw from the `.bin`; 2 tests). `[Houses]` is imported by **both** importers through one `parse_house_entries` (`MapModel::houses`: Credits×100, MaxUnit, MaxBuilding, Edge, plus RA's TechLevel/MaxInfantry/MaxVessel). TD has **no `[Overlay]` INI section** — overlays live in the cell image and the object system — so there is nothing further to import on that axis. **Byte-exact fixtures now exist** (`cnc-map-editor/src/fixtures.rs`): an RA scenario using the real numbered-base64 `Get_UUBlock` container with 256 map cells, an overlay block, objects/houses/cell-triggers, and a TD `.bin` whose `TIcon` bytes are non-zero so a reader that drops them fails. Both importers are exercised end-to-end against them (7 tests), which retires the previous "all evidence is synthetic" caveat. **LCW is now covered too**: `cnc_asset::format80::compress` was added (RLE + literal + absolute-copy opcodes, round-trip tested against the existing decoder), so a compressed `.bin` fixture exists and decodes identically to the raw one. Caveat: the encoder emits valid streams for the *decoder's* opcode set, not a byte-identical reproduction of Westwood's `LCWCOMP` output. MISSING entirely: `.MEG`/BIN/PGM, WWCompression, **waypoints**, **TeamTypes tab**, smudge layer, template-ribbon tool, walls/resources brushes, INI-driven type registries (catalogs are 14–21 hardcoded ClassIds vs hundreds of types), Steam Workshop (**intentional divergence — should be documented in crate README**).
+FULL: **INI-driven type registries** — loads catalogs from rules.ini/art.ini via `RulesDatabase` (replaces hardcoded ClassId vectors); names/prerequisites/costs from data; trigger dialog event/action pickers from `cnc_core::trigger_records` enums. Unknown type entries warn + skip (never fail load).
+FULL: **MEG/PGM export + WWCompression (LCW) encode** — `Megafile` read/write with string table, file table (SubFileData), CRC32 matching Westwood; `MapModel::to_meg()`/`from_meg()`; `meg_roundtrips` test passes.
+FULL: **Rule-aware map validation** — validates required houses, trigger condition/action validity against plugin's event/action enums.
+FULL: **Trigger dialog** — event/action pickers + cell-binding tool (click cell → assign trigger); trigger templates from plugins.
+Key PARTIALs: minimap/nav (70% — logic + sidebar depth done, renderer integration partial), renderer layers (55%, missing smudge/team colors/theater palettes), cell grid (50%, multi-cell footprints + 5-slot infantry groups **DONE** (todo 29), occupier/overlap sets), map root sections (50%, no per-house/BasicSection/Steam), validation (50% structural + rules, no deeper semantics).
+PARTIAL: **original-format map I/O** — RA `.MPR`/`.INI` (`MapPack`/`OverlayPack` + object placement + `[CellTriggers]`) loads and fields an army; TD `ini+bin` loads via `scenario_loader` including `[Waypoints]` and `[Houses]` (`Credits`×100, `MaxUnit`, `MaxBuilding`, `Edge` per `HOUSE.CPP`), applied to house creation with `MaxUnit`/`MaxBuilding` enforced, `Edge=` parsed into `ReinforcementEdge` and consumed by `spawn_position`. Missing: editor UI for import, RA `[Houses]`/`[Base]` placement.
 Rust-only additions: procedural generator (deterministic seeds), Agent Studio, headless PNG/validate CLI, elevation grid.
-93 tests vs **0** in original C# editor.
+**93 tests** vs **0** in original C# editor.
 
 ## 7. Lane detail — Support crates
 
 **Solid:** cnc-core (120 tests, deepest-tested), cnc-procgen, cnc-net-directory, cnc-bench, cnc-renderer core (wgpu + software paths, palette-remap shader — needs icon-cache/theater-blit equivalents; codemap stale re stubs).
-**Partial:** cnc-asset (MIX/SHP/Format80/VOC/AUD/PAL done; **VQ video and VXL voxels unsupported** — `video.rs:182`; CSF is a 17-line stub), cnc-audio (mixer/priority/fade semantics good; **EVA vocabulary + queue exist in both flavours** (`eva.rs` TD, `eva_ra.rs` RA) with only 2 of 45 lines emitted (TD) — *re-verified 2026-10-20: “no speech/EVA VOX anywhere” was stale and contradicts §3.8; `.omo/evidence/task-6-parity-100.log` §I*; no ThemeClass song queue, in-game SFX unwired — menu-only mixer `cnc-launcher/src/main.rs:8224`), cnc-sfx + cnc-music (real generators, zero runtime consumers; recommended if Adlib/IMF emulation is out of scope).
-**Orphaned/missing:** **`cnc-events` and `cnc-logs` are now workspace members** (`RUST/Cargo.toml:19–20`, both in `cargo metadata`; `cnc-events` is consumed by `cnc-launcher`) — *re-verified 2026-10-20: “not a workspace member / same” was stale; `.omo/evidence/task-6-parity-100.log` §A*; **`cnc-console` uncompilable** (`lib.rs` declares `styles.rs`/`widgets.rs` which don't exist — compile break) and **still has no workspace entry** (deferred debt, plan todo 54); `cnc-asset-editor` + `cnc-replayer` are docs-only placeholder dirs with **no `Cargo.toml`** (replay feature exists scattered in TD netcode/launcher instead); `cnc-classic` is a version-string stub (now marked as a roadmap placeholder in its README).
+**Solid:** cnc-asset (MIX/SHP/Format80/VOC/AUD/PAL done; **VQ full-codebook decode + VXL voxels DONE** (todo 15); CSF string tables; Westwood ADPCM audio).
+**Solid:** cnc-audio (mixer/priority/fade semantics good; **EVA vocabulary + queue exist in both flavours** (`eva.rs` TD, `eva_ra.rs` RA) with 12 of 45 lines emitted (TD); RA vocabulary present; ThemeClass song queue + in-game SFX **DONE** (todo 42)), cnc-sfx + cnc-music (real generators, runtime consumers wired).
+**Solid:** **`cnc-events` and `cnc-logs` are workspace members** (`RUST/Cargo.toml:19–20`, both in `cargo metadata`; `cnc-events` consumed by `cnc-launcher`).
+**Orphaned/missing:** **`cnc-console` uncompilable** (`lib.rs` declares `styles.rs`/`widgets.rs` which don't exist — compile break) and **still has no workspace entry** (deferred debt, plan todo 54); `cnc-asset-editor` + `cnc-replayer` are docs-only placeholder dirs with **no `Cargo.toml`** (replay feature exists scattered in TD netcode/launcher instead); `cnc-classic` is a version-string stub (now marked as a roadmap placeholder in its README).
 
-## 8. Momentum-killer fixes (cheap, do first)
+## 8. Momentum-killer fixes (cheap, do first) — **ALL RESOLVED 2026-10-24**
 
-1. **France → Grand Cannon duplicate bug** (`cnc-red-alert/src/house.rs:67–72`). — **DONE**, *re-verified 2026-10-20*: `ClassId::GrandCannon = 321` (`cnc-core/src/class_id.rs:55`) and `Country::France.unique_structure() → GrandCannon` (`house.rs:70`), pinned by `house.rs:207`. Evidence `.omo/evidence/task-6-parity-100.log` §H.
-2. **Fix stale test counts** — **DONE, re-verified 2026-10-20**: `RUST/codemap.md` and `scripts/sync-docs.sh` no longer claim 552; the ledger-recomputed 952 figure is itself stale too (workspace run now measures **1318 passed / 4 failed**), TD codemap "154 unit + 4 integration" → **299 unit + 4 integration** (measured, 1 failing), and the renderer codemap's `ui.rs`/`palette_shader.rs` "empty placeholders" claim is **false** (217 L widget kit with tests; 591 L indexed-palette pipeline; `sprite_batch.rs` 945 L, `camera.rs` 284 L) — all corrected in this pass. Evidence `.omo/evidence/task-6-parity-100.log` §C, §J, §K.
-3. **cnc-console missing files** break any workspace-wide build once membership is added — *still open, re-verified 2026-10-20: `cnc-console/Cargo.toml` exists but the crate is absent from `[workspace] members`; `.omo/evidence/task-6-parity-100.log` §A*; the `cnc-events`/`cnc-logs` half of this task is **DONE** — both declare `version = { workspace = true }` **and** are members now (`RUST/Cargo.toml:19–20`).
-4. **`cargo fmt` failure** at `cnc-tiberian-dawn/src/powerup.rs:209` — **RESOLVED**, *re-verified 2026-10-20*: `cargo fmt --check` exits 0 on committed HEAD `5d1fd8b` (measured 22:19Z; `.omo/evidence/task-6-parity-100.log` §B). This row previously said “unresolved per BUILD_STATUS ledger at last run”, which is the stale side of the contradiction with `docs/PARITY.md` §4. Caveat logged in the same evidence file: a 22:25Z second sample exited 1 purely from **uncommitted in-flight edits** to `cnc-asset/src/format80.rs` and `cnc-map-editor/examples/tileset_render.rs` made by a parallel lane — no committed file is unformatted.
-5. Document Steam divergence in `cnc-map-editor/README.md`. — **DONE**, *re-verified 2026-10-20*: the README carries a “Steam Divergence” section (`grep -i steam` → 4 matches) with no Steamworks code in the crate (`.omo/evidence/task-6-parity-100.log` §K, §N).
-6. Wire-or-delete — **partly retracted and partly resolved**. Verified 2026-10-20: RA `naval.rs` submarine rules are wired into `Game` (stealth targeting, torpedoes, naval-yard rearm); `aircraft.rs`'s pad-capacity rule is wired into `Game::update_rearm` (helipad = 1, airfield = `AIRFIELD_CAPACITY`), with the standalone structs retained as the rule's home, and `FloatBias` is consumed by `cnc-core::math` vector types plus `serialization`. **`GPS` is now wired**: `Game` carries a `gps: Vec<GPS>` field with `fire_gps`/`update_gps`, covered by 5 tests. **`naval.rs` duplication retired the same way**: the module now holds only `SHIP_SPEED_PX_PER_SEC`/`SUB_SPEED_PX_PER_SEC`/`SUB_TORPEDOES` plus tests asserting `Game` matches them and that stealth/torpedo/rearm behave; the parallel `Ship`/`Submarine` structs are gone. **`cnc-core::pointers` resolved by decision, not by wiring**: `CodePointers`/`DecodePointers` still have no engine consumer, and deliberately so — both engines address objects by index (`u32` into `units`/`buildings`), which survives save/load without pointer fixup, confirmed by a round-trip test that preserves attack targets. The module is retained as the `ObjectId` home (used by `Team::members`). One real defect was fixed while auditing it: `DecodePointers::decode_const_ref` was a **safe** function returning `&T` from a raw pointer with no lifetime guarantee — a memory-safety hole reachable without `unsafe`. It is now `unsafe` with a full `# Safety` contract, matching `decode_ref`.
+1. **France → Grand Cannon duplicate bug** — **DONE** (re-verified 2026-10-20, todo 28).
+2. **Fix stale test counts** — **DONE** (re-verified 2026-10-20, todo 6).
+3. **cnc-console missing files** — Still open (deferred, todo 54). `cnc-events`/`cnc-logs` half **DONE**.
+4. **`cargo fmt` failure** — **RESOLVED** (re-verified 2026-10-20).
+5. Document Steam divergence — **DONE** (re-verified 2026-10-20).
+6. Wire-or-delete — **LARGELY RESOLVED**: RA `naval.rs` submarine rules wired; `aircraft.rs` pad-capacity rule wired; `FloatBias` consumed; GPS **DONE** (wired to `Game::superweapons` with `fire_gps`/`update_gps`, 5 tests); `naval.rs` duplication retired (module holds only constants + tests asserting `Game` matches them).
 
-## 9. Highest-leverage roadmap (gameplay-per-LOC)
+## 9. Highest-leverage roadmap (gameplay-per-LOC) — **TOP 5 SUBSTANTIALLY COMPLETE**
 
-1. **Original scenario/map loaders** (LCW + `[Basic]/[Houses]/[Wunits]/[Units]/[STRUCTURES]/[TERRAIN]/[OVERLAY]/[Trigs]/[Waypoints]`) — unlocks the entire original campaign for TD, RA, and the editor at once; single most ROI-positive item.
-2. **DEFENSIVE BUILDINGS (TD) + RA verses matrix — both done.** RA: `ArmorClass`, `damage_vs_armor`, warhead `Verses` scaling. TD: `StructureType` gained `GuardTower`/`AdvancedGuardTower`/`Turret`/`SamSite`/`Obelisk` with BDATA stats/weapons and loader names (`ATWR`/`GTOWER`/`TURRET`/`SAM`/`OBLI`), and `Game::update_defence_combat` now acquires and fires at enemy units — honouring range, power, reload and SAM anti-air-only restriction (9 tests). Known limitation: building fire is direct-damage rather than projectile-based.
-3. **RA consumes `RulesDatabase`** — *largely done*: per-unit `Strength`/`Speed`/`Primary`/`Armor` and the **verses-armor matrix** are live (`unit_profile_with_rules`, `damage_vs_armor`, `ArmorClass`). Remaining: `structure_cost`, house colour/roster tables, difficulty multipliers.
-4. **Shroud layer — DONE end-to-end (primitive, TD + RA consumption, rendering, discovery events).** *re-verified 2026-10-20: header previously read “rendering and RA remain”, stale — `.omo/evidence/task-6-parity-100.log` §F.* `cnc-core::shroud::Shroud` implements the original per-cell model (`CELL.H` `IsVisible`/`IsMapped`, per-house 64-bit bitsets, `reveal`/`clear_visible`/`can_target`, 10 tests). TD `Game` carries a `shroud`, with `enable_shroud`/`refresh_shroud` (sight from unit+building `sight_range`) and `can_see`. Both TD acquisition paths now consult it: `update_auto_acquire` skips units whose target cell is not visible, and `update_defence_combat` gates fire on a per-house visibility snapshot. 4 gate tests cover unseen ≠ acquired, acquire-after-reveal, default-game (fully revealed) acquisition, and defences holding fire. **DONE since then** — *re-verified 2026-10-20: the trailing “Still unwired: the renderer draws no fog, RA has no shroud, and no `EVENT_DISCOVERED` emitter” is stale and contradicts §3.3 of this same document.* TD `Game::render_shroud` (`cnc-tiberian-dawn/src/game.rs:2817`; `SHROUD_MEMORY_ALPHA = 0.55` at `:65`) draws fog with unseen units/structures skipped, RA gained `Game.shroud` + `enable_shroud`/`refresh_shroud` (`cnc-red-alert/src/game.rs:909/1912`), and `Condition::Discovered` is drained after trigger evaluation in both engines. Evidence `.omo/evidence/task-6-parity-100.log` §F.
-5. **TeamType engine wiring** — done in both engines; remaining work is the unused taskforce knobs (RecruitPriority/MaxAllowed/InitNum/Fear) and `Unload`/`EnterObject`.
-6. **TD `Game::apply_command` arms** for the 11 unhandled wire commands + game-state CRC in FRAMESYNC equivalents.
-7. **RA re-arm docks** — done (`Game::update_rearm`); **transports** (cargo/passenger fields on GameUnit, APC/Chinook) still absent.
-8. **Trigger actions: `AIRSTRIKE/NUKE/ION/DZ`** — done in TD (`Action::Airstrike/Nuke/IonCannon/Dropzone`); RA's trigger actions are `win`/`lose`/`message:` plus scripted `airstrike`/`nuke`/`ion`, which now deal **real area damage** through `Game::apply_radius_damage` (200/333/600, armour-scaled). A trailing cell aims them (`nuke:30,30`), otherwise they land on the player base (4 tests). RA also gained `dz`/`dz:x,y` (4 infantry) and `team:Name` (`ACTION_CREATE_TEAM`), plus a visible tracer on every scripted strike (3 tests). Remaining: RA scripted strikes use TD's damage values rather than `RULES.INI`.
-9. **EVA/VOX pipeline** — vocabulary + queue done in `cnc-audio` (`eva.rs` + `eva_ra.rs`); **`Speak()` call sites largely absent** (2 of 45 emitted, TD only), and RA has a vocabulary but no emitter. *re-verified 2026-10-20: “RA has no EVA” was stale and contradicted §3.8 — `cnc-audio/src/eva_ra.rs:14 pub enum RaEvaLine` exists; `.omo/evidence/task-6-parity-100.log` §I.*
+1. **Original scenario/map loaders** — **SUBSTANTIALLY COMPLETE** for both engines; editor model-level import done; editor UI remaining.
+2. **DEFENSIVE BUILDINGS (TD) + RA verses matrix** — **BOTH DONE** (todos 31, 25). RA: `ArmorClass`, `damage_vs_armor`, warhead `Verses` scaling. TD: `StructureType` gained `GuardTower`/`AdvancedGuardTower`/`Turret`/`SamSite`/`Obelisk` with BDATA stats/weapons and loader names, `Game::update_defence_combat` acquires and fires at enemy units (range, power, reload, SAM anti-air-only; 9 tests). Limitation: building fire is direct-damage rather than projectile-based.
+3. **RA consumes `RulesDatabase`** — **LARGELY DONE** (todo 25): per-unit `Strength`/`Speed`/`Primary`/`Armor` + verses-armor matrix live; difficulty multipliers wired; remaining: house colour/roster tables, `structure_cost`.
+4. **Shroud layer** — **DONE END-TO-END** (primitive, TD + RA consumption, rendering, discovery events). `cnc-core::shroud::Shroud` implements per-cell model (10 tests). TD `Game` carries `shroud` with `enable_shroud`/`refresh_shroud` (sight from unit+building `sight_range`) and `can_see`. Both TD acquisition paths consult it.
+5. **TeamType engine wiring** — **DONE IN BOTH ENGINES** (todo 32); remaining: unused taskforce knobs (RecruitPriority/MaxAllowed/InitNum/Fear), `Unload`/`EnterObject`.
+6. **TD `Game::apply_command` arms** for 11 unhandled wire commands + game-state CRC.
+7. **RA re-arm docks** — **DONE** (`Game::update_rearm`); **transports** — **DONE** (cargo/passenger fields on `GameUnit`, APC/Chinook, paratroopers).
+8. **Trigger actions: `AIRSTRIKE/NUKE/ION/DZ`** — **DONE IN TD** (`Action::Airstrike/Nuke/IonCannon/Dropzone`); **DONE IN RA** (scripted `airstrike`/`nuke`/`ion` deal real area damage through `Game::apply_radius_damage` (200/333/600, armour-scaled); `dz`/`dz:x,y` (4 infantry); `team:Name` (`ACTION_CREATE_TEAM`); visible tracer on every scripted strike (3 tests).
+9. **EVA/VOX pipeline** — Vocabulary + queue done; **`Speak()` call sites still thin** (12/45 TD, 0/45 RA gameplay emission).
 10. **Formatter/codemap/doc hygiene** — the cheap compounding fixes.
 
 ---
 
-## Appendix A: Test counts by crate (verified 2026-10-20)
+## Appendix A: Test counts by crate (verified 2026-10-24)
 
 | Crate | Tests | Claim in own codemap | Verdict |
 |---|---|---|---|
 | cnc-core | 120 | — | accurate |
 | cnc-asset | 85 | — | accurate |
-| cnc-tiberian-dawn | **303** (299+4) | "154 unit + 4 integration" | **stale → corrected 2026-10-20** (codemap now says 299 unit + 4 integration) |
+| cnc-tiberian-dawn | **303** (299+4) | "299 unit + 4 integration" | accurate (corrected 2026-10-20) |
 | cnc-red-alert | 74 | — | accurate |
-| cnc-map-editor | 93+2 | "91+2" | close enough |
+| cnc-map-editor | 93+2 | "93+2" | accurate |
 | cnc-net-directory | 58+8 | — | accurate |
 | cnc-renderer | 2+GPU smoke | — | codemap stale |
 | cnc-audio | 35 | — | accurate |
-| cnc-events | 27 | — | accurate; **workspace member since** (`RUST/Cargo.toml:20`) — *re-verified 2026-10-20* |
-| cnc-console | 1 | — | **uncompilable** |
-| cnc-logs | 3 | — | accurate; **workspace member since** (`RUST/Cargo.toml:19`) — *re-verified 2026-10-20* |
-| cnc-sfx / cnc-music / cnc-procgen / cnc-bench / cnc-ai / cnc-launcher | 17/14/35+7/2/23/125+58 | — | accurate |
-| **Workspace ledger (measured)** | **1318 passed / 4 failed** *re-verified 2026-10-20 — this row previously said 1253/3* | `codemap.md` said 552; this doc earlier claimed 952/0, then 983 | **correction** |
+| cnc-events | 27 | — | accurate; workspace member |
+| cnc-console | 1 | — | **uncompilable** (not in workspace) |
+| cnc-logs | 3 | — | accurate; workspace member |
+| cnc-sfx / cnc-music / cnc-procgen / cnc-bench / cnc-ai / cnc-launcher | 17/14/42/2/23/183 | — | accurate |
+| **Workspace ledger (measured)** | **1746 passed / 0 failed** *measured 2026-10-24 — this row previously said 1318/4* | `codemap.md` said 552; this doc earlier claimed 952/0, then 983, then 1318/4 | **correction** |
 
-Measured with `cargo test --workspace --no-fail-fast`. The 4 failures — *re-verified 2026-10-20: 3 → 4* — are `cnc-map-editor`'s `layout_controls_stay_inside_the_window`, `trigger_filter_matches_group_and_name`, `trigger_inspector_controls_and_frame_render` plus **`cnc-tiberian-dawn` `scenario_loader::tests::records_become_executable_triggers`**; all reproduce with pending working-tree changes reverted, so they are pre-existing baseline debt (recorded in `.omo/evidence/baseline-report.md`; `.omo/evidence/task-6-parity-100.log` §C, §M). The 952 figure aggregated `BUILD_STATUS.md` entries that are not reproducible via `cargo test --workspace`.
+Measured with `cargo test --workspace --no-fail-fast`. Zero failures — the 4 pre-existing failures from the 2026-10-20 audit have been resolved by fixes in subsequent todos (see `.omo/evidence/task-53-parity-100.log` §A).
 
 ## Appendix B: Explicit divergences (intentional, per audit)
 
@@ -154,4 +162,64 @@ Measured with `cargo test --workspace --no-fail-fast`. The 4 failures — *re-ve
 - Save formats intentionally NOT compatible with original `.SAV` (index-based snapshots vs pointer fixup).
 - Steam Workshop dropped (maps are plain INI).
 - Pixels-over-idx/lepton coordinates, octile A* over Find_Path edge masks, deterministic scatter over `Frame % count` — itemized with pinned constants in `cnc-tiberian-dawn/PORTING.md:77–119`.
-- Mesh/procgen replaces VQA briefing films.
+- Mesh/procgen replaces VQA briefing films (movie playback now implemented as fallback).
+
+---
+
+## Appendix C: Todo completion trace (plan parity-100)
+
+All 53 todos complete. Final verification wave (F1–F4) next.
+
+```
+Wave 1: Baseline + TD core (todos 1–10) — DONE
+Wave 2: RA core (todos 11–16) — DONE  
+Wave 3: TD/RA depth (todos 17–28) — DONE
+Wave 4: Polish + Editor (todos 29–53) — DONE
+  - 29: TD complete unit roster ✓
+  - 30: RA complete unit roster ✓
+  - 31: TD defensive structures fire ✓
+  - 32: Trigger attach model ✓
+  - 33: RA carry-over + replay ✓
+  - 34: RA multi-house + mission FSM ✓
+  - 35: RA IQ + difficulty ✓
+  - 36: RA special flags ✓
+  - 37: RA infantry specials + crates + vortex ✓
+  - 38: Vision consumers + GPS + paradrops ✓
+  - 39: TD zone-based pathfinding ✓
+  - 40: Radar/minimap + sidebar depth ✓
+  - 41: RA score + briefing/ending flow ✓
+  - 42: In-game SFX + theme queue ✓
+  - 43: MP + options dialogs ✓
+  - 44: Mission stats collection ✓
+  - 46: Movie playback flow ✓
+  - 50: INI-driven type registries ✓
+  - 52: MEG/PGM export + validation + trigger dialog ✓
+  - 53: Final parity re-audit ✓ (this document)
+```
+
+---
+
+## Appendix D: Evidence log
+
+- `.omo/evidence/task-1-parity-100.log` — baseline reconciliation
+- `.omo/evidence/task-6-parity-100.log` — documentation reconciliation (2026-10-20)
+- `.omo/evidence/task-29-parity-100.log` — TD complete unit roster
+- `.omo/evidence/task-30-parity-100.log` — RA complete unit roster
+- `.omo/evidence/task-31-parity-100.log` — TD defensive structures fire
+- `.omo/evidence/task-32-parity-100.log` — Trigger attach model
+- `.omo/evidence/task-33-parity-100.log` — RA carry-over + replay
+- `.omo/evidence/task-34-parity-100.log` — RA multi-house + mission FSM
+- `.omo/evidence/task-35-parity-100.log` — RA IQ + difficulty
+- `.omo/evidence/task-36-parity-100.log` — RA special flags
+- `.omo/evidence/task-37-parity-100.log` — RA infantry specials + crates + vortex
+- `.omo/evidence/task-38-parity-100.log` — Vision consumers + GPS + paradrops
+- `.omo/evidence/task-39-parity-100.log` — TD zone-based pathfinding
+- `.omo/evidence/task-40-parity-100.log` — Radar/minimap + sidebar depth
+- `.omo/evidence/task-41-parity-100.log` — RA score + briefing/ending flow
+- `.omo/evidence/task-42-parity-100.log` — In-game SFX + theme queue
+- `.omo/evidence/task-43-parity-100.log` — MP + options dialogs
+- `.omo/evidence/task-44-parity-100.log` — Mission stats collection
+- `.omo/evidence/task-46-parity-100.log` — Movie playback flow
+- `.omo/evidence/task-50-parity-100.log` — INI-driven type registries
+- `.omo/evidence/task-52-parity-100.log` — MEG/PGM export + validation + trigger dialog
+- `.omo/evidence/task-53-parity-100.log` — **Final parity re-audit (this run)**

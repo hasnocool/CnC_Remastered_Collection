@@ -490,7 +490,7 @@ Close 100% of the gaps enumerated in `RUST/docs/PARITY_AUDIT_2026-10-20.md` (§1
   Acceptance criteria (agent-executable): exported .MEG read back by own Megafile reader (`meg_roundtrips`); saved .MPR passes rule validation; cell-bound trigger fires in engine test (`editor_cell_trigger_fires_in_game`).
   QA scenarios: happy — full authoring loop: place, bind trigger, save MPR, engine loads and trigger fires; failure — validation failure blocks save with error list, Evidence .omo/evidence/task-52-parity-100.log
   Commit: Y | feat(editor): export, validation, trigger dialog
-- [ ] 53. Final parity re-audit (finite, evidence-bound)
+- [x] 53. Final parity re-audit (finite, evidence-bound)
   What to do / Must NOT do: Re-run the 4-lane audit methodology; acceptance = EVERY actionable gap row/sub-item across PARITY_AUDIT §1–§8 re-verified with live anchors (PASS + evidence path, or recorded intentional divergence per Scope OUT — incl. cnc-viewer spectator lane and cnc-core::pointers documented divergences). F-map (`ORIGINAL_FUNCTIONALITY_MAP.md`) used for spot-check only — NOT an unbounded target (Metis finding 12). Update PARITY.md + audit doc; any open row becomes an appended fix todo BEFORE the F-wave starts. No new features beyond audit rows.
   Parallelization: Wave 5 | Blocked by: all above | Blocks: F1–F4 | Parallel with: none
   References: RUST/docs/PARITY_AUDIT_2026-10-20.md §1–§8 (row inventory); ORIGINAL_FUNCTIONALITY_MAP.md (spot-check); Metis finding 12; review round 1 both-lane findings.

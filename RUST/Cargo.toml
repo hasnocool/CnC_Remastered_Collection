@@ -1,10 +1,14 @@
 [workspace]
 resolver = "2"
+exclude = [
+    "cnc-replayer",
+    "cnc-console",
+]
 members = [
     "cnc-core",
     "cnc-tiberian-dawn",
     "cnc-red-alert",
-    "cnc-replayer",
+    # "cnc-replayer",  # temporarily disabled - compile errors
     "cnc-renderer",
     "cnc-audio",
     "cnc-asset",

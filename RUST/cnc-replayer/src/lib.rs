@@ -531,10 +531,15 @@ mod tests {
                 out.extend_from_slice(&target.x.to_bits().to_le_bytes());
                 out.extend_from_slice(&target.y.to_bits().to_le_bytes());
             }
-            RaGameCommand::Produce { owner, class_id } => {
+            RaGameCommand::Produce {
+                owner,
+                class_id,
+                seconds,
+            } => {
                 out.push(2);
                 out.extend_from_slice(&(*owner as u32).to_le_bytes());
                 out.extend_from_slice(&(*class_id as u32).to_le_bytes());
+                out.extend_from_slice(&seconds.to_le_bytes());
             }
             _ => {}
         }
@@ -578,7 +583,7 @@ mod tests {
             }
             2 => {
                 // Produce
-                if payload.len() < 1 + 4 + 4 {
+                if payload.len() < 1 + 4 + 4 + 4 {
                     return Err(());
                 }
                 let mut pos = 1;
@@ -587,7 +592,13 @@ mod tests {
                 let class_id = cnc_core::ClassId::from(u32::from_le_bytes(
                     payload[pos..pos + 4].try_into().unwrap(),
                 ));
-                Ok(RaGameCommand::Produce { owner, class_id })
+                pos += 4;
+                let seconds = i32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap());
+                Ok(RaGameCommand::Produce {
+                    owner,
+                    class_id,
+                    seconds,
+                })
             }
             _ => Err(()),
         }
@@ -646,7 +657,7 @@ mod tests {
                     player,
                     command: cnc_tiberian_dawn::network::Command::Move {
                         units,
-                        target: Vec2i::new(x, y),
+                        target: cnc_core::Vec2::new(x as f32, y as f32),
                     },
                 })
             }
