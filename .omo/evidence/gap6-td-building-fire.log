@@ -1,0 +1,321 @@
+diff --git a/RUST/cnc-tiberian-dawn/src/game.rs b/RUST/cnc-tiberian-dawn/src/game.rs
+index 627019c..00cb8c8 100644
+--- a/RUST/cnc-tiberian-dawn/src/game.rs
++++ b/RUST/cnc-tiberian-dawn/src/game.rs
+@@ -25,7 +25,7 @@ use crate::network::Command;
+ use crate::pathfind::find_path;
+ use crate::powerup::{self, PowerupKind, PowerupState};
+ use crate::td_rules::{
+-    default_structure_owner, default_unit_owner, leptons_to_px, modify_damage, owner_token_allows,
++    default_structure_owner, default_unit_owner, leptons_to_px, owner_token_allows,
+     prerequisite_token_met, production_seconds, px_to_leptons, tiberium_stage, unit_class_id,
+     unit_type_for_class, ProductionKind, StructureType, UnitType, WarheadType, WeaponType,
+     EXPLOSION_RANGE_LEPTONS, HARVESTER_STEP_COUNT, HARVESTER_STEP_CREDITS,
+@@ -3421,8 +3421,9 @@ impl Game {
+     /// TD defences (guard towers, turrets, SAM sites, obelisks) acquire and
+     /// shoot at enemy units in range.
+     ///
+-    /// Damage is applied directly (no projectile bookkeeping): a defence needs
+-    /// a target, power and an expired reload to fire.
++    /// Fires through the shared `Projectile` system: spawns a projectile at the
++    /// defender which travels to the target and applies warhead-modified damage
++    /// on impact. A defence needs a target, power and an expired reload to fire.
+     fn update_defence_combat(&mut self, delta_time: Fixed16_16) {
+         // Snapshot each potential target plus, per house, whether that house
+         // can see the cell (a defence cannot shoot what its owner cannot see).
+@@ -3444,9 +3445,7 @@ impl Game {
+             })
+             .collect();
+ 
+-        let mut hits: Vec<(usize, i32, WarheadType)> = Vec::new();
+-
+-        for building in &mut self.buildings {
++        for building in self.buildings.iter_mut() {
+             if !building.is_alive() {
+                 continue;
+             }
+@@ -3513,23 +3512,19 @@ impl Game {
+             building.turret_facing =
+                 (building.turret_facing + step).rem_euclid(std::f32::consts::TAU);
+ 
+-            hits.push((
+-                target_index,
+-                weapon.damage.int(),
+-                weapon.warhead.warhead_type,
++            // Spawn a projectile through the shared weapon system instead of
++            // applying damage directly. `u32::MAX` as source means no unit is
++            // excluded from blast damage — buildings are not units.
++            self.projectiles.push(Projectile::new(
++                weapon.clone(),
++                building.position,
++                target_position,
++                u32::MAX,
++                Some(target_index as u32),
+             ));
++            self.projectiles_fired += 1;
+             building.reload = weapon.rate_of_fire;
+         }
+-
+-        for (index, damage, warhead) in hits {
+-            if let Some(unit) = self.units.get_mut(index) {
+-                let modified = modify_damage(
+-                    damage, warhead, unit.armor,
+-                    0, // direct fire: no distance falloff at the impact point
+-                );
+-                unit.health = (unit.health - Fixed16_16::from_int(modified)).max(Fixed16_16::ZERO);
+-            }
+-        }
+     }
+     fn update_projectiles(&mut self, delta_time: Fixed16_16) {
+         // BULLET.CPP homing missiles re-aim at the target every other frame.
+@@ -7828,15 +7823,31 @@ mod prerequisite_tests {
+ 
+         game.update_defence_combat(Fixed16_16::from_int(1));
+ 
+-        let after = game.units[enemy_index].health;
++        // A defence now spawns a projectile instead of applying damage directly.
+         assert!(
+-            after < before,
+-            "the guard tower must damage an in-range enemy"
++            !game.projectiles.is_empty(),
++            "defence must spawn a projectile"
++        );
++        assert_eq!(
++            game.units[enemy_index].health, before,
++            "damage must apply on projectile arrival"
+         );
+         assert!(
+             game.buildings[tower].reload > Fixed16_16::ZERO,
+             "firing must start the reload timer"
+         );
++
++        // Advance projectile until it hits.
++        for _ in 0..200 {
++            game.update_projectiles(Fixed16_16::from_f32(0.05));
++            if game.units[enemy_index].health < before {
++                break;
++            }
++        }
++        assert!(
++            game.units[enemy_index].health < before,
++            "the guard tower must damage an in-range enemy after projectile arrival"
++        );
+     }
+ 
+     #[test]
+@@ -7851,6 +7862,10 @@ mod prerequisite_tests {
+         game.units.push(enemy);
+ 
+         game.update_defence_combat(Fixed16_16::from_int(1));
++        assert!(
++            game.projectiles.is_empty(),
++            "defence must not spawn a projectile when out of range"
++        );
+         assert_eq!(
+             game.units[index].health, before,
+             "out of range must not hit"
+@@ -7883,9 +7898,26 @@ mod prerequisite_tests {
+         game.units.push(aircraft);
+ 
+         game.update_defence_combat(Fixed16_16::from_int(1));
++
++        // A projectile must spawn; damage applies on arrival.
++        assert!(
++            !game.projectiles.is_empty(),
++            "SAM must spawn a projectile at aircraft"
++        );
++        assert_eq!(
++            game.units[air_index].health, air_before,
++            "aircraft damage must wait for projectile arrival"
++        );
++
++        for _ in 0..200 {
++            game.update_projectiles(Fixed16_16::from_f32(0.05));
++            if game.units[air_index].health < air_before {
++                break;
++            }
++        }
+         assert!(
+             game.units[air_index].health < air_before,
+-            "a SAM site must engage aircraft"
++            "a SAM site must engage aircraft after projectile arrival"
+         );
+     }
+ 
+@@ -7902,6 +7934,10 @@ mod prerequisite_tests {
+         game.units.push(enemy);
+ 
+         game.update_defence_combat(Fixed16_16::from_int(1));
++        assert!(
++            game.projectiles.is_empty(),
++            "unpowered defence must not spawn projectiles"
++        );
+         assert_eq!(
+             game.units[index].health, before,
+             "an unpowered defence must stay silent"
+@@ -7920,6 +7956,10 @@ mod prerequisite_tests {
+         game.units.push(enemy);
+ 
+         game.update_defence_combat(Fixed16_16::from_int(1));
++        assert!(
++            game.projectiles.is_empty(),
++            "non-defences must not spawn projectiles"
++        );
+         assert_eq!(
+             game.units[index].health, before,
+             "non-defences have no weapon"
+@@ -7946,14 +7986,32 @@ mod prerequisite_tests {
+ 
+         // No player commands are issued — the tower still fires.
+         game.update_defence_combat(Fixed16_16::from_int(1));
++
++        // A defence now spawns a projectile instead of applying damage directly.
+         assert!(
+-            game.units[enemy_index].health < before,
+-            "the tower fires at the enemy without player input"
++            !game.projectiles.is_empty(),
++            "defence must spawn a projectile"
++        );
++        assert_eq!(
++            game.units[enemy_index].health, before,
++            "damage must apply on projectile arrival"
+         );
+         assert!(
+             game.buildings[tower].reload > Fixed16_16::ZERO,
+             "firing must start the reload timer"
+         );
++
++        // Advance projectile until it hits.
++        for _ in 0..200 {
++            game.update_projectiles(Fixed16_16::from_f32(0.05));
++            if game.units[enemy_index].health < before {
++                break;
++            }
++        }
++        assert!(
++            game.units[enemy_index].health < before,
++            "the tower fires at the enemy without player input after projectile arrival"
++        );
+     }
+ 
+     #[test]
+@@ -7965,13 +8023,13 @@ mod prerequisite_tests {
+ 
+         let mut enemy = Unit::new(UnitType::Jeep, Game::cell_center(12, 10), 1);
+         enemy.health = enemy.max_health;
+-        let before = enemy.health;
++        let _before = enemy.health;
+         game.units.push(enemy);
+ 
+         // First shot fires immediately (reload starts at zero in add_defence).
+         game.update_defence_combat(Fixed16_16::from_int(1));
+         assert!(
+-            game.units[0].health < before,
++            !game.projectiles.is_empty(),
+             "obelisk fires on the first tick when in range"
+         );
+         assert!(
+@@ -7979,11 +8037,23 @@ mod prerequisite_tests {
+             "obelisk starts its charge-up reload after firing"
+         );
+ 
+-        // While reloading, the obelisk holds fire.
+-        let after_first = game.units[0].health;
++        // Advance first projectile until it hits.
++        let after_first_hit = game.units[0].health;
++        for _ in 0..200 {
++            game.update_projectiles(Fixed16_16::from_f32(0.05));
++            if game.units[0].health < after_first_hit {
++                break;
++            }
++        }
++        assert!(
++            game.units[0].health < after_first_hit,
++            "obelisk damages target after projectile arrival"
++        );
++
++        // While reloading, the obelisk holds fire (no new projectile).
+         game.update_defence_combat(Fixed16_16::from_int(1));
+-        assert_eq!(
+-            game.units[0].health, after_first,
++        assert!(
++            game.projectiles.is_empty(),
+             "obelisk does not fire while reloading"
+         );
+     }
+@@ -8156,12 +8226,73 @@ mod prerequisite_tests {
+             game.units[0].health, before,
+             "a tower cannot shell a cell its owner cannot see"
+         );
+-
+         game.shroud.reveal(0, Vec2i::new(11, 10), 0);
+         game.update_defence_combat(Fixed16_16::from_int(1));
++
++        // A projectile must spawn; damage comes on arrival, not immediately.
++        assert!(
++            !game.projectiles.is_empty(),
++            "defence must spawn a projectile once target is visible"
++        );
++        assert_eq!(
++            game.units[0].health, before,
++            "damage must wait for projectile arrival"
++        );
++
++        for _ in 0..200 {
++            game.update_projectiles(Fixed16_16::from_f32(0.05));
++            if game.units[0].health < before {
++                break;
++            }
++        }
+         assert!(
+             game.units[0].health < before,
+-            "the tower fires once the target is visible"
++            "the tower fires once the target is visible and projectile arrives"
++        );
++    }
++
++    #[test]
++    fn defence_fires_projectile_not_direct_damage() {
++        let mut game = Game::new("defence", 32, 32);
++        let tower = add_defence(&mut game, 0, StructureType::GuardTower, Vec2i::new(10, 10));
++
++        let mut enemy = Unit::new(UnitType::Jeep, Game::cell_center(12, 10), 1);
++        enemy.health = enemy.max_health;
++        let before = enemy.health;
++        let enemy_index = game.units.len();
++        game.units.push(enemy);
++
++        // Fire: a projectile must spawn, but the target must NOT take damage yet.
++        game.update_defence_combat(Fixed16_16::from_int(1));
++
++        assert!(
++            !game.projectiles.is_empty(),
++            "defence must spawn a projectile, not apply damage directly"
++        );
++        assert_eq!(
++            game.units[enemy_index].health, before,
++            "damage must apply on projectile arrival, not on the fire tick"
++        );
++        assert!(
++            game.buildings[tower].reload > Fixed16_16::ZERO,
++            "firing must start the reload timer"
++        );
++
++        // Advance until the projectile arrives.
++        for _ in 0..200 {
++            game.update_projectiles(Fixed16_16::from_f32(0.05));
++            if game.units[enemy_index].health < before {
++                break;
++            }
++        }
++
++        assert!(
++            game.units[enemy_index].health < before,
++            "the target must take damage after the projectile arrives"
++        );
++        assert!(
++            game.projectiles.is_empty(),
++            "the projectile must be consumed on impact"
+         );
+     }
+ 
