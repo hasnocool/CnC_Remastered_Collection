@@ -7979,6 +7979,25 @@ impl ApplicationHandler for RaLauncherApp {
         // Terrain screens in this shell are RA; bind the RA pack once here so
         // setup/campaign previews and the minimap sample a resident texture.
         self.bind_tileset(TilesetPalette::Ra);
+        // Pack unit atlas into texture slot 0 so RA entities draw real sprites
+        // (the terrain pack lives in slot 1). Failures leave flat quads.
+        if let Some(renderer) = self.renderer.as_mut() {
+            if renderer.uses_sprites() {
+                if let Some(pack) = cnc_asset::unit_atlas::UnitAtlas::from_fallback() {
+                    let (width, height) = pack.animation_dims();
+                    match renderer.set_atlas(width, height, pack.animation_rgba()) {
+                        Ok(()) => tracing::info!(
+                            atlas = %"unit_animation", width, height,
+                            units = pack.units().count(),
+                            "pack unit atlas ready (RA)"
+                        ),
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to upload pack unit atlas (RA)")
+                        }
+                    }
+                }
+            }
+        }
         self.window = Some(window);
         self.last_frame = Instant::now();
         self.next_frame = Instant::now() + FRAME_INTERVAL;

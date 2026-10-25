@@ -52,3 +52,49 @@ any consumer.
   cnc-map-editor, cnc-launcher.
 - tests: cnc-asset + cnc-tiberian-dawn + cnc-map-editor + cnc-launcher suites
   pass (see commit; bg_99 run had 0 FAILED lines).
+
+---
+
+# RA + launcher verification (2026-10-25, user re-report: "sprites dont seem to work anymore")
+
+## Root cause
+The TD fix never reached RA: `cnc-red-alert::render::render_entity` was a flat
+`draw_rect` and the RA app never uploaded the pack atlas into slot 0. The
+launcher's RA frame loop (`main.rs` draw) therefore rendered RA units as owner
+colour squares.
+
+## Fix
+- `cnc-red-alert/src/render.rs`: `render_entity` now prefers the pack atlas
+  (`LazyLock<UnitAtlas>`), mapping class ids to pack kinds with the real roster
+  semantics (InfantryE1..E3/E5/E10/E11 -> infantry, E4/E7 -> rocket_soldier,
+  E6 -> engineer, VehicleE1..E4/E7 -> tank, E6 -> harvester, E5 -> buggy), and
+  falls back to the flat quad for unshipped kinds.
+- Launcher RA app resume: uploads the pack unit atlas into texture slot 0 (log:
+  `pack unit atlas ready (RA)`), mirroring the TD app.
+- New bin `cnc-launcher/src/bin/ra_units_view.rs`: captures the RA engine's own
+  render path headlessly with the atlas uploaded.
+
+## Debug trail (why the first screenshots looked wrong)
+- The capture initially showed only flat quads. Instrumenting
+  `render_entity` showed the kinds DID resolve (400 -> infantry, 500 -> tank,
+  505 -> harvester) and `texture_ready(0)` was true.
+- `SoftwareRenderer::set_camera` is a **no-op** (`renderer.rs:675`), so a
+  software capture renders at RAW WORLD COORDINATES - entities appear at their
+  world pixel position (near the top-left of a 1280x720 frame), NOT at the
+  camera-centred position. My first camera-framing attempt and centre crops
+  were therefore reading empty terrain while the sprites were off in the
+  corner.
+- Cropping the actual world coordinates (unit at world 132,132) shows the pack
+  sprites: a dark-blue vehicle with body/wheel detail and a second sprite
+  below, on correctly textured terrain.
+- The bin documents this so future QA does not re-chase the camera.
+
+## Verified
+- `pack unit atlas ready: 512x4352, 7 unit kinds` on capture start.
+- Unit crop: real pack sprites drawn (20+ distinct colours vs ~6 for bare
+  terrain), zero flat-quad owner-colour pixels in the region.
+- Gates: fmt clean; clippy 0 warnings; cnc-red-alert + cnc-launcher suites pass.
+
+## Remaining
+Condition sprites (damaged/critical/destroyed) are indexed but not consulted;
+units always draw frame 0 of idle/move (no frame stepping by duration).
