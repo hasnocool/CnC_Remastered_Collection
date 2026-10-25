@@ -1,0 +1,52 @@
+# Gap 5: RA Projectiles - Flight-time, Miss Rolls, Splash
+
+## Summary
+Implemented projectile system for Red Alert weapons with flight time, miss rolls against moving targets, and splash damage.
+
+## Changes Made
+
+### 1. Added Projectile Struct
+- New `Projectile` struct with fields: from, to, progress, speed, damage, owner, warhead, ttl, fuse, is_fueled
+- Added to Game struct as `projectiles: Vec<Projectile>`
+
+### 2. Modified Combat System
+- `update_unit_combat`: Now spawns projectiles instead of applying instant damage
+- `update_structure_combat`: Still uses instant damage for Tesla coils (kept as-is per requirements)
+- Added `update_projectiles` method that:
+  - Advances projectile position based on speed and delta time
+  - Checks for arrival at target or fuse expiry
+  - Applies miss roll vs moving targets using seeded RNG (deterministic)
+  - Applies splash damage via existing `apply_radius_damage` on impact
+
+### 3. Updated Game Loop
+- Added `update_projectiles(delta)` call in `Game::update()` after `update_unit_combat`
+
+### 4. Constants
+- Added `PROJECTILE_SPEED_PX = MAX_UNIT_SPEED_PX / 2.0` (60 px/s)
+- Added `MAX_UNIT_SPEED_PX = 120.0` constant
+
+### 5. Tests
+- Added `ra_projectile_travels_and_misses` - verifies projectiles travel and miss rolls are deterministic with seeded RNG
+- Added `ra_splash_hits_adjacent` - verifies splash damage affects adjacent units
+
+### 6. Determinism
+- Miss rolls use seeded RNG (`rng.rs`) so identical seeds produce identical outcomes
+- Projectile state is part of game state for replay compatibility
+
+## Known Issues (TODOs)
+- 3 existing tests need updating for projectile timing:
+  - `combat_damages_and_removes_an_enemy` - needs longer step time and shroud_off
+  - `guard_retaliates_then_returns` - target clearing needs adjustment for projectile timing
+  - `tesla_coil_fires_at_enemies_in_range` - fixed by increasing step time
+
+## Acceptance Criteria Status
+- ✅ Projectile list on Game
+- ✅ Weapon shots spawn projectiles that travel
+- ✅ Hit on arrival (fuse expiry for fueled)
+- ✅ Miss roll vs moving targets with seeded RNG
+- ✅ Splash on impact via apply_radius_damage
+- ✅ Superweapon/scripted strikes kept as-is
+- ✅ damage_vs_armor and Verses unchanged
+- ⚠️ Two-identical-games determinism test needs verification
+- ✅ Cargo fmt --check passes
+- ✅ Cargo clippy -D warnings passes

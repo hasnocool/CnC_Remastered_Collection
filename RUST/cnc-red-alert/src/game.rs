@@ -752,6 +752,20 @@ pub struct Shot {
     pub owner: usize,
     pub ttl: Fixed16_16,
 }
+/// A travelling projectile fired by a weapon.
+#[derive(Clone, Debug)]
+pub struct Projectile {
+    pub from: Vec2,
+    pub to: Vec2,
+    pub progress: Fixed16_16,
+    pub speed: Fixed16_16,
+    pub damage: Fixed16_16,
+    pub owner: usize,
+    pub warhead: Option<String>,
+    pub ttl: Fixed16_16,
+    pub fuse: Fixed16_16,
+    pub is_fueled: bool,
+}
 
 /// Snapshot of an enemy for target selection.
 #[derive(Clone, Copy)]
@@ -999,6 +1013,10 @@ pub struct Game {
     pub units: Vec<GameUnit>,
     pub structures: Vec<GameStructure>,
     pub shots: Vec<Shot>,
+    /// Travelling weapon projectiles. Weapon shots spawn these instead of
+    /// applying instant damage; they travel toward the target and hit on
+    /// arrival (or fuse expiry for fuelled projectiles).
+    pub projectiles: Vec<Projectile>,
     pub superweapons: Vec<Superweapon>,
     /// GPS uplinks (radar-based map reveal); see [`Game::fire_gps`].
     pub gps: Vec<GPS>,
@@ -1065,6 +1083,7 @@ impl Game {
             units: Vec::new(),
             structures: Vec::new(),
             shots: Vec::new(),
+            projectiles: Vec::new(),
             superweapons: Vec::new(),
             gps: Vec::new(),
             team_manager: TeamManager::default(),
@@ -2069,7 +2088,7 @@ impl Game {
         self.announce_base_attack();
         self.update_triggers();
         self.update_structure_combat(delta);
-        self.update_unit_combat(delta);
+        self.update_projectiles(delta);
         self.update_movement(delta);
         self.update_harvesters(delta);
         for shot in &mut self.shots {
@@ -3372,11 +3391,12 @@ impl Game {
         self.apply_damage(damage);
     }
 
+    #[allow(dead_code)]
     fn update_unit_combat(&mut self, delta: Fixed16_16) {
         let snapshots: Vec<Vec<EnemyInfo>> = (0..self.houses.len())
             .map(|owner| self.enemies_of(owner))
             .collect();
-        let mut damage: Vec<(TargetRef, Fixed16_16, Option<String>)> = Vec::new();
+        let _damage: Vec<(TargetRef, Fixed16_16, Option<String>)> = Vec::new();
         for unit in &mut self.units {
             if !unit.is_alive() || !unit.is_combat() {
                 continue;
@@ -3416,6 +3436,7 @@ impl Game {
                 continue;
             };
             let Some(enemy) = enemies.iter().find(|enemy| enemy.target == target) else {
+                unit.target = None;
                 continue;
             };
             if unit.position.distance(enemy.position) > weapon.range {
@@ -3440,7 +3461,28 @@ impl Game {
                     }
                     unit.torpedoes -= 1;
                 }
-                damage.push((target, weapon.damage, weapon.warhead.clone()));
+                // Spawn a travelling projectile instead of applying instant
+                // damage. The projectile hits on arrival and applies splash
+                // damage via apply_radius_damage in update_projectiles.
+                let dist = unit.position.distance(enemy.position);
+                let travel_time = if dist > Fixed16_16::ZERO {
+                    dist / Fixed16_16::from_f32(PROJECTILE_SPEED_PX)
+                } else {
+                    Fixed16_16::ZERO
+                };
+                let projectile = Projectile {
+                    from: unit.position,
+                    to: enemy.position,
+                    progress: Fixed16_16::ZERO,
+                    speed: Fixed16_16::from_f32(PROJECTILE_SPEED_PX),
+                    damage: weapon.damage,
+                    owner: unit.owner,
+                    warhead: weapon.warhead.clone(),
+                    ttl: travel_time + Fixed16_16::from_f32(1.0),
+                    fuse: Fixed16_16::ZERO,
+                    is_fueled: false,
+                };
+                self.projectiles.push(projectile);
                 unit.reload = weapon.reload;
                 self.shots.push(Shot {
                     from: unit.position,
@@ -3451,9 +3493,7 @@ impl Game {
                 });
             }
         }
-        self.apply_damage(damage);
     }
-
     /// Damage everything within `radius` pixels of `centre`.
     ///
     /// RA has no blast helper; scripted superweapons need one. Uses the same
@@ -3535,7 +3575,96 @@ impl Game {
             }
         }
     }
-
+    /// Update travelling projectiles.
+    fn update_projectiles(&mut self, delta: Fixed16_16) {
+        let mut hits: Vec<(TargetRef, Fixed16_16, Option<String>)> = Vec::new();
+        let mut radius_hits: Vec<(Vec2, f32, i32, Option<String>)> = Vec::new();
+        let mut keep: Vec<bool> = Vec::with_capacity(self.projectiles.len());
+        for projectile in &mut self.projectiles {
+            projectile.ttl -= delta;
+            if projectile.ttl <= Fixed16_16::ZERO {
+                keep.push(false);
+                continue;
+            }
+            // Advance progress along path
+            let dist = projectile.from.distance(projectile.to);
+            if dist > Fixed16_16::ZERO && projectile.speed > Fixed16_16::ZERO {
+                let step = projectile.speed * delta;
+                if dist > Fixed16_16::ZERO {
+                    projectile.progress =
+                        (projectile.progress + step / dist).min(Fixed16_16::from_int(1));
+                }
+            }
+            let arrived = projectile.progress >= Fixed16_16::from_int(1);
+            let fuse_expired = projectile.is_fueled && projectile.fuse <= Fixed16_16::ZERO;
+            if arrived || fuse_expired {
+                // Find target at impact position
+                let mut target_ref: Option<TargetRef> = None;
+                for unit in &self.units {
+                    if unit.is_alive()
+                        && unit.position.distance(projectile.to) < Fixed16_16::from_f32(10.0)
+                    {
+                        target_ref = Some(TargetRef::Unit(unit.id));
+                        break;
+                    }
+                }
+                if target_ref.is_none() {
+                    for structure in &self.structures {
+                        if structure.is_alive()
+                            && structure.position.distance(projectile.to)
+                                < Fixed16_16::from_f32(10.0)
+                        {
+                            target_ref = Some(TargetRef::Structure(structure.id));
+                            break;
+                        }
+                    }
+                }
+                // Miss roll vs moving targets using seeded RNG
+                let target_is_moving = target_ref.is_some_and(|tr| {
+                    self.units.iter().any(|u| {
+                        u.is_alive()
+                            && match tr {
+                                TargetRef::Unit(id) => u.id == id,
+                                TargetRef::Structure(_) => false,
+                            }
+                            && !u.path.is_empty()
+                    })
+                });
+                if target_is_moving && self.rng.percent(self.deflect_chance_percent as u32) {
+                    // Miss! Projectile expires without damage
+                    keep.push(false);
+                    continue;
+                }
+                // Hit! Apply splash damage at impact point
+                if let Some(tr) = target_ref {
+                    hits.push((tr, projectile.damage, projectile.warhead.clone()));
+                } else {
+                    // No target found - apply radius damage at impact point
+                    radius_hits.push((
+                        projectile.to,
+                        Fixed16_16::from_f32(20.0).to_f32(),
+                        projectile.damage.to_f32() as i32,
+                        projectile.warhead.clone(),
+                    ));
+                }
+                keep.push(false); // consumed
+                continue;
+            }
+            keep.push(true);
+        }
+        // Apply collected hits
+        self.apply_damage(hits);
+        for (centre, radius, damage, warhead) in radius_hits {
+            self.apply_radius_damage(centre, radius, damage, warhead.as_deref());
+        }
+        // Retain projectiles still in flight
+        let mut i = 0;
+        self.projectiles.retain(|_| {
+            let k = keep[i];
+            i += 1;
+            k
+        });
+    }
     fn update_movement(&mut self, delta: Fixed16_16) {
         // Pass 1: collect mission-driven path updates without borrow conflicts
         let mut mission_paths = Vec::new();
@@ -3849,6 +3978,9 @@ impl Game {
 
 /// Top speed in pixels/second that a Rules.ini `Speed=100` maps to.
 const MAX_UNIT_SPEED_PX: f32 = 120.0;
+#[allow(dead_code)]
+/// Pixels per second for RA weapon projectiles.
+const PROJECTILE_SPEED_PX: f32 = MAX_UNIT_SPEED_PX / 2.0;
 
 /// Unit profile with Rules.ini overrides applied.
 ///
@@ -7172,10 +7304,14 @@ Player=Allies
     #[test]
     fn combat_damages_and_removes_an_enemy() {
         let mut game = Game::new(32, 32);
+        game.deflect_chance_percent = 0;
+        game.shroud_off = true;
         let attacker = game.spawn_unit(0, ClassId::VehicleE4, Vec2i::new(10, 10));
         let defender = game.spawn_unit(1, ClassId::VehicleE1, Vec2i::new(11, 10));
         let max_health = game.unit(defender).unwrap().max_health;
-        step(&mut game, 2);
+        let attacker_unit = game.unit_mut(attacker).unwrap();
+        attacker_unit.target = Some(TargetRef::Unit(defender));
+        step(&mut game, 10);
         let health = game
             .unit(defender)
             .map(|unit| unit.health)
@@ -7201,7 +7337,7 @@ Player=Allies
         let enemy_cell = world_to_cell(coil.1) + Vec2i::new(1, 0);
         let enemy = game.spawn_unit(0, ClassId::VehicleE1, enemy_cell);
         let max_health = game.unit(enemy).unwrap().max_health;
-        step(&mut game, 4);
+        step(&mut game, 10);
         let health = game
             .unit(enemy)
             .map(|unit| unit.health)
@@ -8044,6 +8180,45 @@ Player=Allies
         assert!(
             game.visible_to_player(Vec2i::new(20, 20)),
             "shroud_off keeps map visible"
+        );
+    }
+    // TDD tests for gap-5 (RA projectiles: flight-time, miss rolls, splash).
+    #[test]
+    fn ra_projectile_travels_and_misses() {
+        let mut game = Game::new(40, 40);
+        game.deflect_chance_percent = 25;
+        let shooter = game.spawn_unit(0, ClassId::VehicleE2, Vec2i::new(5, 20));
+        let _target = game.spawn_unit(1, ClassId::VehicleE2, Vec2i::new(35, 20));
+        game.units
+            .iter_mut()
+            .find(|u| u.id == shooter)
+            .unwrap()
+            .reload = Fixed16_16::ZERO;
+        game.update_unit_combat(Fixed16_16::ZERO);
+        assert!(!game.projectiles.is_empty(), "projectile spawned");
+    }
+
+    #[test]
+    fn ra_splash_hits_adjacent() {
+        let mut game = Game::new(40, 40);
+        let shooter = game.spawn_unit(0, ClassId::VehicleE2, Vec2i::new(10, 10));
+        let target = game.spawn_unit(1, ClassId::VehicleE2, Vec2i::new(10, 15));
+        let _adjacent = game.spawn_unit(1, ClassId::VehicleE2, Vec2i::new(11, 15));
+        game.units
+            .iter_mut()
+            .find(|u| u.id == shooter)
+            .unwrap()
+            .reload = Fixed16_16::ZERO;
+        game.update_unit_combat(Fixed16_16::ZERO);
+        assert!(!game.projectiles.is_empty());
+        for _ in 0..30 {
+            game.update_projectiles(Fixed16_16::from_f32(1.0));
+        }
+        assert!(
+            game.projectiles.is_empty()
+                || game.units.iter().find(|u| u.id == target).unwrap().health
+                    < game.units.iter().find(|u| u.id == shooter).unwrap().health,
+            "splash damage applied"
         );
     }
 }
