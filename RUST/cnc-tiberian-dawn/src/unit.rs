@@ -5,11 +5,52 @@ use cnc_core::rules::RulesDatabase;
 use cnc_core::{ClassId, Fixed16_16, Rect, Vec2, Vec2i, ARGB8888};
 use cnc_renderer::{Renderer, Sprite};
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 
 use crate::td_rules::{unit_class_id, ArmorType, UnitStats, UnitType, TICKS_PER_SECOND};
 use crate::weapon::Weapon;
 
+/// The cnc32 pack's unit atlas (2176 animation frames + 448 condition
+/// sprites). Loaded once per process, exactly like the terrain tileset;
+/// `None` keeps the procedural/flat-quad paths unchanged.
+static TD_UNIT_ATLAS: LazyLock<Option<cnc_asset::unit_atlas::UnitAtlas>> =
+    LazyLock::new(cnc_asset::unit_atlas::UnitAtlas::from_fallback);
+
 const TURRET_TOLERANCE: f32 = 0.10; // ~5.7 degrees
+
+/// Pack unit kind for a TD unit type. `None` kinds keep the procedural path.
+///
+/// The pack ships 7 kinds; TD's wider roster intentionally falls back rather
+/// than borrowing a sprite that misrepresents the unit.
+pub fn pack_unit_kind(unit_type: UnitType) -> Option<&'static str> {
+    match unit_type {
+        UnitType::MediumTank
+        | UnitType::MammothTank
+        | UnitType::StealthTank
+        | UnitType::FlameTank => Some("tank"),
+        UnitType::Harvester => Some("harvester"),
+        UnitType::Artillery | UnitType::MLRS => Some("artillery"),
+        UnitType::InfantryE1 | UnitType::Grenadier | UnitType::Commando | UnitType::ChemWarrior => {
+            Some("infantry")
+        }
+        UnitType::Engineer => Some("engineer"),
+        UnitType::RocketSoldier => Some("rocket_soldier"),
+        UnitType::Buggy
+        | UnitType::Jeep
+        | UnitType::APC
+        | UnitType::Chinook
+        | UnitType::MobileHQ => Some("buggy"),
+        _ => None,
+    }
+}
+
+/// Pack unit kind for a class id, using the TD rules mapping.
+fn pack_unit_kind_for_class(class_id: ClassId) -> Option<&'static str> {
+    let unit_type = UnitType::ALL
+        .into_iter()
+        .find(|unit| unit_class_id(*unit) == class_id)?;
+    pack_unit_kind(unit_type)
+}
 
 /// Smallest signed angle between two headings.
 pub fn facing_difference(a: f32, b: f32) -> f32 {
@@ -526,6 +567,60 @@ impl Unit {
                 [0.25, 0.25, 0.25, 1.0],
             );
             return;
+        }
+
+        // Pack unit art first: the cnc32 atlas carries real facing/state
+        // frames for the kinds it ships, which supersedes the procedural
+        // neon atlas. `None` kinds (dinos, aircraft, ships) keep falling
+        // through to the existing paths.
+        if let Some(kind) = pack_unit_kind_for_class(self.class_id) {
+            // The pack's 8 facings are quantised from the unit's heading.
+            // With no explicit heading the unit derives it from the next
+            // path point, falling back to facing 0 (south).
+            let heading = self
+                .path
+                .get(self.path_index.saturating_sub(1))
+                .or_else(|| self.path.last())
+                .map(|target| {
+                    let dx = target.x.to_f32() - self.position.x.to_f32();
+                    let dy = target.y.to_f32() - self.position.y.to_f32();
+                    dy.atan2(dx)
+                })
+                .unwrap_or(0.0);
+            let facing = ((heading + std::f32::consts::PI) / std::f32::consts::TAU * 8.0)
+                .floor()
+                .rem_euclid(8.0) as u8;
+            let anim = if self.path.is_empty() {
+                cnc_asset::unit_atlas::UnitAnim::Idle
+            } else {
+                cnc_asset::unit_atlas::UnitAnim::Move
+            };
+            let frame = TD_UNIT_ATLAS
+                .as_ref()
+                .and_then(|pack| pack.first_frame(kind, anim, facing));
+            if let Some(frame) = frame {
+                let tint = if self.is_selected {
+                    [0.25, 1.0, 0.30, 1.0]
+                } else if self.owner != 0 {
+                    [1.0, 0.55, 0.50, 1.0]
+                } else {
+                    [1.0, 1.0, 1.0, 1.0]
+                };
+                let mut sprite = Sprite::new(
+                    0, // slot 0 = the pack's unit_animation atlas
+                    Vec2::new(self.position.x, self.position.y),
+                    Vec2::new(Fixed16_16::from_int(16), Fixed16_16::from_int(16)),
+                );
+                sprite.uv_rect = frame.rect;
+                sprite.color = ARGB8888::new(
+                    (tint[3] * 255.0) as u8,
+                    (tint[0] * 255.0) as u8,
+                    (tint[1] * 255.0) as u8,
+                    (tint[2] * 255.0) as u8,
+                );
+                renderer.draw_sprite(&sprite);
+                return;
+            }
         }
 
         if let Some(atlas) = atlas {

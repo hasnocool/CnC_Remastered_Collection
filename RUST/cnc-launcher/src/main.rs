@@ -4626,16 +4626,44 @@ impl ApplicationHandler for LauncherApp {
         let atlas = SpriteAtlas::load_or_generate(Path::new(&assets_dir), AtlasStyle::Neon);
         if let Some(renderer) = self.renderer.as_mut() {
             if renderer.uses_sprites() {
-                match renderer.set_atlas(atlas.width, atlas.height, &atlas.pixels) {
-                    Ok(()) => {
-                        tracing::info!(
-                            frames = atlas.frames.len(),
-                            dir = %assets_dir,
-                            "sprite atlas ready"
-                        );
-                        self.sprite_atlas = Some(atlas);
+                // The pack's unit atlas supersedes the procedural neon atlas:
+                // slot 0 uploads the pack's animation frames so unit sprites
+                // sample real art. The procedural atlas stays as the fallback
+                // (and for kinds the pack does not ship).
+                let unit_atlas = cnc_asset::unit_atlas::UnitAtlas::from_fallback();
+                let uploaded = match &unit_atlas {
+                    Some(pack) => {
+                        let (width, height) = pack.animation_dims();
+                        match renderer.set_atlas(width, height, pack.animation_rgba()) {
+                            Ok(()) => {
+                                tracing::info!(
+                                    atlas = %"unit_animation",
+                                    width, height,
+                                    units = pack.units().count(),
+                                    "pack unit atlas ready"
+                                );
+                                true
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "failed to upload pack unit atlas");
+                                false
+                            }
+                        }
                     }
-                    Err(error) => tracing::warn!(%error, "failed to upload sprite atlas"),
+                    None => false,
+                };
+                if !uploaded {
+                    match renderer.set_atlas(atlas.width, atlas.height, &atlas.pixels) {
+                        Ok(()) => {
+                            tracing::info!(
+                                frames = atlas.frames.len(),
+                                dir = %assets_dir,
+                                "sprite atlas ready"
+                            );
+                            self.sprite_atlas = Some(atlas);
+                        }
+                        Err(error) => tracing::warn!(%error, "failed to upload sprite atlas"),
+                    }
                 }
             }
         }

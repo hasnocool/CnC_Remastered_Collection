@@ -16,6 +16,10 @@ use cnc_ai::{
 use cnc_core::{ClassId, Fixed16_16, Vec2, Vec2i};
 use cnc_renderer::{Renderer, Sprite};
 
+/// Texture slot holding the pack's unit animation atlas (slot 0; the terrain
+/// tileset occupies slot 1 via `TERRAIN_TILE_TEXTURE`).
+const UNIT_SPRITE_TEXTURE: u32 = 0;
+
 use crate::generator::{generate, MapGenSettings, TerrainType};
 use crate::history::{
     AddAgent, EditCommand, RemoveAgent, RemoveObject, RemoveTrigger, ScenarioInfo, SetAgent,
@@ -566,6 +570,39 @@ pub struct EditorState {
 }
 
 impl EditorState {
+    /// Draw one map object's pack unit sprite. False when the pack has no art
+    /// for the kind, or the atlas is not uploaded yet.
+    fn draw_pack_unit_object(
+        &self,
+        renderer: &mut dyn Renderer,
+        object: &MapObject,
+        scale: f32,
+    ) -> bool {
+        let Some(pack) = crate::pack_tileset::unit_atlas() else {
+            return false;
+        };
+        let Some(kind) = crate::ui::editor_pack_unit_kind(object.class_id) else {
+            return false;
+        };
+        let Some(frame) = pack.first_frame(kind, cnc_asset::unit_atlas::UnitAnim::Idle, 0) else {
+            return false;
+        };
+        if !renderer.texture_ready(UNIT_SPRITE_TEXTURE) {
+            return false;
+        }
+        let mut sprite = Sprite::new(
+            UNIT_SPRITE_TEXTURE,
+            cnc_core::Vec2::new(
+                Fixed16_16::from_f32(self.cell_screen(object.position).0),
+                Fixed16_16::from_f32(self.cell_screen(object.position).1),
+            ),
+            cnc_core::Vec2::new(Fixed16_16::from_f32(scale), Fixed16_16::from_f32(scale)),
+        );
+        sprite.uv_rect = frame.rect;
+        renderer.draw_sprite(&sprite);
+        true
+    }
+
     pub fn new(width: f32, height: f32) -> Self {
         let settings = MapGenSettings::new(1);
         let map = generate(&settings);
@@ -4006,6 +4043,22 @@ impl EditorState {
         }
 
         let pack_ref = draw_tiles.then_some(self.tileset.as_ref()).flatten();
+        // One-shot upload of the pack's unit animation atlas into texture
+        // slot 0, so unit objects sample real art instead of flat quads.
+        // Failures leave the quads (the sprite draws simply resolve nothing).
+        if !renderer.texture_ready(UNIT_SPRITE_TEXTURE) {
+            if let Some(units) = crate::pack_tileset::unit_atlas() {
+                let (width, height) = units.animation_dims();
+                if let Err(error) = renderer.set_atlas_texture(
+                    UNIT_SPRITE_TEXTURE,
+                    width,
+                    height,
+                    units.animation_rgba(),
+                ) {
+                    eprintln!("unit atlas upload failed: {error}");
+                }
+            }
+        }
         for y in start_y..end_y {
             for x in start_x..end_x {
                 let index = (y as u32 * self.map.width + x as u32) as usize;
@@ -4136,13 +4189,19 @@ impl EditorState {
                 [0.30, 0.78, 1.0, 1.0]
             };
             let size = (scale * 0.55).max(3.0);
-            renderer.draw_rect(
-                sx + (scale - size) * 0.5,
-                sy + (scale - size) * 0.5,
-                size,
-                size,
-                color,
-            );
+            // Units with pack art draw the real sprite (texture slot 0);
+            // buildings and kinds the pack does not ship keep the flat quad.
+            let sprite_drawn = !object.class_id.is_building()
+                && self.draw_pack_unit_object(renderer, object, scale);
+            if !sprite_drawn {
+                renderer.draw_rect(
+                    sx + (scale - size) * 0.5,
+                    sy + (scale - size) * 0.5,
+                    size,
+                    size,
+                    color,
+                );
+            }
             if selected {
                 renderer.draw_rect(sx, sy, scale, 1.0, [1.0, 1.0, 1.0, 1.0]);
                 renderer.draw_rect(sx, sy + scale - 1.0, scale, 1.0, [1.0, 1.0, 1.0, 1.0]);

@@ -387,6 +387,17 @@ fn mapped_name(terrain_id: u8) -> Option<&'static str> {
     terrain_base_name(TerrainType::from_id(terrain_id)?)
 }
 
+/// The pack's unit sprite atlas, loaded once per process.
+///
+/// `ui.rs` draws unit objects from this atlas (slot 0 of the renderer's
+/// texture array), so the same art the engines draw appears in the editor.
+/// `None` keeps the flat-quad fallback exactly as before.
+pub fn unit_atlas() -> Option<&'static cnc_asset::unit_atlas::UnitAtlas> {
+    static UNIT_ATLAS: std::sync::LazyLock<Option<cnc_asset::unit_atlas::UnitAtlas>> =
+        std::sync::LazyLock::new(cnc_asset::unit_atlas::UnitAtlas::from_fallback);
+    UNIT_ATLAS.as_ref()
+}
+
 // ---------------------------------------------------------------------------
 // Pack-anchored matcher tests (graceful skip when the pack is absent, the
 // same contract the cnc-asset engine-test suites use).

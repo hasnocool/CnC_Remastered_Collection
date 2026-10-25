@@ -87,6 +87,32 @@ pub struct SpriteEntry {
     /// Placement inside the atlas PNG: `[x, y, w, h]`.
     #[serde(default)]
     pub atlas_rect: Option<(u32, u32, u32, u32)>,
+    /// Faction for unit sprites (`gdi` / `nod`).
+    #[serde(default)]
+    pub faction: Option<String>,
+    /// Unit kind for unit sprites (`tank`, `harvester`, ...).
+    #[serde(default)]
+    pub unit: Option<String>,
+    /// Animation state for unit sprites (`idle`, `move`, `turn`, `attack`,
+    /// `death`, ...).
+    #[serde(default)]
+    pub state: Option<String>,
+    /// Facing index 0..8 for faceted sprites (units, cliffs, walls).
+    #[serde(default)]
+    pub facing: Option<u8>,
+    /// Frame index within an animation.
+    #[serde(default)]
+    pub frame: Option<u8>,
+    /// Frame duration in milliseconds (`unit_animation` entries).
+    #[serde(default)]
+    pub duration_ms: Option<u16>,
+    /// Whether the animation loops.
+    #[serde(default)]
+    pub loop_: Option<bool>,
+    /// Condition token for `unit_condition` entries
+    /// (`intact` / `damaged` / `critical` / `destroyed`).
+    #[serde(default)]
+    pub condition: Option<String>,
 }
 
 /// Decoded RGBA snapshot of a PNG, buffer flattened row-major.

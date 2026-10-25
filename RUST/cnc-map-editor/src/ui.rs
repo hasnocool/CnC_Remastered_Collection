@@ -59,6 +59,64 @@ fn draw_uv_sprite(renderer: &mut dyn Renderer, sx: f32, sy: f32, size: f32, rect
     renderer.draw_sprite(&sprite);
 }
 
+/// Pack unit kind for an editor class id (the pack ships 7 kinds; the editor's
+/// wider object roster keeps its flat quad when the pack has no art).
+///
+/// Class ids follow the original rosters (`class_id.rs` comments): E1 light
+/// tank, E2 medium, E3 heavy, E4 mammoth, E5 APC, E6 harvester, E7 MCV,
+/// E8 ranger, E9 humvee. The pack ships no MCV, Ranger or Humvee kind, so the
+/// MCV borrows the tank art and the transports borrow buggy.
+pub fn editor_pack_unit_kind(class_id: cnc_core::ClassId) -> Option<&'static str> {
+    use cnc_core::ClassId;
+    Some(match class_id {
+        ClassId::InfantryE1
+        | ClassId::InfantryE2
+        | ClassId::InfantryE3
+        | ClassId::InfantryE5
+        | ClassId::InfantryE10
+        | ClassId::InfantryE11 => "infantry",
+        ClassId::InfantryE6 => "engineer",
+        ClassId::InfantryE4 | ClassId::InfantryE7 => "rocket_soldier",
+        ClassId::VehicleE1
+        | ClassId::VehicleE2
+        | ClassId::VehicleE3
+        | ClassId::VehicleE4
+        | ClassId::VehicleE7 => "tank",
+        ClassId::VehicleE6 => "harvester",
+        ClassId::VehicleE5 => "buggy",
+        _ => return None,
+    })
+}
+
+impl EditorUI {
+    /// Draw a map object's pack unit sprite; false when the pack has no art for
+    /// this kind (caller falls back to the flat quad).
+    fn unit_sprite_draw(
+        &self,
+        renderer: &mut dyn Renderer,
+        object: &crate::map::MapObject,
+        tile: f32,
+    ) -> bool {
+        let Some(pack) = crate::pack_tileset::unit_atlas() else {
+            return false;
+        };
+        let Some(kind) = editor_pack_unit_kind(object.class_id) else {
+            return false;
+        };
+        let Some(frame) = pack.first_frame(kind, cnc_asset::unit_atlas::UnitAnim::Idle, 0) else {
+            return false;
+        };
+        draw_uv_sprite(
+            renderer,
+            object.position.x as f32 * tile,
+            object.position.y as f32 * tile,
+            tile,
+            frame.rect,
+        );
+        true
+    }
+}
+
 /// Interactive editor state.
 pub struct EditorUI {
     pub active_tool: Option<Box<dyn Tool>>,
@@ -260,13 +318,22 @@ impl EditorUI {
                 [0.35, 0.80, 1.00, 1.00]
             };
             let inset = tile * 0.15;
-            renderer.draw_rect(
-                object.position.x as f32 * tile + inset,
-                object.position.y as f32 * tile + inset,
-                tile - inset * 2.0,
-                tile - inset * 2.0,
-                color,
-            );
+            // Units with pack art draw the real sprite (slot 0); buildings and
+            // kinds the pack does not ship keep the flat quad.
+            let drawn = if !object.class_id.is_building() {
+                self.unit_sprite_draw(renderer, object, tile)
+            } else {
+                false
+            };
+            if !drawn {
+                renderer.draw_rect(
+                    object.position.x as f32 * tile + inset,
+                    object.position.y as f32 * tile + inset,
+                    tile - inset * 2.0,
+                    tile - inset * 2.0,
+                    color,
+                );
+            }
         }
 
         if self.show_grid && tile >= 4.0 {
