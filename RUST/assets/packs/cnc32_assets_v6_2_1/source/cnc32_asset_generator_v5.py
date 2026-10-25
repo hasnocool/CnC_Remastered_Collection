@@ -648,20 +648,66 @@ def build(out: Path, force: bool = False, seed: str = "cnc32", contrast_threshol
                 add(f"resources/{kind}/variant_{variant:02d}", "resource", im, resource=kind, variant=variant, footprint=[1,1])
         for mask in range(16):
             # Cliff connectivity follows the same N/E/S/W convention; edges are visible escarpments.
+            # The escarpment band is drawn column-by-column with an irregular
+            # depth (the shoreline's per-column family) instead of one flat
+            # rectangle, and the crest gets broken highlight pixels instead of a
+            # straight light line, so cliff tops read as broken rock.
             im = terrain_base("rock", f"{seed}:cliff:{mask}"); d = ImageDraw.Draw(im)
-            for i, box in enumerate(((0,0,31,5),(26,0,31,31),(0,26,31,31),(0,0,5,31))):
-                if not mask & (1<<i):
-                    d.rectangle(box, fill=(*PALETTE["rock_dark"],255))
-                    if i == 0: d.line((0,5,31,5), fill=(*PALETTE["rock_light"],255))
-                    elif i == 1: d.line((26,0,26,31), fill=(*PALETTE["rock_light"],255))
-                    elif i == 2: d.line((0,26,31,26), fill=(*PALETTE["rock_light"],255))
-                    else: d.line((5,0,5,31), fill=(*PALETTE["rock_light"],255))
+            rng = random.Random(stable_seed(f"{seed}:cliff:{mask}:edge"))
+            BAND = 5
+            for i, edge in enumerate(("n", "e", "s", "w")):
+                if mask & (1 << i):
+                    continue
+                depths = [
+                    rng.randrange(BAND, BAND + 4) if idx % 3 == 0 else BAND
+                    for idx in range(TILE)
+                ]
+                for idx, depth in enumerate(depths):
+                    if edge in ("n", "s"):
+                        y0, y1 = (0, depth - 1) if edge == "n" else (TILE - depth, TILE - 1)
+                        d.line((idx, y0, idx, y1), fill=(*PALETTE["rock_dark"], 255))
+                        crest = depth - 1 if edge == "n" else TILE - depth
+                        d.point((idx, crest), fill=(*PALETTE["rock_light"], 255))
+                        # Broken highlight: skip every third pixel so the crest
+                        # never reads as a straight ruled line.
+                        if idx % 3:
+                            tip = crest + (1 if edge == "n" else -1)
+                            if 0 <= tip < TILE:
+                                d.point((idx, tip), fill=(*PALETTE["rock_dark"], 255))
+                    else:
+                        x0, x1 = (0, depth - 1) if edge == "w" else (TILE - depth, TILE - 1)
+                        d.line((x0, idx, x1, idx), fill=(*PALETTE["rock_dark"], 255))
+                        crest = depth - 1 if edge == "w" else TILE - depth
+                        d.point((crest, idx), fill=(*PALETTE["rock_light"], 255))
+                        idx_tip = crest + (1 if edge == "w" else -1)
+                        if 0 <= idx_tip < TILE:
+                            d.point((idx_tip, idx), fill=(*PALETTE["rock_dark"], 255))
             add(f"cliffs/cliff_{mask:02x}", "cliff_connection", im, mask=mask, connections=[DIRECTION_NAMES[i] for i in mask_dirs(mask)])
         for mask in range(16):
+            # Wall bands use the same irregular per-column edge family as the
+            # cliffs (a flat rectangle reads as a square cut); the masonry core
+            # is kept straight so the wall still reads as built.
             im = new_tile(PALETTE["dirt"]); d = ImageDraw.Draw(im)
-            d.rectangle((11,0,20,31), fill=(*PALETTE["metal_dark"],255)); d.rectangle((0,11,31,20), fill=(*PALETTE["metal_dark"],255))
-            for i, box in enumerate(((11,0,20,7),(24,11,31,20),(11,24,20,31),(0,11,7,20))):
-                if not mask & (1<<i): d.rectangle(box, fill=(*PALETTE["dirt"],255))
+            rng = random.Random(stable_seed(f"{seed}:wall:{mask}:edge"))
+            CORE_LO, CORE_HI = 12, 20
+            d.rectangle((11, 0, 20, 31), fill=(*PALETTE["metal_dark"], 255))
+            d.rectangle((0, 11, 31, 20), fill=(*PALETTE["metal_dark"], 255))
+            # Ragged capping pixels on each open end so the wall tapers into the
+            # ground instead of stopping at a square edge.
+            for i, edge in enumerate(("n", "e", "s", "w")):
+                if mask & (1 << i):
+                    continue
+                # Taper only the last 5 columns/rows of the capped end, at low
+                # density: a dense speckle reads as a broken band at map scale,
+                # so the masonry core stays dominant and only the very end
+                # feathers into the ground.
+                for idx in range(TILE - 5, TILE):
+                    if rng.random() < 0.65:
+                        continue
+                    if edge == "n": d.point((CORE_LO + rng.randrange(9), 7 + rng.randrange(3)), fill=(*PALETTE["dirt"], 255))
+                    elif edge == "s": d.point((CORE_LO + rng.randrange(9), 22 - rng.randrange(3)), fill=(*PALETTE["dirt"], 255))
+                    elif edge == "w": d.point((7 + rng.randrange(3), CORE_LO + rng.randrange(9)), fill=(*PALETTE["dirt"], 255))
+                    else: d.point((24 - rng.randrange(3), CORE_LO + rng.randrange(9)), fill=(*PALETTE["dirt"], 255))
             d.rectangle((13,13,18,18), fill=(*PALETTE["metal"],255))
             add(f"walls/wall_{mask:02x}", "wall_connection", im, mask=mask, connections=[DIRECTION_NAMES[i] for i in mask_dirs(mask)])
         for orientation in ("horizontal", "vertical"):

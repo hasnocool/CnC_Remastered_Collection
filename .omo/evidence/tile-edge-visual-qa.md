@@ -171,3 +171,37 @@ water shoreline instead of square-edged.
   cnc-map-editor suite green.
 NOTE: the grey region in the render is the rock base art (mean 115,115,107 with
 32 colours) - verified terrain, not a regression from this change.
+
+---
+
+# All tile transition families (2026-10-25)
+
+User asked to fix every tile transition family, not just terrain blobs.
+
+## Families audited
+| Family | Count | Before | After |
+|---|---|---|---|
+| terrain_transition | 940 | square 45-degree diagonal cut-outs (fixed in the previous commit) | quarter-arc corners + irregular per-column depth |
+| shoreline | 16 | already organic (per-column depths, coves) | no change needed - reference implementation |
+| cliff_connection | 16 | flat rectangle bands + straight light crest lines | irregular per-column escarpment depth with BROKEN highlight crest (never a ruled line) |
+| wall_connection | 16 | flat rectangles, square ends | tapered ragged end caps (low density, last 5 px) so the masonry core stays dominant |
+| road_connection | 16 | already organic (tapered arms, bevelled caps, centre ellipse) | no change needed |
+| bridge | 6 | rectangles + straight planks | left as-is (bridges are built structures; straight reads correctly) |
+
+## Cliff/wall implementation
+- Cliffs: `rock_dark` band drawn column-by-column with depth 5..8 varying
+  every 3rd column; `rock_light` crest pixels with every 3rd skipped so the
+  top edge is broken, not a straight line.
+- Walls: end caps feather into the ground over the last 5 px of each open arm at
+  35% density (first attempt used 35% over the full length and eroded the
+  metal band - metal_dark share dropped, so it was retuned to the last 5 px and
+  restored to ~49% band coverage).
+
+## Verification
+- Colour audits per family: wall_0a metal_dark share 0.487, wall_0f cross 0.492
+  (masonry dominant, dirt caps taper), cliff_05 top colours rock / rock_dark
+  band / rock_light crest present.
+- In-game editor render (seed 42, zoom 2.0): terrain borders curve, cliff tops
+  show broken crests, wall bands stay solid with feathered ends.
+- Gates: cnc-asset clippy 0 warnings; cnc-asset `cnc32_engine_tests` 16/16
+  including composition determinism after atlas regeneration.
