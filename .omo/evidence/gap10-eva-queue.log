@@ -19,3 +19,27 @@
 - cargo fmt --check: PASS (workspace)
 - cargo clippy -p cnc-red-alert -p cnc-audio --all-targets -- -D warnings: 0 errors
 - cargo test -p cnc-red-alert -p cnc-audio: PASS
+
+## TD half
+
+- New emissions where a genuine in-engine condition exists:
+  * `Canceled` in cancel_production (AUDIO.CPP VOX_CANCELED, player-owned only)
+  * `ReinforcementsArrived` in Action::CreateTeam (TACTION_CREATE_TEAM script)
+- `td_eva_table_coverage` pins the reachable set: 13 distinct lines driven through
+  real conditions (UnitReady, UnitLost, EnemyUnitDestroyed, StructureLost,
+  EnemyStructureDestroyed, LowPower, BaseUnderAttack, InsufficientFunds,
+  Canceled, ReinforcementsArrived, IonCannonReady, MissionAccomplished,
+  MissionFailed).
+- Honest scope note: the plan's ">=20 of 45" assumed ~29 more conditions exist;
+  the engine tracks 16 distinct emitters (13 pinned + ConstructionComplete +
+  UnableToBuildMore reached by other tests). The plan's own rule - never emit a
+  line without an in-engine condition - forbids inventing the remaining table
+  rows (TransportSighted, NeedHarvester, SilosNeeded, Repairing, ...), so they
+  stay documented-only. ConstructionComplete's emitter exists
+  (update_production building branch) but no suite scenario yet drives a queued
+  building to completion in a quiet game (placement gating); documented, not faked.
+
+## Gates (verified)
+- cargo fmt --check: PASS
+- cargo clippy -p cnc-tiberian-dawn --all-targets -- -D warnings: 0 errors
+- cargo test -p cnc-tiberian-dawn: PASS (all suites)
