@@ -58,6 +58,14 @@ struct Options {
     tileset: Option<PathBuf>,
     /// Disable the tileset pack entirely (fall back to flat colored quads).
     no_tileset: bool,
+    /// Headless zoom factor applied before the screenshot (default: the
+    /// auto-fit value `fit()` computes). 1.0 = native 32px tiles.
+    zoom: Option<f32>,
+    /// Headless view centre in cell coordinates (`x,y`), default map centre.
+    center: Option<(i32, i32)>,
+    /// Hide the cell grid overlay in the headless screenshot (A/B against
+    /// the default grid-on view for tile-edge QA).
+    no_grid: bool,
 }
 
 impl Default for Options {
@@ -82,6 +90,9 @@ impl Default for Options {
             export_templates: None,
             tileset: None,
             no_tileset: false,
+            zoom: None,
+            center: None,
+            no_grid: false,
         }
     }
 }
@@ -180,6 +191,23 @@ fn parse_args() -> Result<Options, String> {
                 options.tileset = Some(PathBuf::from(args.next().ok_or("--tileset needs a path")?));
             }
             "--no-tileset" => options.no_tileset = true,
+            "--no-grid" => options.no_grid = true,
+            "--zoom" => {
+                let value = args
+                    .next()
+                    .ok_or("--zoom needs a value")?
+                    .parse::<f32>()
+                    .map_err(|_| "--zoom must be a number")?;
+                options.zoom = Some(value.clamp(0.05, 16.0));
+            }
+            "--center" => {
+                let value = args.next().ok_or("--center needs x,y")?;
+                let (x, y) = value.split_once(',').ok_or("--center must be x,y")?;
+                options.center = Some((
+                    x.parse().map_err(|_| "--center x must be an integer")?,
+                    y.parse().map_err(|_| "--center y must be an integer")?,
+                ));
+            }
             "--help" | "-h" => {
                 println!(
                     "cnc-map-editor [--headless] [--seed N] [--size N] [--players N]\n\
@@ -187,7 +215,8 @@ fn parse_args() -> Result<Options, String> {
                      \t[--briefing TEXT] [--objective TEXT]... [--out MAP.ini]\n\
                      \t[--screenshot PNG] [--frames N] [--width N] [--height N]\n\
                      \t[--renderer auto|wgpu|software] [--validate MAP.ini|DIR]\n\
-                     \t[--export-templates DIR] [--tileset DIR] [--no-tileset]"
+                     \t[--export-templates DIR] [--tileset DIR] [--no-tileset]\n\
+                     \t[--zoom N] [--center X,Y] [--no-grid]"
                 );
                 std::process::exit(0);
             }
@@ -462,6 +491,26 @@ fn run_headless(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(path) = &options.screenshot {
         let width = options.width.max(320);
         let height = options.height.max(240);
+        // Optional zoom/view-centre override for multi-zoom visual QA (the
+        // GUI drives the same zoom/pan fields via scroll and minimap jumps).
+        state.resize(width as f32, height as f32);
+        if options.no_grid {
+            state.show_grid = false;
+        }
+        if let Some(zoom) = options.zoom {
+            state.zoom = zoom;
+        }
+        if let Some((cx, cy)) = options.center {
+            // Centre the viewport on this cell using the same pan math the
+            // GUI's minimap jump uses (zoom x tile scale world offsets).
+            state.cursor_cell = cnc_core::Vec2i::new(cx, cy);
+            state.pan_x = ((width as f32 - 200.0) * 0.5
+                - cx as f32 * cnc_map_editor::map::TILE_SIZE * state.zoom)
+                .max(-(state.map.width as f32 * cnc_map_editor::map::TILE_SIZE));
+            state.pan_y = ((height as f32 - 64.0 - 24.0) * 0.5
+                - cy as f32 * cnc_map_editor::map::TILE_SIZE * state.zoom)
+                .max(-(state.map.height as f32 * cnc_map_editor::map::TILE_SIZE));
+        }
         let mut renderer = SoftwareRenderer::new(width, height);
         state.render(&mut renderer, width as f32, height as f32);
         if let Some(parent) = path.parent() {
