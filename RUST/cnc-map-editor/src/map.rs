@@ -65,7 +65,7 @@ impl Waypoint {
 }
 
 /// Editable scenario.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MapModel {
     pub width: u32,
     pub height: u32,
@@ -1438,7 +1438,7 @@ fn ini_value_text(value: &cnc_core::IniValue) -> String {
 }
 /// True when the text looks like an original-format TD scenario
 /// (TIBERIANDAWN/SCENARIO.CPP: [Basic] plus object sections).
-fn looks_like_original_td(text: &str) -> bool {
+pub(crate) fn looks_like_original_td(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("[basic]")
         && (lower.contains("[wunits]")
@@ -1447,7 +1447,7 @@ fn looks_like_original_td(text: &str) -> bool {
 }
 
 /// True when the text looks like an original-format RA scenario.
-fn looks_like_original_ra(text: &str) -> bool {
+pub(crate) fn looks_like_original_ra(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("[basic]") && lower.contains("[mappack]")
 }

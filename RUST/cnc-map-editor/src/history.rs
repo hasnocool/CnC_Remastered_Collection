@@ -171,6 +171,47 @@ impl History {
     }
 }
 
+/// Replace the whole model with a freshly imported original-format map.
+///
+/// Import is the one editor operation that swaps the model out wholesale, so
+/// the command captures the entire previous model rather than individual cells
+/// or objects: reverting an import must restore the previously open map
+/// exactly, including its object ids and original-format metadata. The imported
+/// map is kept as well so redo reinstalls the identical map.
+pub struct ImportOriginalMap {
+    /// Model state before the import, restored on undo.
+    pub previous: MapModel,
+    /// The imported map, installed by `apply`.
+    pub imported: MapModel,
+    /// History-panel label, naming the dialect that was imported.
+    pub label: String,
+}
+
+impl ImportOriginalMap {
+    /// Build the command that replaces `previous` with `imported`.
+    pub fn new(previous: MapModel, imported: MapModel, dialect: crate::map::ImportKind) -> Self {
+        Self {
+            previous,
+            imported,
+            label: format!("import original map ({})", dialect.label()),
+        }
+    }
+}
+
+impl EditCommand for ImportOriginalMap {
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn apply(&mut self, model: &mut MapModel) {
+        *model = self.imported.clone();
+    }
+
+    fn undo(&mut self, model: &mut MapModel) {
+        std::mem::swap(model, &mut self.previous);
+    }
+}
+
 /// Paint terrain or overlay cells back to captured values.
 pub struct PaintCells {
     /// (cell index, old value, new value)

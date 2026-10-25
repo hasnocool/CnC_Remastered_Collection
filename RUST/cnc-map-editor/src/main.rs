@@ -822,6 +822,7 @@ fn state_new(state: &mut EditorState) {
     let width = state.map_width;
     let height = state.map_height;
     let theater = state.theater;
+    state.import_warnings.clear();
     state.map = cnc_map_editor::map::MapModel::new(width, height);
     state.map.theater = theater.name().to_string();
     state.editor = cnc_map_editor::ui::EditorUI::new();

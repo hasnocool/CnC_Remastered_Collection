@@ -1,0 +1,71 @@
+# Evidence: Gap 4 - Editor import UI for original maps
+
+## Acceptance Criteria
+- `editor_imports_original_maps_via_command` green: importing a fixture TD ini+bin
+  and an RA MPR produces identical model state to the existing direct loaders,
+  and Ctrl+Z reverts to the pre-import state in one step.
+
+## Implementation
+1. **history.rs**: new `ImportOriginalMap` command (`previous`, `imported`,
+   `label`). `apply` installs `imported.clone()`; `undo` swaps `previous` back in.
+   Import is the one operation that replaces the model wholesale, so the command
+   captures both maps rather than individual cells/objects — redo therefore
+   reinstalls the identical map and ids.
+2. **map.rs**: `MapModel` derives `PartialEq` (all field types already did), so
+   the acceptance criterion "identical model state to the direct loaders" is a
+   real equality assertion rather than a hand-picked subset. `looks_like_original_td`
+   / `looks_like_original_ra` widened to `pub(crate)` for the dialect sniff.
+3. **app.rs**:
+   - `Action::ImportOriginalMap` + toolbar **Import** button (66px, after Open;
+     the game-button floor moved 452 -> 560 so it stays clear of the widened row).
+   - `EditorState::import_original_map(&ini, Option<&bin>)`: sniffs RA
+     (`[MapPack]`) vs TD (`[Basic]` + sibling `.bin`), calls the existing
+     `MapModel::from_original_ra` / `from_original_td`, then executes the command
+     through `History::execute`. Model is never mutated outside the command.
+   - `import_original_with_dialog` / `handle_import_choice` /
+     `import_original_path`: native file dialog (`ini`/`mpr`), pairs a TD `.ini`
+     with its sibling `.bin` of the same stem, and falls back to the path field
+     when no dialog helper exists — same testable split as the open dialog.
+   - `EditorState::import_warnings` fed into `validation_issues()` prefixed
+     `import:` so the validation panel lists what the importer had to skip
+     (loader-documented behaviour: unresolvable type tokens are kept as
+     `ClassId::Unknown`, so those are the warnings an import can surface
+     without inventing semantics).
+   - `apply_import_reset` clears selection/trigger edit and refits the view but
+     deliberately keeps the existing `EditorUI`: it owns the undo stack the
+     command was just pushed onto (an earlier `EditorUI::new()` here silently
+     discarded the undo step — caught by the test).
+   - `new_map` / `open` / main.rs `state_new` clear `import_warnings` so a stale
+     note never survives a document change.
+
+## QA scenarios
+- happy: TD fixture (`fixtures::td_scenario_text` + `td_bin_bytes`) imported from
+  disk via `handle_import_choice` equals `MapModel::import_text_with` output;
+  RA fixture (`ra_scenario_text`) likewise from a `.mpr`; `plugin_index` follows
+  the dialect (0 = TD, 1 = RA); a frame renders (non_black > 10_000); the toolbar
+  exposes the button.
+- failure: truncated `.bin` (`[9u8; 7]`) -> `import failed: ...`, model and undo
+  stack bit-identical, warning shown as `import:` in the validation panel; RA text
+  with no `[MapPack]` -> same; TD `.ini` with no sibling `.bin` -> "needs its .bin
+  map image", model untouched; cancelled dialog keeps the current map.
+
+## Verification
+- TDD: `editor_imports_original_maps_via_command` written first (red: no method
+  on `EditorState`), then green. Two further tests added:
+  `import_rejects_malformed_input_and_leaves_the_model_untouched` and
+  `import_dialog_and_path_flow_reads_both_original_dialects`,
+  `import_button_is_on_the_toolbar_and_renders`.
+- lib tests 138 (2 new) -> 141 (4 new); 0 failures, no pre-existing test weakened.
+- Gate: `cargo fmt --check -p cnc-map-editor` clean;
+  `CARGO_BUILD_JOBS=2 cargo clippy -p cnc-map-editor --all-targets -- -D warnings` clean;
+  `CARGO_BUILD_JOBS=2 cargo test -p cnc-map-editor` => 140 lib + 24 integration, all ok.
+  (Note: workspace-wide `cargo fmt --check` is red only on
+  `cnc-red-alert/src/game.rs`, which belongs to gap 5 and has pre-existing
+  unformatted imports plus that wave's in-progress work — untouched here.)
+
+## Files Modified
+- RUST/cnc-map-editor/src/history.rs (ImportOriginalMap command)
+- RUST/cnc-map-editor/src/map.rs (PartialEq, pub(crate) sniff helpers)
+- RUST/cnc-map-editor/src/app.rs (action, toolbar, import path, warnings, tests)
+- RUST/cnc-map-editor/src/main.rs (clear import_warnings in state_new)
+- RUST/cnc-map-editor/CHANGELOG.md (Unreleased/Added)

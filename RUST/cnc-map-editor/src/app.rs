@@ -221,6 +221,9 @@ pub enum Action {
     OpenAgentStudio,
     Generate,
     Open,
+    /// File→Import Original Map: load a retail TD or RA scenario, replacing
+    /// the working map through an undoable command.
+    ImportOriginalMap,
     Save,
     Undo,
     Redo,
@@ -555,6 +558,9 @@ pub struct EditorState {
     pub marquee_start: Option<Vec2i>,
     pub marquee_end: Option<Vec2i>,
     pub marquee_active: bool,
+    /// Warnings produced by the most recent original-format import, shown in
+    /// the validation panel and cleared by the next import (or a new/open).
+    pub import_warnings: Vec<String>,
     pub width: f32,
     pub height: f32,
 }
@@ -623,6 +629,7 @@ impl EditorState {
             marquee_start: None,
             marquee_end: None,
             marquee_active: false,
+            import_warnings: Vec::new(),
             width,
             height,
         };
@@ -819,6 +826,7 @@ impl EditorState {
 
     fn new_map(&mut self) {
         self.reset_agent_editor();
+        self.import_warnings.clear();
         self.map = MapModel::new(self.map_width, self.map_height);
         self.map.theater = self.theater.name().to_string();
         self.editor = EditorUI::new();
@@ -875,6 +883,7 @@ impl EditorState {
 
     pub fn open(&mut self) {
         self.reset_agent_editor();
+        self.import_warnings.clear();
         let path = self.resolve_path();
         // The plugin dispatches on extension/dialect and pairs a TD .ini with
         // its sibling .bin, so both games open through one path.
@@ -901,6 +910,188 @@ impl EditorState {
             }
             Err(error) => self.status = format!("open failed: {error}"),
         }
+    }
+
+    /// Import an original-format scenario (File→Import Original Map).
+    ///
+    /// The text is sniffed for its dialect: a base64 `[MapPack]` block means
+    /// RA, otherwise a `[Basic]` scenario is TD, which additionally needs its
+    /// sibling cell image. The freshly parsed model replaces the working map
+    /// through [`crate::history::ImportOriginalMap`], so a single Ctrl+Z
+    /// reverts to the previously open map.
+    ///
+    /// Malformed input (a truncated `.bin`, an editor-dialect scenario, or a
+    /// TD `.ini` with no `.bin`) is reported through `self.status` and listed
+    /// in the validation panel, and leaves the model and the undo stack
+    /// exactly as they were: nothing is executed, so there is nothing to undo.
+    pub fn import_original_map(&mut self, ini: &str, bin: Option<&[u8]>) {
+        self.import_warnings.clear();
+        let lower = ini.to_ascii_lowercase();
+        // RA carries its grids in base64 [MapPack]; TD is the [Basic] dialect
+        // that ships its cell image as a sibling .bin.
+        let is_ra = crate::map::looks_like_original_ra(ini);
+        let is_td = !is_ra && lower.contains("[basic]");
+
+        let (imported, kind) = if is_ra {
+            (MapModel::from_original_ra(ini), ImportKind::OriginalRa)
+        } else if is_td {
+            match bin {
+                Some(bin) => (MapModel::from_original_td(ini, bin), ImportKind::OriginalTd),
+                None => {
+                    let message = "an original TD scenario needs its .bin map image".to_string();
+                    self.import_warnings.push(message.clone());
+                    self.status = format!("import failed: {message}");
+                    return;
+                }
+            }
+        } else {
+            let message = "not an original TD or RA scenario (no [MapPack] and no [Basic] section)"
+                .to_string();
+            self.import_warnings.push(message.clone());
+            self.status = format!("import failed: {message}");
+            return;
+        };
+
+        let imported = match imported {
+            Ok(imported) => imported,
+            Err(error) => {
+                // Model untouched: the command is never built or executed, so
+                // there is no partial state to undo.
+                let message = error.to_string();
+                self.import_warnings.push(message.clone());
+                self.status = format!("import failed: {message}");
+                return;
+            }
+        };
+
+        // The loaders keep objects whose type token they cannot resolve as
+        // Unknown instead of dropping the placement, so those are the parse
+        // warnings an import can surface without inventing semantics.
+        let mut unknowns: Vec<String> = imported
+            .objects
+            .values()
+            .filter(|object| object.class_id == ClassId::Unknown)
+            .map(|object| {
+                format!(
+                    "object #{} at ({},{}) has an unresolvable type",
+                    object.id, object.position.x, object.position.y
+                )
+            })
+            .collect();
+        unknowns.sort();
+        unknowns.dedup();
+        self.import_warnings = unknowns;
+
+        let previous = self.map.clone();
+        let command = crate::history::ImportOriginalMap::new(previous, imported, kind);
+        self.editor
+            .history
+            .execute(&mut self.map, Box::new(command));
+        self.plugin_index = match kind {
+            ImportKind::OriginalTd => 0,
+            ImportKind::OriginalRa => 1,
+            ImportKind::EditorDialect => self.plugin_index,
+        };
+        self.apply_import_reset(kind);
+    }
+
+    /// Reset the view state that belongs to the map that was open before the
+    /// import, so the imported map starts from a clean selection and fits the
+    /// view. Called after the command executed, never instead of it.
+    ///
+    /// The `EditorUI` itself is deliberately preserved: it owns the undo
+    /// stack the import command was just pushed onto.
+    fn apply_import_reset(&mut self, kind: ImportKind) {
+        self.reset_agent_editor();
+        self.editor.selected_object = None;
+        self.editor.selected_objects = Vec::new();
+        self.selected_trigger = None;
+        self.trigger_edit = None;
+        self.set_terrain_tool();
+        self.fit();
+        let warnings = if self.import_warnings.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " ({} warning{})",
+                self.import_warnings.len(),
+                if self.import_warnings.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            )
+        };
+        self.status = format!(
+            "imported {} as {} ({}){}",
+            self.path,
+            kind.label(),
+            self.map.summary(),
+            warnings
+        );
+    }
+
+    /// Native import dialog: the scenario INI/MPR plus, for a TD scenario, its
+    /// sibling `.bin` cell image. Falls back to the typed path when the
+    /// platform has no dialog helper.
+    pub fn import_original_with_dialog(&mut self) {
+        let current = self.resolve_path();
+        let directory = self.dialog_directory();
+        let mut builder = native_dialog::FileDialogBuilder::default()
+            .set_title("Import original map")
+            .add_filter("Original scenario", ["ini", "mpr"]);
+        if directory.exists() {
+            builder = builder.set_location(&directory);
+        }
+        if let Some(name) = current.file_name() {
+            builder = builder.set_filename(name.to_string_lossy());
+        }
+        let choice = builder
+            .open_single_file()
+            .show()
+            .map_err(|error| error.to_string());
+        self.handle_import_choice(choice);
+    }
+
+    /// Apply an import dialog outcome. Split out from
+    /// [`Self::import_original_with_dialog`] so the success, cancel and
+    /// "no helper installed" paths are testable without a display.
+    pub fn handle_import_choice(&mut self, choice: Result<Option<PathBuf>, String>) {
+        let path = match choice {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                self.status = "import cancelled".to_string();
+                return;
+            }
+            Err(error) => {
+                // No dialog available: fall back to the path field, same as
+                // the open dialog does.
+                let note =
+                    format!("native import dialog unavailable ({error}); using path field: ");
+                let fallback = self.resolve_path();
+                self.import_original_path(&fallback);
+                self.status = format!("{note}{}", self.status);
+                return;
+            }
+        };
+        self.path = path.display().to_string();
+        self.import_original_path(&path);
+    }
+
+    /// Import an original scenario from disk, pairing a TD `.ini` with its
+    /// sibling `.bin` of the same stem.
+    pub fn import_original_path(&mut self, path: &Path) {
+        let ini = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) => {
+                self.status = format!("import failed: read {}: {error}", path.display());
+                return;
+            }
+        };
+        // A TD scenario's cell image is a sibling file with the same stem.
+        let bin = path.with_extension("bin");
+        let bin = std::fs::read(&bin).ok();
+        self.import_original_map(&ini, bin.as_deref());
     }
 
     /// Directory the file dialogs start in, derived from the path field.
@@ -1502,8 +1693,16 @@ impl EditorState {
     }
 
     /// Map validation plus plugin-level object checks (owner/bounds).
+    ///
+    /// Parse warnings from the most recent original-format import are listed
+    /// first so the validation panel explains what the importer had to skip.
     fn validation_issues(&self) -> Vec<String> {
-        let mut issues = self.map.validate();
+        let mut issues: Vec<String> = self
+            .import_warnings
+            .iter()
+            .map(|warning| format!("import: {warning}"))
+            .collect();
+        issues.extend(self.map.validate());
         let plugin = self.plugin();
         for object in self.map.objects.values() {
             if !plugin.validate_object(&self.map, object) {
@@ -2625,6 +2824,7 @@ impl EditorState {
             Action::OpenAgentStudio => self.open_agent_studio(),
             Action::Generate => self.apply_generate(),
             Action::Open => self.open_with_dialog(),
+            Action::ImportOriginalMap => self.import_original_with_dialog(),
             Action::Save => self.save_with_dialog(),
             Action::Undo => self.undo(),
             Action::Redo => self.redo(),
@@ -2747,6 +2947,7 @@ impl EditorState {
             ("New", Action::New, 44.0),
             ("Generate", Action::Generate, 86.0),
             ("Open", Action::Open, 46.0),
+            ("Import", Action::ImportOriginalMap, 66.0),
             ("Save", Action::Save, 46.0),
             ("Undo", Action::Undo, 46.0),
             ("Redo", Action::Redo, 46.0),
@@ -2765,8 +2966,9 @@ impl EditorState {
             24.0,
             ControlKind::Button(Action::ZoomIn),
         );
+        // The floor keeps the game button clear of the widened left toolbar.
         push(
-            (self.width - RIGHT_W - 122.0).max(452.0),
+            (self.width - RIGHT_W - 122.0).max(560.0),
             6.0,
             114.0,
             24.0,
@@ -4076,7 +4278,7 @@ impl EditorState {
         renderer.draw_rect(0.0, 0.0, self.width, TOP_H, [0.10, 0.12, 0.16, 1.0]);
         renderer.draw_rect(0.0, TOP_H - 1.0, self.width, 1.0, [0.22, 0.30, 0.40, 1.0]);
         let labels = [
-            "New", "Generate", "Open", "Save", "Undo", "Redo", "Grid", "AI", "-", "+",
+            "New", "Generate", "Open", "Import", "Save", "Undo", "Redo", "Grid", "AI", "-", "+",
         ];
         for (index, control) in controls.iter().enumerate() {
             if control.rect.y > TOP_H {
@@ -6636,5 +6838,207 @@ mod tests {
             state.resolve_path().file_name().unwrap(),
             std::ffi::OsStr::new("scenario.ini")
         );
+    }
+
+    #[test]
+    fn editor_imports_original_maps_via_command() {
+        use crate::fixtures;
+
+        // Direct loaders are the contract.
+        let td_ini = fixtures::td_scenario_text();
+        let td_bin = fixtures::td_bin_bytes();
+        let (direct_td, td_kind) =
+            MapModel::import_text_with(&td_ini, Some(&td_bin)).expect("direct TD import");
+        assert_eq!(td_kind, ImportKind::OriginalTd);
+
+        let ra_text = fixtures::ra_scenario_text();
+        let (direct_ra, ra_kind) =
+            MapModel::import_text_with(&ra_text, None).expect("direct RA import");
+        assert_eq!(ra_kind, ImportKind::OriginalRa);
+
+        // Import through the editor's File→Import Original Map command.
+        let mut state = EditorState::new(1280.0, 800.0);
+        state.map = MapModel::new(16, 16);
+        let pre_import = state.map.clone();
+        assert_eq!(state.editor.history.undo_len(), 0);
+
+        // TD: ini path plus its sibling .bin.
+        state.import_original_map(&td_ini, Some(&td_bin));
+        assert_eq!(
+            &state.map, &direct_td,
+            "TD import through the command must match the direct loader"
+        );
+        assert_eq!(state.map.original_dialect(), Some(ImportKind::OriginalTd));
+        assert_eq!(
+            state.editor.history.undo_len(),
+            1,
+            "import is one undoable step"
+        );
+        assert_eq!(state.plugin_index, 0, "TD plugin is selected");
+
+        // Ctrl+Z reverts to the pre-import state in one step.
+        state.undo();
+        assert_eq!(&state.map, &pre_import, "undo restores the pre-import map");
+        assert!(state.map.original.is_none());
+
+        // RA: the .mpr/.ini text alone.
+        let pre_ra = state.map.clone();
+        state.import_original_map(&ra_text, None);
+        assert_eq!(
+            &state.map, &direct_ra,
+            "RA import through the command must match the direct loader"
+        );
+        assert_eq!(state.map.original_dialect(), Some(ImportKind::OriginalRa));
+        assert_eq!(state.plugin_index, 1, "RA plugin is selected");
+
+        state.undo();
+        assert_eq!(&state.map, &pre_ra, "undo restores the pre-import map");
+    }
+
+    #[test]
+    fn import_rejects_malformed_input_and_leaves_the_model_untouched() {
+        let mut state = EditorState::new(1280.0, 800.0);
+        state.map = MapModel::new(16, 16);
+        state.map.player_starts.push(Vec2i::new(1, 1));
+        let before = state.map.clone();
+        let history_before = state.editor.history.undo_len();
+
+        // A truncated TD .bin cannot be decoded.
+        state.import_original_map("[Basic]\nName=Truncated\n", Some(&[9u8; 7]));
+        assert_eq!(
+            &state.map, &before,
+            "failed import leaves the model untouched"
+        );
+        assert_eq!(state.editor.history.undo_len(), history_before);
+        assert!(
+            state.status.contains("import failed"),
+            "the status line reports the parse failure: {}",
+            state.status
+        );
+        // The parse failure is also listed in the validation panel.
+        assert!(
+            state
+                .validation_issues()
+                .iter()
+                .any(|issue| issue.starts_with("import:")),
+            "{:?}",
+            state.validation_issues()
+        );
+
+        // An RA scenario without [MapPack] is not original-format.
+        state.import_original_map("[Map]\nWidth=8\n[Terrain]\n0=0 0\n", None);
+        assert_eq!(&state.map, &before, "model still untouched");
+        assert_eq!(state.editor.history.undo_len(), history_before);
+        assert!(state.status.contains("import failed"), "{}", state.status);
+
+        // Opening a different map clears the stale import warning rather than
+        // leaving it attached to a map that never had one.
+        state.activate(Action::New);
+        assert!(
+            state.import_warnings.is_empty(),
+            "{:?}",
+            state.import_warnings
+        );
+        assert!(
+            state
+                .validation_issues()
+                .iter()
+                .all(|issue| !issue.starts_with("import:")),
+            "{:?}",
+            state.validation_issues()
+        );
+    }
+
+    #[test]
+    fn import_dialog_and_path_flow_reads_both_original_dialects() {
+        use crate::fixtures;
+
+        let dir = std::env::temp_dir().join(format!("cnc-editor-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // A TD scenario on disk: the .ini plus its sibling .bin.
+        let td_stem = dir.join("td_map");
+        std::fs::write(td_stem.with_extension("ini"), fixtures::td_scenario_text()).unwrap();
+        std::fs::write(td_stem.with_extension("bin"), fixtures::td_bin_bytes()).unwrap();
+        let (direct_td, _) = MapModel::import_text_with(
+            &fixtures::td_scenario_text(),
+            Some(&fixtures::td_bin_bytes()),
+        )
+        .unwrap();
+
+        // An RA scenario on disk: the .mpr alone.
+        let ra_path = dir.join("ra_map.mpr");
+        std::fs::write(&ra_path, fixtures::ra_scenario_text()).unwrap();
+        let (direct_ra, _) =
+            MapModel::import_text_with(&fixtures::ra_scenario_text(), None).unwrap();
+
+        let mut state = EditorState::new(1280.0, 800.0);
+        state.map = MapModel::new(16, 16);
+
+        // Dialog success picks the file and pairs the TD .bin automatically.
+        state.handle_import_choice(Ok(Some(td_stem.with_extension("ini"))));
+        assert_eq!(&state.map, &direct_td, "TD imported from disk");
+        assert_eq!(state.map.original_dialect(), Some(ImportKind::OriginalTd));
+        assert!(state.status.contains("imported"), "{}", state.status);
+        assert_eq!(
+            state.path,
+            td_stem.with_extension("ini").display().to_string()
+        );
+
+        // RA through the same command path.
+        state.handle_import_choice(Ok(Some(ra_path.clone())));
+        assert_eq!(&state.map, &direct_ra, "RA imported from disk");
+        assert_eq!(state.map.original_dialect(), Some(ImportKind::OriginalRa));
+        assert_eq!(state.path, ra_path.display().to_string());
+
+        // Cancelled dialog: the imported map stays put.
+        state.handle_import_choice(Ok(None));
+        assert_eq!(&state.map, &direct_ra, "cancel keeps the current map");
+        assert!(state.status.contains("cancelled"), "{}", state.status);
+
+        // A TD .ini with a missing sibling .bin is reported, model untouched.
+        let orphan = dir.join("orphan");
+        std::fs::write(orphan.with_extension("ini"), fixtures::td_scenario_text()).unwrap();
+        state.handle_import_choice(Ok(Some(orphan.with_extension("ini"))));
+        assert_eq!(&state.map, &direct_ra, "missing .bin leaves the map alone");
+        assert!(state.status.contains("needs its .bin"), "{}", state.status);
+
+        // Missing dialog helper: falls back to the path field.
+        state.path = ra_path.display().to_string();
+        let before_fallback = state.map.clone();
+        let undo_before = state.editor.history.undo_len();
+        state.handle_import_choice(Err("missing zenity".to_string()));
+        assert!(state.status.contains("missing zenity"), "{}", state.status);
+        assert_eq!(state.map.original_dialect(), Some(ImportKind::OriginalRa));
+        assert_eq!(state.editor.history.undo_len(), undo_before + 1);
+        state.undo();
+        assert_eq!(
+            &state.map, &before_fallback,
+            "fallback import is undoable too"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_button_is_on_the_toolbar_and_renders() {
+        let mut state = EditorState::new(1280.0, 800.0);
+        let controls = state.controls();
+        assert!(
+            controls
+                .iter()
+                .any(|control| control.kind == ControlKind::Button(Action::ImportOriginalMap)),
+            "the toolbar exposes File→Import Original Map"
+        );
+
+        let mut renderer = SoftwareRenderer::new(1280, 800);
+        state.render(&mut renderer, 1280.0, 800.0);
+        let non_black = renderer
+            .buffer()
+            .iter()
+            .filter(|pixel| **pixel != 0)
+            .count();
+        assert!(non_black > 10_000);
     }
 }
