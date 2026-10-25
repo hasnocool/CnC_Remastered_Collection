@@ -170,23 +170,24 @@ def terrain_transition(kind: str, same_mask: int, seed: str, alt_kind: str | Non
     primary = terrain_base(kind, seed + ":primary")
     rng = random.Random(stable_seed(f"{seed}:{kind}:{alt}:{same_mask}:edge"))
     n, ne, e, se, so, sw, w, nw = [(same_mask >> i) & 1 for i in range(8)]
-    # Chunky pixel-art boundary: shallow +/-1 px sawtooth over a fixed base
-    # depth (the legacy 16px pack's style), NOT wide organic banks. Steep steps
-    # with occasional 2-px jags read as authored rock/terrain edges at map scale.
+    # Thin irregular terrain edge: 2-4 px encroachment with a +/-1 px sawtooth.
+    # A wide band reads as a wall strip (the previous 6-8px pass looked like
+    # pipes); the original games keep terrain edges thin so the boundary reads
+    # as natural ground, while still being axis-aligned pixel art.
     def profile(base: int, count: int, lo: int, hi: int) -> list[int]:
         values=[]
         for i in range(count):
             if i % 4 == 0: base = max(lo, min(hi, base + rng.choice((-1, 0, 1))))
             values.append(base)
         return values
-    north = profile(7, TILE, 6, 8); south = profile(7, TILE, 6, 8)
-    west = profile(7, TILE, 6, 8); east = profile(7, TILE, 6, 8)
+    north = profile(3, TILE, 2, 4); south = profile(3, TILE, 2, 4)
+    west = profile(3, TILE, 2, 4); east = profile(3, TILE, 2, 4)
 
-    # Corners: a compact chamfered notch (the legacy wall_curve style), not a
-    # circle: a 6x6 pocket whose outer tip is a single 45-degree chamfer. This
-    # keeps the tile reading as pixel art while softening the 90-degree meet.
-    notch = {"nw": rng.randrange(5, 7), "ne": rng.randrange(5, 7),
-             "sw": rng.randrange(5, 7), "se": rng.randrange(5, 7)}
+    # Corners: a small nick (2-4 px) with a single 45-degree tip, matching the
+    # thin edge above. A large notch reads as a blocky cut-out; a small one reads
+    # as a natural corner nick where two edges meet.
+    notch = {"nw": rng.randrange(2, 5), "ne": rng.randrange(2, 5),
+             "sw": rng.randrange(2, 5), "se": rng.randrange(2, 5)}
     mask = Image.new("L", (TILE,TILE), 0); px=mask.load()
     for y in range(TILE):
         for x in range(TILE):
