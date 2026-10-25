@@ -1,0 +1,55 @@
+# Gap 2: TD [CellTriggers] end-to-end — Evidence
+# Date: 2026-10-24
+# Scope: RUST/cnc-tiberian-dawn/src/{scenario_loader.rs, mission.rs, game.rs}
+
+## Changes
+1. scenario_loader.rs:
+   - New `CellTrigger { cell: u32, trigger_name: String }` record.
+   - `ParsedScenario.cell_triggers: Vec<CellTrigger>` field.
+   - `parse_cell_triggers(ini)` parses `[CellTriggers]` (cell=TriggerName per
+     DISPLAY.CPP:1381-1415 / CELL.H `IsTrigger`); malformed cell numbers are
+     collected as parse warnings (never panic, DISPLAY.CPP `cell > 0 &&
+     cell < MAP_CELL_TOTAL` tolerated via skip).
+   - `parse_scenario` merges `[CellTriggers]` warnings into `scenario.warnings`.
+   - `scenario_to_game` resolves each cell trigger name against the `[Trigs]`
+     parsed trigger table (name -> id) and installs `mission.cell_triggers`
+     (cell index -> trigger id). Unknown trigger names are reported in
+     `ConversionReport.warnings` and skipped — never invented.
+
+2. mission.rs:
+   - `Mission.cell_triggers: HashMap<u32, u32>` + `fired_cell_triggers:
+     HashSet<u32>` (serde defaults keep old saves compatible).
+
+3. game.rs `update_mission`:
+   - After the regular trigger evaluation, each alive player-unit's current
+     cell (row-major index, per `CELL.H IsTrigger` + CELL.CPP `Get_Trigger`)
+     with a pending binding fires its trigger's actions once, then the cell
+     is latched in `fired_cell_triggers` (idempotent — matches plan: fire
+     once per cell entry/occupancy; no trigger semantics invented beyond
+     enter/occupy firing).
+
+## Tests (TDD: named failing test written first)
+- `celltrigger_fires_when_unit_enters` — green: scenario with `[CellTriggers]
+  100=CellTriggerWin` spawns the trigger; unit entering cell 100 fires the
+  Win action once (mission.outcome == Victory), and re-evaluating is
+  idempotent.
+- `celltrigger_malformed_cell_number_warns_and_skips` — green: `not_a_number`
+  key produces a `[CellTriggers]` parse warning; no binding survives.
+- `celltrigger_unknown_trigger_name_warns_and_skips` — green: unknown name
+  reported in ConversionReport.warnings with the name in the message; cell
+  stays unbound; unrelated declared triggers unaffected.
+
+## Gates
+- cargo fmt -p cnc-tiberian-dawn --check: PASS
+- CARGO_BUILD_JOBS=2 cargo clippy -p cnc-tiberian-dawn --all-targets -- -D warnings: PASS
+- CARGO_BUILD_JOBS=2 cargo test -p cnc-tiberian-dawn: 376/376 PASS
+  (340 lib incl. the 3 new tests + doc/integration suites)
+- Note: workspace-wide `cargo fmt --check` currently fails in
+  cnc-red-alert/src/house.rs — a file being edited concurrently by the Gap3
+  peer, not part of this change.
+
+## References
+- original/TIBERIANDAWN/DISPLAY.CPP:1372-1415 (Read_INI CellTriggers loop)
+- original/TIBERIANDAWN/CELL.CPP:1565-1587 (Get_Trigger)
+- original/TIBERIANDAWN/CELL.H:81 (IsTrigger bit)
+- original/TIBERIANDAWN/TRIGGER.CPP:67 (EventText)

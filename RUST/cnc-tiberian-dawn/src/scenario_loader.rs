@@ -359,6 +359,13 @@ pub fn trigger_records_to_triggers(records: &[TriggerRecord]) -> (Vec<Trigger>, 
 
     (triggers, unmapped)
 }
+/// A cell trigger mapping from `[CellTriggers]` section.
+/// Cell number (row-major) maps to a trigger name defined in `[Trigs]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CellTrigger {
+    pub cell: u32,
+    pub trigger_name: String,
+}
 
 /// Everything recovered from a scenario's `.ini`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -380,6 +387,8 @@ pub struct ParsedScenario {
     pub units: Vec<PlacedUnit>,
     pub structures: Vec<PlacedStructure>,
     pub triggers: Vec<ParsedTrigger>,
+    /// `[CellTriggers]` cell -> trigger name mappings.
+    pub cell_triggers: Vec<CellTrigger>,
     /// `[Waypoints]` ids that were present.
     pub waypoint_ids: Vec<u32>,
     /// `[Waypoints]` id -> cell mappings, in id order.
@@ -488,10 +497,17 @@ pub fn parse_scenario(ini: &IniFile) -> Result<ParsedScenario> {
         waypoints: parse_waypoints(ini),
         houses: parse_houses(ini),
         trigger_records: parse_trigger_records(ini),
+        cell_triggers: parse_cell_triggers(ini).0,
         // Team types are optional: a scenario without [TeamTypes] yields an
         // empty roster and the game falls back to the built-in expert AI.
         team_types: cnc_core::entity::team_types_from_ini(ini).unwrap_or_default(),
-        warnings: scenario_warnings(ini),
+        warnings: {
+            let mut all_warnings = scenario_warnings(ini);
+            // Add cell trigger warnings
+            let (_, cell_warnings) = parse_cell_triggers(ini);
+            all_warnings.extend(cell_warnings);
+            all_warnings
+        },
     })
 }
 
@@ -837,6 +853,37 @@ pub fn parse_waypoints(ini: &IniFile) -> Vec<Waypoint> {
     waypoints
 }
 
+/// Parse the `[CellTriggers]` section.
+///
+/// Original format: `CELL.CPP` / `DISPLAY.CPP` read entries where the key is
+/// the cell number (row-major) and the value is the trigger name.
+/// Example: `100=TriggerName` means cell 100 fires trigger "TriggerName".
+/// Malformed cell numbers or unknown trigger names produce warnings but
+/// don't fail parsing.
+pub fn parse_cell_triggers(ini: &IniFile) -> (Vec<CellTrigger>, Vec<String>) {
+    let Some(section) = ini.section("CellTriggers") else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut triggers = Vec::new();
+    let mut warnings = Vec::new();
+    for (key, value) in &section.values {
+        let key_trimmed = key.trim();
+        let trigger_name = scalar_text(value).trim().to_string();
+        if trigger_name.is_empty() {
+            continue;
+        }
+        let Ok(cell) = key_trimmed.parse::<u32>() else {
+            warnings.push(format!(
+                "[td scenario] [CellTriggers] malformed cell number '{}', skipping",
+                key_trimmed
+            ));
+            continue;
+        };
+        triggers.push(CellTrigger { cell, trigger_name });
+    }
+    (triggers, warnings)
+}
+
 /// Decode a TD `.bin` map image from disk.
 ///
 /// `expected_side` lets tests pin the decoded square size; production callers
@@ -1084,6 +1131,28 @@ pub fn scenario_to_game(
     mission.briefing = scenario.briefing.join("\n");
     mission.player = scenario.player;
     mission.triggers = triggers;
+
+    // Build trigger name -> id map from [Trigs] parsed triggers.
+    let trigger_name_to_id: std::collections::HashMap<_, _> = scenario
+        .triggers
+        .iter()
+        .map(|t| (t.name.clone(), t.id))
+        .collect();
+
+    // Wire [CellTriggers] cell -> trigger name to mission.cell_triggers cell -> trigger id.
+    for cell_trigger in &scenario.cell_triggers {
+        match trigger_name_to_id.get(&cell_trigger.trigger_name) {
+            Some(&trigger_id) => {
+                mission.cell_triggers.insert(cell_trigger.cell, trigger_id);
+            }
+            None => {
+                report.warnings.push(format!(
+                    "[CellTriggers] unknown trigger name '{}' for cell {}, skipping",
+                    cell_trigger.trigger_name, cell_trigger.cell
+                ));
+            }
+        }
+    }
     for (index, text) in scenario.objectives.iter().enumerate() {
         mission.add_objective(index as u32 + 1, text.clone());
     }

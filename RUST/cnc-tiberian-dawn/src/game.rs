@@ -2352,10 +2352,56 @@ impl Game {
                     return;
                 }
             }
-        }
+        } // Close the for id in due loop
+
         // Discoveries are edge events: evaluated once, then cleared so a
         // trigger fires on the discovery rather than on every later tick.
         self.discovered_cells.clear();
+
+        // Cell triggers: fire when a friendly/player unit enters/occupies the cell.
+        // Check all player-owned units for cell trigger entry.
+        let player_owner = self.player_owner;
+        let fired_cells: Vec<u32> = self
+            .units
+            .iter()
+            .filter(|unit| unit.owner == player_owner && unit.is_alive())
+            .filter_map(|unit| {
+                let cell = Vec2i::new(
+                    (unit.position.x.to_f32() / TILE_SIZE).floor() as i32,
+                    (unit.position.y.to_f32() / TILE_SIZE).floor() as i32,
+                );
+                if cell.x < 0 || cell.y < 0 {
+                    return None;
+                }
+                let cell_index = (cell.y as u32) * self.map.width + (cell.x as u32);
+                if cell_index >= self.map.width * self.map.height {
+                    return None;
+                }
+                // Check if this cell has a trigger and it hasn't fired yet
+                if self.mission.cell_triggers.contains_key(&cell_index)
+                    && !self.mission.fired_cell_triggers.contains(&cell_index)
+                {
+                    Some(cell_index)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for cell_index in fired_cells {
+            if let Some(&trigger_id) = self.mission.cell_triggers.get(&cell_index) {
+                // Fire the trigger
+                let actions = self.mission.fire(trigger_id);
+                for action in actions {
+                    self.apply_mission_action(&action);
+                    if self.mission.is_over() {
+                        return;
+                    }
+                }
+                // Mark as fired (idempotent)
+                self.mission.fired_cell_triggers.insert(cell_index);
+            }
+        }
     }
 
     fn apply_mission_action(&mut self, action: &Action) {
@@ -4896,7 +4942,10 @@ mod trigger_apply_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mission::MissionOutcome;
+    use crate::scenario_loader::{parse_scenario, scenario_to_game};
     use cnc_asset::{AtlasStyle, SpriteAtlas};
+    use cnc_core::IniFile;
     use cnc_renderer::SoftwareRenderer;
 
     struct CountingRenderer {
@@ -5022,6 +5071,137 @@ mod tests {
         assert!(
             !game.any_discovery_pending(),
             "a discovery must not re-fire every tick"
+        );
+    }
+
+    #[test]
+    fn celltrigger_fires_when_unit_enters() {
+        // Build a scenario with a CellTrigger that fires a Win action
+        // when a friendly unit enters cell 100 (row 1, col 36 on 64-wide map).
+        let ini_text = r#"
+[Basic]
+Name=CellTriggerTest
+Player=0
+Credits=8000
+TechLevel=7
+Theater=Temperate
+
+[CellTriggers]
+100=CellTriggerWin
+
+[TRIGGER]
+CellTriggerWin=Time,Win,0,,,-1,0
+"#;
+
+        let ini = IniFile::parse(ini_text).expect("INI parses");
+        let scenario = parse_scenario(&ini).expect("scenario parses");
+        let (mut game, _report) = scenario_to_game(&scenario, None);
+
+        // Spawn a player unit at cell 99 (adjacent to trigger cell 100)
+        let start_cell = Vec2i::new(35, 1);
+        game.spawn_unit_at(0, UnitType::InfantryE1, start_cell);
+
+        // Move the unit into cell 100
+        let trigger_cell = Vec2i::new(36, 1);
+        game.units[0].target = Some(Game::cell_center(trigger_cell.x, trigger_cell.y));
+
+        // Update mission - the trigger should fire
+        game.update_mission(Fixed16_16::ZERO);
+
+        // The win action should have executed
+        assert_eq!(
+            game.mission.outcome,
+            Some(MissionOutcome::Victory),
+            "cell trigger should fire when unit enters the cell"
+        );
+
+        // Firing again should be idempotent (once=true default)
+        game.update_mission(Fixed16_16::ZERO);
+        assert_eq!(
+            game.mission.outcome,
+            Some(MissionOutcome::Victory),
+            "trigger fires once, idempotent"
+        );
+    }
+
+    #[test]
+    fn celltrigger_malformed_cell_number_warns_and_skips() {
+        let ini_text = r#"
+[Basic]
+Name=CellTriggerTest
+Player=0
+Credits=8000
+TechLevel=7
+Theater=Temperate
+
+[CellTriggers]
+not_a_number=CellTriggerWin
+
+[TRIGGER]
+CellTriggerWin=Time,Win,0,,,-1,0
+"#;
+
+        let ini = IniFile::parse(ini_text).expect("INI parses");
+        let scenario = parse_scenario(&ini).expect("scenario parses");
+
+        // Malformed cell number reported as a parse warning
+        assert!(
+            scenario
+                .warnings
+                .iter()
+                .any(|w| w.contains("CellTriggers") && w.contains("not_a_number")),
+            "malformed cell number should produce a warning, got {:?}",
+            scenario.warnings
+        );
+        // No cell trigger binding survives
+        let (game, _report) = scenario_to_game(&scenario, None);
+        assert!(
+            game.mission.cell_triggers.is_empty(),
+            "malformed cell trigger should be skipped"
+        );
+    }
+    #[test]
+    fn celltrigger_unknown_trigger_name_warns_and_skips() {
+        let ini_text = r#"
+[Basic]
+Name=CellTriggerTest
+Player=0
+Credits=8000
+TechLevel=7
+Theater=Temperate
+
+[CellTriggers]
+100=NonExistentTrigger
+
+[TRIGGER]
+CellTriggerWin=Time,Win,0,,,-1,0
+"#;
+
+        let ini = IniFile::parse(ini_text).expect("INI parses");
+        let scenario = parse_scenario(&ini).expect("scenario parses");
+        let (game, report) = scenario_to_game(&scenario, None);
+
+        // Unknown trigger name reported in the conversion report
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("NonExistentTrigger")),
+            "unknown trigger name should produce a warning, got {:?}",
+            report.warnings
+        );
+        // The cell is not bound to any trigger
+        assert!(
+            !game.mission.cell_triggers.contains_key(&100),
+            "unknown trigger should be skipped"
+        );
+        // The declared TRIGGER record still installs normally
+        assert!(
+            game.mission
+                .triggers
+                .iter()
+                .any(|t| t.name == "CellTriggerWin"),
+            "the declared trigger itself is unaffected"
         );
     }
 

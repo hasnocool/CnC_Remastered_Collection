@@ -36,7 +36,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use cnc_core::{Fixed16_16, IniFile, IniSection, Vec2i};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use crate::game::Game;
@@ -439,6 +439,12 @@ pub struct Mission {
     /// Optional scenario settings applied by [`Game::start_mission`].
     pub tech_level: Option<u8>,
     pub starting_credits: Option<i32>,
+    /// Cell triggers from `[CellTriggers]`: cell index -> trigger id.
+    #[serde(default)]
+    pub cell_triggers: std::collections::HashMap<u32, u32>,
+    /// Cell triggers that have already fired (for idempotent firing).
+    #[serde(default)]
+    pub fired_cell_triggers: std::collections::HashSet<u32>,
     fired_order: Vec<u32>,
 }
 
@@ -457,6 +463,8 @@ impl Mission {
             flags: BTreeSet::new(),
             tech_level: None,
             starting_credits: None,
+            cell_triggers: HashMap::new(),
+            fired_cell_triggers: HashSet::new(),
             fired_order: Vec::new(),
         }
     }
