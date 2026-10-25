@@ -15,16 +15,29 @@ use cnc_core::{Fixed16_16, Vec2, Vec2i};
 use cnc_renderer::{Renderer, Sprite, TILESET_TEXTURE_ID};
 
 /// Colour for a terrain id (editor-only placeholder palette).
+///
+/// Indexed by the `TerrainType` discriminants directly, NOT modulo a table
+/// size: the old `PALETTE[value % 6]` wrapped every id >=6 onto the wrong
+/// colour (Rough -> grass green, Ice -> sand, Mud/Swamp -> water blue).
 pub fn terrain_color(value: u8) -> [f32; 4] {
-    const PALETTE: [[f32; 4]; 6] = [
-        [0.28, 0.32, 0.22, 1.0],
-        [0.42, 0.36, 0.22, 1.0],
-        [0.30, 0.42, 0.30, 1.0],
-        [0.36, 0.38, 0.44, 1.0],
-        [0.22, 0.30, 0.46, 1.0],
-        [0.52, 0.48, 0.30, 1.0],
+    const PALETTE: [[f32; 4]; 15] = [
+        [0.28, 0.32, 0.22, 1.0], // 0 Grass
+        [0.22, 0.30, 0.46, 1.0], // 1 Water
+        [0.52, 0.48, 0.30, 1.0], // 2 Sand
+        [0.42, 0.36, 0.22, 1.0], // 3 Dirt
+        [0.36, 0.38, 0.44, 1.0], // 4 Rock
+        [0.82, 0.84, 0.86, 1.0], // 5 Snow
+        [0.40, 0.38, 0.33, 1.0], // 6 Rough
+        [0.31, 0.26, 0.18, 1.0], // 7 Mud
+        [0.24, 0.21, 0.17, 1.0], // 8 Crater
+        [0.19, 0.17, 0.15, 1.0], // 9 Scorched
+        [0.27, 0.31, 0.24, 1.0], // 10 Swamp
+        [0.77, 0.85, 0.90, 1.0], // 11 Ice
+        [0.48, 0.48, 0.48, 1.0], // 12 Concrete
+        [0.23, 0.30, 0.22, 1.0], // 13 ForestFloor
+        [0.22, 0.29, 0.21, 1.0], // 14 JungleFloor
     ];
-    PALETTE[(value as usize) % PALETTE.len()]
+    PALETTE[(value as usize).min(PALETTE.len() - 1)]
 }
 
 /// Colour for a placed object: buildings warm, units cool.

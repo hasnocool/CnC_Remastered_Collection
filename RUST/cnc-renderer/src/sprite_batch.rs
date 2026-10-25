@@ -116,12 +116,20 @@ fn vs_main(
     // clamped to a valid layer here and skipped in the fragment shader.
     let layer = min(instance.texture_id, 1u);
     let atlas = max(frame.atlas_sizes[layer].xy, vec2<f32>(1.0, 1.0));
-    // Inset the UV rect by half a texel on every side. Terrain tiles are drawn
-    // at cell size + 0.5 to hide seams between neighbouring quads; without the
-    // inset the outermost fragment sampled the first texel column of the NEXT
-    // atlas tile, leaving a 1px sliver of foreign art on tile edges.
-    let uv0 = (instance.uv_rect.xy + vec2<f32>(0.5, 0.5)) / atlas;
-    let uv1 = max(instance.uv_rect.zw - vec2<f32>(0.5, 0.5), instance.uv_rect.xy) / atlas;
+    // Inset the UV rect to avoid sampling the neighbouring atlas tile's first
+    // texel column (a 1px sliver of foreign art on tile edges). The inset is
+    // HALF A TEXEL IN QUAD SPACE ONLY WHEN the quad is drawn at the sprite's
+    // native texel size: at any other zoom a fixed half-texel inset crops the
+    // art, because the quad covers more screen pixels than texels and the
+    // outermost fragment maps to a texel centre that lies outside the inset.
+    // Inset in texels scales with texels-per-quad-pixel so edges are never cut:
+    //   inset_texels = 0.5 * (native_texels / drawn_quad_pixels)
+    // clamped to a quarter extent so it can never invert the rect.
+    let rect_wh = max(instance.uv_rect.zw - instance.uv_rect.xy, vec2<f32>(1.0, 1.0));
+    let texels_per_quad_px = rect_wh / max(instance.size, vec2<f32>(1.0, 1.0));
+    let inset = min(0.5 * texels_per_quad_px, rect_wh * 0.25);
+    let uv0 = (instance.uv_rect.xy + inset) / atlas;
+    let uv1 = max(instance.uv_rect.zw - inset, instance.uv_rect.xy + inset) / atlas;
     let uv_pixels = mix(uv0, uv1, corner);
     var out: VertexOutput;
     out.clip_position = frame.view_proj * vec4<f32>(world, 0.0, 1.0);

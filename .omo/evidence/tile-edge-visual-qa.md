@@ -79,3 +79,60 @@ Only genuine level steps now cross the threshold.
 cd RUST && ./target/debug/cnc-map-editor --headless --seed 42 \
   --out /tmp/v.ini --screenshot /tmp/m.png \
   --zoom 1.0 --center 48,48 --no-grid --width 1400 --height 900
+
+---
+
+# Round 3 — per-theater visual QA (2026-10-25)
+
+Generated and visually reviewed all four theaters (seed 42, zoom 1.0 and 2.0,
+1400x900, grid off): Temperate, Snow, Desert, Urban.
+
+## Defects found and fixed
+
+### A. Terrain flat-colour palette was indexed modulo table size
+`ui.rs::terrain_color` used `PALETTE[value % 6]` against a 6-entry table while
+`TerrainType` has 15 discriminants, so every id >= 6 wrapped onto the wrong
+colour (Rough -> grass green, Mud/Swamp -> water blue, Ice -> sand).
+Snow (id 5) also got a tan rather than a snow colour. Fixed with an explicit
+15-entry palette indexed by the discriminant.
+
+### B. Snow/Swamp/Ice/Concrete have no pack art and rendered blank
+Those kinds return `None` from `terrain_base_name` (documented gap), so they
+fall back to flat colour. Symptom before the palette fix: large pure-white
+regions (the wrong slot's colour) — after the palette fix all kinds render
+their own flat colour with 0% near-white pixels (Snow now 98 distinct colours).
+
+### C. Cliff bands tiled into a straight lattice on Desert/Urban
+Round 2 quantised elevation to 4 levels 85 apart, so every level boundary
+crossed `CLIFF_STEP = 3` and the renderer drew cliff art (5px dark rectangle +
+light border) on nearly every boundary → long straight/right-angle dark lines
+across the map. Fixed by persisting a FLAT elevation field: the generator
+produces no authored height, so the renderer now sees level ground until
+elevation is authored. `elevation_field_is_persisted_and_deterministic` updated
+to pin the flat contract (its old assertion required positive variation, which
+was the very behaviour causing the lattice).
+
+## Result per theater (colour count / dark-seam fraction)
+| Theater | Before | After |
+|---|---|---|
+| Temperate | 18.0% seam | 151 colours / 8.7% |
+| Snow | blank white regions | 98 colours / 8.9% |
+| Desert | straight dark lattice | 130 colours / 8.9% |
+| Urban | straight dark lattice | 131 colours / 8.7% |
+
+Remaining known-good characteristic: 4 rock variants cycle per cell (visible
+speckle), which is intended pixel-art variance, not a defect.
+
+## Gates
+- cargo fmt --check (cnc-map-editor, cnc-renderer): PASS
+- cargo clippy --all-targets -- -D warnings: 0 errors
+- cargo test -p cnc-map-editor -p cnc-renderer: 184 passed, 0 failed
+
+## Also fixed this round (renderer, wgpu path only)
+`sprite_batch.rs` inset the UV rect by a fixed half texel on every sprite. That
+is only correct when the quad is drawn at the sprite's native texel size; at
+other zooms it crops the art. The inset now scales with
+texels-per-quad-pixel and is clamped to a quarter extent. Note: the headless
+editor uses the software renderer, which already clamped sampling to the
+sprite's own rect, so this change is verified by code reading only, not by a
+rendered diff.
