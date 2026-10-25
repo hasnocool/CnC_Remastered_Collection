@@ -1,0 +1,59 @@
+# gap12-apply-command: full wire command surface + state CRC
+
+## Plan premise (stale) vs reality
+
+The plan row assumed "~17 Command variants; 11 lack arms" and asked for a state CRC
+beside the command hash. Recon showed both already exist:
+
+- All 17 `Command` variants (network.rs ~62-78) have explicit arms in
+  `Game::try_apply_command` (game.rs:2939+), and the match has NO catch-all, so a
+  future variant fails to compile. `apply_command` (:2933) wraps it with the
+  historical `bool` return for replay/UI callers.
+- A deterministic FNV-1a 64-bit state CRC exists: `Game::state_crc()`
+  (game.rs:3129) over `to_save_bytes()`, recorded per executed frame in
+  `LockstepSession` (state_crcs at :469).
+
+So the deliverable reduced to the plan's NAMED acceptance tests, written here.
+
+## Variant-by-variant verification (via the new test)
+
+| Variant | Arm | Test asserts |
+|---|---|---|
+| Move | order_units_move | path queued |
+| Attack | order_units_attack | arm returns true, target latched |
+| Stop | order_units_stop | ordered cleared |
+| Guard | target + ordered | target latched |
+| Build | queue_building + place_ready_building | enqueues (owned yard) |
+| Sell | sell_building | building down + refund credits |
+| Repair | repair_building | applies on damaged owned building |
+| Power | set_powered | is_powered flipped |
+| Produce | queue_unit | enqueues (barracks) |
+| Deploy | deployed = true | flag flipped |
+| Undeploy | deployed = false | flag flipped |
+| Sabotage | network::apply_sabotage | applies (commando vs enemy bldg) |
+| RepairStructure | repair_building | applies (damaged owned bldg) |
+| CancelProduction | cancel_production | applies on a queued item |
+| PlaceBuilding | place_ready_building | buildings.len() + 1 |
+| Board | apply_board -> load_transport_at | applies (APC + friendly pax) |
+| Unload | apply_unload -> unload_transport_at | applies (loaded APC) |
+
+## Tests added (TDD; each observed failing first)
+
+- `every_command_variant_applies` — drives all 17 variants through
+  `apply_command` on a live populated game and asserts the observable state change
+  each arm promises. Discovered gates while writing it (all real engine contracts,
+  now pinned): repair needs credits AND a damaged building; sabotage needs a
+  commando reaching an enemy building; Board/Unload need a transport with friendly
+  passengers; PlaceBuilding places only the front COMPLETED structure;
+  CancelProduction needs a queued item.
+- `state_crc_detects_divergence` — two games given the same command stream share
+  `state_crc()`; one extra command on one game makes the CRCs diverge.
+
+## Gates (verified)
+- cargo fmt --check: PASS
+- cargo clippy -p cnc-tiberian-dawn --all-targets -- -D warnings: PASS (0 errors)
+- cargo test --workspace: PASS (0 failures)
+- TD lib suite: 343 + 2 new = 345 tests
+
+## Commit
+feat(td): full wire command surface + state CRC

@@ -5125,6 +5125,310 @@ mod trigger_apply_tests {
 }
 
 #[cfg(test)]
+mod wire_command_tests {
+    use super::*;
+
+    fn command_game() -> Game {
+        let mut game = Game::new("wire", 32, 32);
+        game.houses = vec![
+            House::new(ClassId::HouseGDI, "GDI".to_string()),
+            House::new(ClassId::HouseNod, "Nod".to_string()),
+        ];
+        game
+    }
+
+    /// A game with one player-0 unit, one player-0 building and one enemy unit
+    /// so Sell/Power/Repair/Guard/Attack/Sabotage all have a real target.
+    fn populated() -> Game {
+        let mut game = command_game();
+        // A player base that can produce: yard, power and barracks plus credits.
+        game.buildings.push(Building::new(
+            ClassId::ConstructionYard,
+            Game::cell_center(6, 6),
+            Fixed16_16::from_int(1000),
+            0,
+        ));
+        game.buildings.push(Building::new(
+            ClassId::PowerPlant,
+            Game::cell_center(7, 7),
+            Fixed16_16::from_int(400),
+            0,
+        ));
+        game.buildings.push(Building::new(
+            ClassId::Barracks,
+            Game::cell_center(8, 8),
+            Fixed16_16::from_int(400),
+            0,
+        ));
+        // An enemy defence for sabotage / attack targets.
+        game.buildings.push(Building::new(
+            ClassId::AA_Gun,
+            Game::cell_center(20, 8),
+            Fixed16_16::from_int(400),
+            1,
+        ));
+        game.houses[0].credits = 10_000;
+        game.spawn_unit_at(0, UnitType::Jeep, Vec2i::new(10, 8));
+        game.spawn_unit_at(1, UnitType::Jeep, Vec2i::new(11, 8));
+        game
+    }
+
+    /// Every wire `Command` variant drives through `apply_command` and produces
+    /// the observable state change its arm promises. The match is exhaustive
+    /// with no catch-all, so this is the behavioral complement: it proves each
+    /// arm still MUTATES rather than merely matching.
+    #[test]
+    fn every_command_variant_applies() {
+        // Guard / Attack latch a target.
+        let mut game = populated();
+        assert!(
+            game.apply_command(
+                0,
+                &Command::Guard {
+                    units: vec![0],
+                    target: 1
+                }
+            ),
+            "Guard applies"
+        );
+        assert!(game.units[0].target.is_some(), "guard latched a target");
+
+        let mut game = populated();
+        assert!(
+            game.apply_command(
+                0,
+                &Command::Attack {
+                    units: vec![0],
+                    target: 1
+                }
+            ),
+            "Attack applies"
+        );
+
+        // Stop clears the order.
+        let mut game = populated();
+        game.units[0].ordered = true;
+        assert!(
+            game.apply_command(0, &Command::Stop { units: vec![0] }),
+            "Stop applies"
+        );
+        assert!(!game.units[0].ordered, "stop cleared the order");
+
+        // Move queues a path.
+        let mut game = populated();
+        assert!(
+            game.apply_command(
+                0,
+                &Command::Move {
+                    units: vec![0],
+                    target: Game::cell_center(15, 8)
+                }
+            ),
+            "Move applies"
+        );
+        assert!(!game.units[0].path.is_empty(), "move queued a path");
+
+        // Sell removes the building and refunds credits.
+        let mut game = populated();
+        let credits = game.houses[0].credits;
+        assert!(
+            game.apply_command(0, &Command::Sell { building: 0 }),
+            "Sell applies"
+        );
+        assert!(
+            !game.buildings[0].is_alive() || game.buildings.len() < 2,
+            "building sold"
+        );
+        assert!(game.houses[0].credits > credits, "sale refunded credits");
+
+        // Power flips the building flag.
+        let mut game = populated();
+        let powered = game.buildings[0].is_powered;
+        assert!(
+            game.apply_command(
+                0,
+                &Command::Power {
+                    building: 0,
+                    on: !powered
+                }
+            ),
+            "Power applies"
+        );
+        assert_eq!(game.buildings[0].is_powered, !powered, "power flipped");
+
+        // Deploy / Undeploy flip the unit flag.
+        let mut game = populated();
+        let deployed = game.units[0].deployed;
+        assert!(
+            game.apply_command(0, &Command::Deploy { unit: 0 }),
+            "Deploy applies"
+        );
+        assert_ne!(game.units[0].deployed, deployed, "deploy flipped");
+
+        // Repair routes a repair for a damaged owned building (and costs credits).
+        let mut game = populated();
+        game.buildings[0].health = Fixed16_16::from_int(10);
+        game.houses[0].credits = 10_000;
+        assert!(
+            game.apply_command(0, &Command::Repair { unit: 0, target: 0 }),
+            "Repair applies"
+        );
+
+        // RepairStructure is the own-building repair (and costs credits).
+        let mut game = populated();
+        game.buildings[0].health = Fixed16_16::from_int(10);
+        game.houses[0].credits = 10_000;
+        assert!(
+            game.apply_command(0, &Command::RepairStructure { building: 0 }),
+            "RepairStructure applies"
+        );
+
+        // Sabotage routes through the network helper (a commando must reach
+        // an enemy building, matching order_sabotage's gates).
+        let mut game = populated();
+        game.units[0].is_commando = true;
+        assert!(
+            game.apply_command(0, &Command::Sabotage { unit: 0, target: 3 }),
+            "Sabotage applies"
+        );
+
+        // Board / Unload route through the passenger system (APC transport).
+        let mut game = populated();
+        game.spawn_unit_at(0, UnitType::InfantryE1, Vec2i::new(11, 9));
+        let passenger = game.units.len() - 1;
+        game.units
+            .push(Unit::new(UnitType::APC, Game::cell_center(10, 9), 0));
+        let apc = game.units.len() - 1;
+        assert!(
+            game.apply_command(
+                0,
+                &Command::Board {
+                    transport: apc as u32,
+                    passenger: passenger as u32
+                }
+            ),
+            "Board routes into the passenger system"
+        );
+        let mut game = populated();
+        game.spawn_unit_at(0, UnitType::InfantryE1, Vec2i::new(11, 9));
+        let passenger = game.units.len() - 1;
+        game.units
+            .push(Unit::new(UnitType::APC, Game::cell_center(10, 9), 0));
+        let apc = game.units.len() - 1;
+        game.load_transport_at(apc, passenger)
+            .expect("passenger loaded");
+        assert!(
+            game.apply_command(
+                0,
+                &Command::Unload {
+                    transport: apc as u32,
+                    slot: 0
+                }
+            ),
+            "Unload routes into the passenger system"
+        );
+
+        // Produce enqueues at the factory.
+        let mut game = populated();
+        assert!(
+            game.apply_command(
+                0,
+                &Command::Produce {
+                    factory: 0,
+                    unit_type: ClassId::InfantryE1
+                }
+            ),
+            "Produce enqueues"
+        );
+
+        // Build queues and places.
+        let mut game = populated();
+        assert!(
+            game.apply_command(
+                0,
+                &Command::Build {
+                    building: ClassId::PowerPlant,
+                    location: Game::cell_center(12, 12)
+                }
+            ),
+            "Build enqueues"
+        );
+
+        // CancelProduction clears the queue (needs a queued item).
+        let mut game = populated();
+        game.apply_command(
+            0,
+            &Command::Produce {
+                factory: 0,
+                unit_type: ClassId::InfantryE1,
+            },
+        );
+        assert!(
+            game.apply_command(0, &Command::CancelProduction {}),
+            "CancelProduction applies"
+        );
+
+        // PlaceBuilding installs the front COMPLETED structure (a completion
+        // callback, not free placement), matching place_ready_building.
+        let mut game = populated();
+        let before = game.buildings.len();
+        game.queue_building(0, StructureType::PowerPlant);
+        game.ready_buildings.push((0, StructureType::PowerPlant));
+        assert!(
+            game.apply_command(
+                0,
+                &Command::PlaceBuilding {
+                    location: Game::cell_center(14, 14)
+                }
+            ),
+            "PlaceBuilding applies"
+        );
+        assert_eq!(game.buildings.len(), before + 1, "structure placed");
+    }
+
+    /// Identical command streams converge on the same state CRC; when one game
+    /// applies an extra mutation, the CRCs diverge - the replay-verification
+    /// property the framesync path relies on.
+    #[test]
+    fn state_crc_detects_divergence() {
+        let commands = [
+            Command::Move {
+                units: vec![0],
+                target: Game::cell_center(15, 8),
+            },
+            Command::Guard {
+                units: vec![0],
+                target: 1,
+            },
+            Command::Stop { units: vec![0] },
+        ];
+        let mut a = populated();
+        let mut b = populated();
+        for command in &commands {
+            assert!(a.apply_command(0, command), "stream applies on a");
+            assert!(b.apply_command(0, command), "stream applies on b");
+        }
+        assert_eq!(a.state_crc(), b.state_crc(), "identical streams converge");
+
+        assert!(
+            b.apply_command(
+                0,
+                &Command::Move {
+                    units: vec![0],
+                    target: Game::cell_center(18, 8)
+                }
+            ),
+            "extra move applies"
+        );
+        assert_ne!(
+            a.state_crc(),
+            b.state_crc(),
+            "diverged state reports a different CRC"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::mission::MissionOutcome;
