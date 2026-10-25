@@ -1,0 +1,75 @@
+# Evidence: Gap 3 - RA [Houses] + [Base] consumption in Game::from_original_scenario
+
+## Test
+- `ra_scenario_base_and_credits_applied` - PASSED
+
+## What was implemented
+
+### 1. Added ReinforcementEdge enum to house.rs
+- Mirrors HOUSE.CPP Edge field
+- Supports: North, East, South, West, Air, Visible, EnemyBase, HomeBase
+- Includes `from_name()` parser for INI tokens
+
+### 2. Extended House struct with new fields (house.rs)
+- `max_units: u32` - HOUSE.CPP MaxUnit
+- `max_buildings: u32` - HOUSE.CPP MaxBuilding  
+- `max_infantry: u32` - HOUSE.CPP MaxInfantry
+- `max_vessels: u32` - HOUSE.CPP MaxVessel
+- `edge: ReinforcementEdge` - HOUSE.CPP Edge
+
+### 3. Modified Game::from_original_scenario (game.rs)
+- Applies per-house credits/limits from `scenario.houses`:
+  - Credits (scaled by 100 per HOUSE.CPP)
+  - TechLevel
+  - MaxUnit/MaxBuilding/MaxInfantry/MaxVessel
+  - Edge (reinforcement entry point)
+- Places `[Base]` build-order nodes for `base_player`:
+  - Parses type_name via `parse_class_id`
+  - Validates it's a building
+  - Checks cell bounds
+  - Checks cell occupancy (alive structures + ground units)
+  - Warns and skips on unknown type, non-building, OOB, or occupied cell
+  - Spawns structure at base cell for base_player
+
+### 4. Test scenario
+```ini
+[Basic]
+Name=Test
+Player=Greece
+[Houses]
+0=Greece
+1=USSR
+[Greece]
+Credits=100
+MaxUnit=10
+MaxBuilding=20
+[USSR]
+Credits=200
+MaxUnit=15
+MaxBuilding=25
+[Base]
+Player=Greece
+0=POWR,16
+1=BARR,17
+```
+
+### 5. Verified behavior
+- Greece house gets 10000 credits, max_units=10, max_buildings=20
+- USSR house gets 20000 credits, max_units=15, max_buildings=25
+- POWR (PowerPlant) spawns at cell 16 -> (0, 2) for owner 0
+- BARR (Barracks) spawns at cell 17 -> (1, 2) for owner 0
+- Unknown base node types warn and skip (never panic)
+- Occupied cells warn and skip (nearest free cell acceptable per spec)
+- Out of bounds cells warn and skip
+
+## Gates
+- `cargo fmt --check -p cnc-red-alert` ✓
+- `CARGO_BUILD_JOBS=2 cargo clippy -p cnc-red-alert --all-targets -- -D warnings` ✓
+- `CARGO_BUILD_JOBS=2 cargo test -p cnc-red-alert` ✓ (225 tests passed)
+
+## Files modified
+- RUST/cnc-red-alert/src/house.rs
+- RUST/cnc-red-alert/src/game.rs
+
+## Commit
+feat(ra): consume houses and base sections

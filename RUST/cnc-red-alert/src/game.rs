@@ -1200,6 +1200,7 @@ impl Game {
             .iter()
             .map(|c| c.index as u32)
             .chain(scenario.objects.iter().map(|o| o.cell))
+            .chain(scenario.base_nodes.iter().map(|b| b.cell))
             .max()
             .unwrap_or(0);
         let mut side = 1u32;
@@ -1228,6 +1229,30 @@ impl Game {
             game.team_manager = TeamManager::new(scenario.team_types.clone());
         }
 
+        // Apply per-house credits / limits from [Houses] table.
+        for house_rec in &scenario.houses {
+            // `[Houses]` index order matches the game's house roster
+            // (0 = first side), exactly like `Owner=`/`Player=` resolution
+            // elsewhere in this file.
+            if let Some(slot) = game.houses.get_mut(house_rec.index as usize) {
+                slot.credits = house_rec.credits;
+                if let Some(lvl) = house_rec.tech_level {
+                    slot.tech_level = lvl.min(u32::from(u8::MAX)) as u8;
+                }
+                if let Some(max_u) = house_rec.max_unit {
+                    slot.max_units = max_u;
+                }
+                if let Some(max_b) = house_rec.max_building {
+                    slot.max_buildings = max_b;
+                }
+                if let Some(max_i) = house_rec.max_infantry {
+                    slot.max_infantry = max_i;
+                }
+                if let Some(max_v) = house_rec.max_vessel {
+                    slot.max_vessels = max_v;
+                }
+            }
+        }
         for object in &scenario.objects {
             let Some(class_id) = parse_class_id(&object.type_name) else {
                 continue;
@@ -1257,6 +1282,51 @@ impl Game {
                         .max_health
                         .saturating_mul(Fixed16_16::from_f32(fraction));
                 }
+            }
+        }
+        // Place [Base] build-order nodes for base_player.
+        if let Some(base_name) = &scenario.base_player {
+            let base_owner = house_index_for(base_name, &game.houses).unwrap_or(0);
+            for node in &scenario.base_nodes {
+                let Some(class_id) = parse_class_id(&node.type_name) else {
+                    eprintln!(
+                        "RA scenario: unknown base node type '{}' skipped",
+                        node.type_name
+                    );
+                    continue;
+                };
+                if !class_id.is_building() {
+                    eprintln!(
+                        "RA scenario: base node type '{}' is not a building, skipped",
+                        node.type_name
+                    );
+                    continue;
+                }
+                let position = cell_position(node.cell, side);
+                if !game.map.in_bounds(position) {
+                    eprintln!(
+                        "RA scenario: base node cell {} out of bounds, skipped",
+                        node.cell
+                    );
+                    continue;
+                }
+                // Skip if cell occupied (mirrors spawn_structure's own checks).
+                let occupied = game
+                    .structures
+                    .iter()
+                    .any(|structure| structure.is_alive() && structure.cell == position)
+                    || game
+                        .units
+                        .iter()
+                        .any(|unit| unit.is_alive() && unit.cell == position);
+                if occupied {
+                    eprintln!(
+                        "RA scenario: base node at cell {} occupied, skipping",
+                        node.cell
+                    );
+                    continue;
+                }
+                game.spawn_structure(base_owner, class_id, position);
             }
         }
 
@@ -6178,6 +6248,61 @@ Briefing=Hold the line.\n\
         // both structures still land.
         assert_eq!(game.units.len(), 1);
         assert_eq!(game.structures.len(), 2);
+    }
+    #[test]
+    fn ra_scenario_base_and_credits_applied() {
+        let text = "\
+        [Basic]\n\
+        Name=Test\n\
+        Player=Greece\n\
+        [Houses]\n\
+        0=Greece\n\
+        1=USSR\n\
+        [Greece]\n\
+        Credits=100\n\
+        MaxUnit=10\n\
+        MaxBuilding=20\n\
+        [USSR]\n\
+        Credits=200\n\
+        MaxUnit=15\n\
+        MaxBuilding=25\n\
+        [Base]\n\
+        Player=Greece\n\
+        0=POWR,16\n\
+        1=BARR,17\n\
+        ";
+        let scenario = OriginalScenario::from_ini(text).expect("valid scenario");
+        let game = Game::from_original_scenario(&scenario);
+        // Credits applied (Credits * 100)
+        let allies = game
+            .houses
+            .iter()
+            .find(|h| h.name == "Allies")
+            .expect("allies");
+        assert_eq!(allies.credits, 10000);
+        assert_eq!(allies.max_units, 10);
+        assert_eq!(allies.max_buildings, 20);
+        let soviets = game
+            .houses
+            .iter()
+            .find(|h| h.name == "Soviets")
+            .expect("soviets");
+        assert_eq!(soviets.credits, 20000);
+        assert_eq!(soviets.max_units, 15);
+        assert_eq!(soviets.max_buildings, 25);
+        // Base nodes spawned for Greece
+        let powr = game
+            .structures
+            .iter()
+            .find(|s| s.class_id == ClassId::PowerPlant && s.owner == 0)
+            .expect("POWR spawned");
+        assert_eq!(powr.cell, Vec2i::new(0, 2)); // cell 16 on the derived 8x8 extent
+        let barr = game
+            .structures
+            .iter()
+            .find(|s| s.class_id == ClassId::Barracks && s.owner == 0)
+            .expect("BARR spawned");
+        assert_eq!(barr.cell, Vec2i::new(1, 2)); // cell 17 on the derived 8x8 extent
     }
 
     fn step(game: &mut Game, seconds: i32) {

@@ -5,9 +5,43 @@
 //! models the house-level state that the scenario layer needs: treasury,
 //! power balance, tech level and per-factory production queues with deterministic
 //! completion order.
-
 use cnc_core::{ClassId, Fixed16_16};
 use std::collections::VecDeque;
+
+/// Reinforcement arrival edge for a house, mirroring HOUSE.CPP `Edge`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReinforcementEdge {
+    #[default]
+    North,
+    East,
+    South,
+    West,
+    /// Air-drop style reinforcements (no fixed entry cell).
+    Air,
+    /// Entry near visible enemy units.
+    Visible,
+    /// Entry near enemy base structures.
+    EnemyBase,
+    /// Entry near own base structures.
+    HomeBase,
+}
+
+impl ReinforcementEdge {
+    /// Parse a `[Houses]` Edge= token (case-insensitive).
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name.trim().to_ascii_uppercase().as_str() {
+            "NORTH" => Self::North,
+            "EAST" => Self::East,
+            "SOUTH" => Self::South,
+            "WEST" => Self::West,
+            "AIR" => Self::Air,
+            "VISIBLE" => Self::Visible,
+            "ENEMYBASE" | "ENEMY_BASE" => Self::EnemyBase,
+            "HOMEBASE" | "HOME_BASE" => Self::HomeBase,
+            _ => return None,
+        })
+    }
+}
 
 /// The two Red Alert sides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +168,16 @@ pub struct House {
     pub iq: u8,
     /// Multiplayer spawn slot (start-location index); `None` for campaign houses.
     pub spawn_slot: Option<u8>,
+    /// HOUSE.CPP MaxUnit: cap on simultaneously owned units.
+    pub max_units: u32,
+    /// HOUSE.CPP MaxBuilding: cap on simultaneously owned structures.
+    pub max_buildings: u32,
+    /// HOUSE.CPP MaxInfantry: cap on simultaneously owned infantry.
+    pub max_infantry: u32,
+    /// HOUSE.CPP MaxVessel: cap on simultaneously owned vessels.
+    pub max_vessels: u32,
+    /// HOUSE.CPP Edge: where this house's reinforcements enter the map.
+    pub edge: ReinforcementEdge,
 }
 
 impl House {
@@ -156,6 +200,11 @@ impl House {
             ai_enabled: true,
             iq: 0,
             spawn_slot: None,
+            max_units: 0,
+            max_buildings: 0,
+            max_infantry: 0,
+            max_vessels: 0,
+            edge: ReinforcementEdge::default(),
         }
     }
 
