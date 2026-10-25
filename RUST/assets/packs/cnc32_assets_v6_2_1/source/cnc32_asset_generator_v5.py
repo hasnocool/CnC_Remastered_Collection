@@ -158,10 +158,17 @@ def valid_blob_masks() -> list[int]:
 BLOB_MASKS = valid_blob_masks()  # 47 masks for a canonical 8-neighbour blob autotile.
 
 def terrain_transition(kind: str, same_mask: int, seed: str, alt_kind: str | None = None) -> Image.Image:
-    """Eight-neighbour blob autotile with material-specific, jagged boundaries.
+    """Terrain-to-terrain boundary with a diced (stippled) blend zone.
 
-    Every missing cardinal edge gets a deterministic irregular transition band;
-    diagonal bits control corner cut-outs when both adjacent cardinals connect.
+    The alternate terrain fills the tile and the primary terrain encroaches
+    along each open edge. The meeting line is DICED: the alt-ground pixels within
+    3 px of the boundary become a coin flip between the two terrains' light
+    tones, so the two grounds meet as interleaved pixels with no outline, no
+    shaped band and no trace seam - the pixel-art transition character of the
+    original games.
+
+    Mask semantics: a set bit means the neighbouring cell is the SAME terrain
+    (the connection continues); an absent bit receives a transition edge.
     """
     alt = alt_kind or {"grass":"dirt", "dirt":"grass", "rock":"dirt", "water":"sand", "sand":"water"}[kind]
     if alt == kind or alt not in ("grass", "dirt", "rock", "water", "sand"):
@@ -170,68 +177,93 @@ def terrain_transition(kind: str, same_mask: int, seed: str, alt_kind: str | Non
     primary = terrain_base(kind, seed + ":primary")
     rng = random.Random(stable_seed(f"{seed}:{kind}:{alt}:{same_mask}:edge"))
     n, ne, e, se, so, sw, w, nw = [(same_mask >> i) & 1 for i in range(8)]
-    # Thin irregular terrain edge: 2-4 px encroachment with a +/-1 px sawtooth.
-    # A wide band reads as a wall strip (the previous 6-8px pass looked like
-    # pipes); the original games keep terrain edges thin so the boundary reads
-    # as natural ground, while still being axis-aligned pixel art.
-    def profile(base: int, count: int, lo: int, hi: int) -> list[int]:
-        values=[]
+
+    # Primary encroachment per open edge: 3 px base with a shallow +/-1 sawtooth
+    # so the boundary is irregular rather than a straight cut.
+    def profile(count: int) -> list[int]:
+        values = []
+        base = 3
         for i in range(count):
-            if i % 4 == 0: base = max(lo, min(hi, base + rng.choice((-1, 0, 1))))
+            if i % 4 == 0:
+                base = max(2, min(4, base + rng.choice((-1, 0, 1))))
             values.append(base)
         return values
-    north = profile(3, TILE, 2, 4); south = profile(3, TILE, 2, 4)
-    west = profile(3, TILE, 2, 4); east = profile(3, TILE, 2, 4)
+    north = profile(TILE)
+    south = profile(TILE)
+    west = profile(TILE)
+    east = profile(TILE)
 
-    # Corners: a small nick (2-4 px) with a single 45-degree tip, matching the
-    # thin edge above. A large notch reads as a blocky cut-out; a small one reads
-    # as a natural corner nick where two edges meet.
-    notch = {"nw": rng.randrange(2, 5), "ne": rng.randrange(2, 5),
-             "sw": rng.randrange(2, 5), "se": rng.randrange(2, 5)}
-    mask = Image.new("L", (TILE,TILE), 0); px=mask.load()
+    # Corner nicks: a small 2-3 px cut from each corner whose diagonal is absent.
+    notch = {k: rng.randrange(2, 4) for k in ("nw", "ne", "sw", "se")}
+    inside = Image.new("L", (TILE, TILE), 0)
+    px = inside.load()
     for y in range(TILE):
         for x in range(TILE):
-            inside = True
-            if not n and y < north[x]: inside=False
-            if not so and y >= TILE-south[x]: inside=False
-            if not w and x < west[y]: inside=False
-            if not e and x >= TILE-east[y]: inside=False
-            # Chamfered corner notches: a compact pocket cut from the corner,
-            # axis-aligned with a single 45-degree tip. The legacy pack's
-            # wall_curve_ne is [(8,0),(8,8),(15,8)] - the same geometry scaled.
+            keep = True
+            if not n and y < north[x]:
+                keep = False
+            if not so and y >= TILE - south[x]:
+                keep = False
+            if not w and x < west[y]:
+                keep = False
+            if not e and x >= TILE - east[x]:
+                keep = False
             if not ne and n and e:
                 r = notch["ne"]
-                if x >= TILE-r and y < r and (TILE-1-x) + y >= r: inside=False
+                if x >= TILE - r and y < r and (TILE - 1 - x) + y >= r:
+                    keep = False
             if not se and e and so:
                 r = notch["se"]
-                if x >= TILE-r and y >= TILE-r and (TILE-1-x) + (TILE-1-y) >= r: inside=False
+                if x >= TILE - r and y >= TILE - r and (TILE - 1 - x) + (TILE - 1 - y) >= r:
+                    keep = False
             if not sw and so and w:
                 r = notch["sw"]
-                if x < r and y >= TILE-r and x + (TILE-1-y) >= r: inside=False
+                if x < r and y >= TILE - r and x + (TILE - 1 - y) >= r:
+                    keep = False
             if not nw and w and n:
                 r = notch["nw"]
-                if x < r and y < r and x + y >= r: inside=False
-            if inside: px[x,y]=255
-    im.paste(primary, (0,0), mask)
-    # Add a one-pixel edge shadow and a few material-specific transition pixels.
-    pix=im.load(); mp=mask.load()
-    # Edge shadow: a 50% blend of the two terrain darks rather than the raw
-    # dark palette entry. A hard black outline around every blob made
-    # same-terrain borders read as a dark lattice once tiles butted together.
-    dark_kind = PALETTE.get(kind + "_dark", PALETTE[kind])
-    dark_alt = PALETTE.get(alt + "_dark", PALETTE[alt])
-    edge_col = tuple((a + b) // 2 for a, b in zip(dark_kind, dark_alt))
+                if x < r and y < r and x + y >= r:
+                    keep = False
+            if keep:
+                px[x, y] = 255
+    im.paste(primary, (0, 0), inside)
+
+    # Dice the alt side of the boundary (and only there): no seam line remains.
+    mp = inside.load()
+    pix = im.load()
+    light_kind = PALETTE.get(kind + "_light", PALETTE[kind])
+    light_alt = PALETTE.get(alt + "_light", PALETTE[alt])
+    blend = 3
     for y in range(TILE):
         for x in range(TILE):
-            if mp[x,y] and ((x>0 and not mp[x-1,y]) or (x<TILE-1 and not mp[x+1,y]) or (y>0 and not mp[x,y-1]) or (y<TILE-1 and not mp[x,y+1])):
-                pix[x,y]=(*edge_col,255)
-    d=ImageDraw.Draw(im)
-    for _ in range(8):
-        x,y=rng.randrange(2,30),rng.randrange(2,30)
-        if mp[x,y] and rng.random()<.65:
-            light=PALETTE.get(kind+"_light",PALETTE[kind])
-            d.point((x,y), fill=(*light,255))
+            if mp[x, y]:
+                continue
+            # Distance to the nearest primary pixel along either axis.
+            if not (
+                (x > 0 and mp[x - 1, y])
+                or (x < TILE - 1 and mp[x + 1, y])
+                or (y > 0 and mp[x, y - 1])
+                or (y < TILE - 1 and mp[x, y + 1])
+            ):
+                continue
+            # Dice only the pixel directly behind the boundary, plus its two
+            # neighbours along the boundary direction. A wider walk spreads the
+            # stipple across the whole field, which reads as noise.
+            for dx, dy in ((0, 0), (1, 0), (0, 1)):
+                tx, ty = x + dx, y + dy
+                if not (0 <= tx < TILE and 0 <= ty < TILE):
+                    continue
+                if mp[tx, ty]:
+                    continue
+                pix[tx, ty] = (*light_kind, 255) if rng.random() < 0.5 else (*light_alt, 255)
+    # A few primary-side tips of alt tone bite into the encroachment.
+    d = ImageDraw.Draw(im)
+    for _ in range(6):
+        x, y = rng.randrange(TILE), rng.randrange(TILE)
+        if mp[x, y] and rng.random() < 0.6:
+            d.point((x, y), fill=(*light_alt, 255))
     return im
+
 
 def connected_road(mask: int, seed: str) -> Image.Image:
     """Connected dirt road with edge-to-edge arms, shoulders, caps and aggregate."""
