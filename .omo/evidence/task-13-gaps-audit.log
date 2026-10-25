@@ -1,0 +1,29 @@
+# gap re-audit (todo 13)
+
+## Gates (2026-10-24, HEAD ae89959)
+fmt --check: PASS (workspace)
+clippy --workspace --all-targets -- -D warnings: PASS (0 errors)
+
+## Per-crate test counts (cargo test -p <crate>)
+cnc-core:            186 passed, 0 failed suites
+cnc-red-alert:       252 passed, 0 failed suites
+cnc-tiberian-dawn:   382 passed, 0 failed suites
+cnc-audio:            98 passed, 0 failed suites
+cnc-map-editor:      164 passed, 0 failed suites
+cnc-events:           30 passed, 0 failed suites
+cnc-renderer:         20 passed, 0 failed suites
+cnc-launcher:        218 passed, 0 failed suites
+
+(remaining workspace crates — cnc-asset, cnc-net-directory, cnc-netcore, cnc-ai,
+cnc-music, cnc-sfx, cnc-console, cnc-replayer, cnc-bench, cnc-classic — green in the
+workspace run recorded in RUST/docs/PARITY_AUDIT_2026-10-24-GAPS.md)
+
+## Row verdicts
+See RUST/docs/PARITY_AUDIT_2026-10-24-GAPS.md §1 for the ten-row table with commits
+and evidence. Headline corrections the re-audit caught:
+
+- gap 5 (7090265) shipped a dead update loop; fixed 1f1c162.
+- gap 11 (d3fda61) shipped unbuildable code with nested-fake tests; fixed 4b3625d.
+- launcher TD EVA variant regression from the RA queue change; fixed ae89959.
+- plan targets bounded by engine rules (trigger families / EVA table rows without
+  in-engine conditions) documented rather than invented.
