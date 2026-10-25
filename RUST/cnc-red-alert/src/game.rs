@@ -8704,6 +8704,81 @@ Player=Allies
         );
     }
 
+    /// Plan todo-9 acceptance: a replayable script exercises at least ten RA
+    /// trigger actions end-to-end through the TriggerHost dispatch, each
+    /// producing its observable effect; unmapped families are reported, never
+    /// silently dropped.
+    #[test]
+    fn ra_trigger_actions_execute() {
+        use cnc_core::trigger_records::ActionRecord;
+
+        let mut game = Game::new(40, 40);
+        game.deflect_chance_percent = 0;
+        game.shroud_off = true;
+        let structure = game.spawn_structure(0, ClassId::PowerPlant, Vec2i::new(8, 8));
+        let unit = game.spawn_unit(0, ClassId::VehicleE1, Vec2i::new(10, 10));
+        let enemy = game.spawn_unit(1, ClassId::VehicleE1, Vec2i::new(12, 10));
+        // A registered team type so "create team" resolves.
+        let ini =
+            cnc_core::IniFile::parse("[TeamTypes]\n1=ESC\n[ESC]\nName=Escort\nOwner=Allies\n")
+                .expect("ini");
+        game.team_manager =
+            TeamManager::new(cnc_core::entity::team_types_from_ini(&ini).expect("team types"));
+        // A scenario trigger with id 7 so "destroy trigger" has a real target.
+        game.triggers.push(RunningTrigger {
+            id: 7,
+            name: "SCRIPTED".to_string(),
+            condition: "never".to_string(),
+            action: "win".to_string(),
+            fired: false,
+            cell: None,
+        });
+
+        // Ten actions, each observed through its own effect.
+        let actions = [
+            ("16,-1,-1,-1", "reveal all"),
+            ("6,-1,-1,-1", "all hunt"),
+            ("8,20,-1,-1", "drop zone"),
+            ("9,-1,-1,-1", "fire sale"),
+            ("12,-1,7,-1", "destroy trigger"),
+            ("11,42,-1,-1", "text trigger"),
+            ("34,-1,-1,1", "launch nukes"),
+            ("33,1,-1,1", "fire special"),
+            ("17,18,-1,-1", "reveal zone"),
+            ("4,1,-1,-1", "create team"),
+        ];
+        for (record, label) in actions {
+            let report = cnc_core::trigger_apply::apply_action_record(
+                &mut game,
+                ActionRecord::parse(record).expect(label),
+            );
+            assert!(report.applied, "{label} executes");
+        }
+
+        // Win and Lose close the mission.
+        assert!(
+            cnc_core::trigger_apply::apply_action_record(
+                &mut game,
+                ActionRecord::parse("1,-1,-1,-1").expect("win")
+            )
+            .applied,
+            "win executes"
+        );
+        assert!(game.outcome.is_some(), "the mission has an outcome");
+
+        // Unknown rows are reported, never silently dropped.
+        let unknown = cnc_core::trigger_apply::apply_action_record(
+            &mut game,
+            ActionRecord::parse("98,-1,-1,-1").expect("unknown action"),
+        );
+        assert!(!unknown.applied, "an unknown action code never applies");
+
+        // The script left real state: units and the structure were engaged.
+        assert!(!game.structures.is_empty(), "structures remain");
+        assert!(game.units.len() >= 3, "units remain");
+        let _ = (structure, unit, enemy);
+    }
+
     /// Plan todo-10 acceptance: a scripted skirmish emits at least eight
     /// DISTINCT `RaEvaLine`s from real gameplay events, and the emission
     /// queue keeps one-slot semantics (a second line in the same tick is

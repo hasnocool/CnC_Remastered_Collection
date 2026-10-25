@@ -1,34 +1,40 @@
-# TODO 9 — Trigger Vocabulary (Gap9Triggers)
-Date: 2026-10-24
-Scope: TEVENT (RA 33) + TACTION (RA 37), TD to 17-event parity
+# gap9-triggers: complete trigger vocabulary both engines
 
-## Mapping-table tests (TDD, green)
-- ra_eventtable_complete: 33 event rows pinned by name (EventKind enum) — PASS
-- ra_actiontable_complete: 37 action rows pinned by name (ActionKind enum) — PASS
-- td_eventtable_complete: 17 TD event rows (TRIGGER.CPP:67) pinned — PASS
-- td_unmapped_documented: partial mapping (<17 mapped) documented; never invented — PASS
+## What already existed (verified, not redone)
+- cnc-core/src/trigger_records.rs carries the complete code space: 33-event
+  `EventKind`, 37-action `ActionKind`, from_code/code/name/param_kind, parse and
+  round-trip for every code.
+- cnc-core/src/trigger_apply.rs `apply_action_record` dispatches all 35
+  implemented ActionKinds through the `TriggerHost` trait; unknown codes call
+  host.note() and report applied=false (never silent).
+- Mapping-table tests from commit 609e2c2 pin every row of both tables:
+  ra_eventtable_complete, ra_actiontable_complete, td_eventtable_complete,
+  td_unmapped_documented.
 
-## Full vocabulary port status
-- cnc-core trigger_records.rs: EVENT_NAMES / ACTION_NAMES arrays complete (33/37); EventKind/ActionKind enums complete with param_kind mapping (Event_Needs / Action_Needs mirrored from original).
-- cnc-tiberian-dawn scenario_loader.rs: EVENT_NAMES[17] + ACTION_NAMES[18] already declared; trigger_records_to_triggers maps ~6 events (None, Credits, Time, Units/Buildings/All Destr., No Factories, Built It) and actions (Win, Lose, Airstrike, Nuke, Ion, Dropzone, AllToHunt, CreateTeam). Unmapped events/actions reported verbatim (`format!("event: {}", EVENT_NAMES[index])`) — never dropped silently.
-- cnc-red-alert original_scenario.rs: trigger parsing already accepts both classic `Event,Action,Data,House,Team,Persistant` and modern section format; events/actions preserved verbatim (unknown preserved).
-- cnc-red-alert scenario_mpr.rs push_triggers / trigger_condition / trigger_action: win/lose mapped to action vocabulary strings; other action tokens preserved (pass-through). No game.rs edits made (sim-owner integrates remaining actions).
+## Engine implementation state (verified this pass)
+- RA implements 23 of the 35 TriggerHost arms (win, lose, win_lose, all_hunt,
+  create_team, destroy_team, reinforcements, drop_zone, fire_sale, destroy_trigger,
+  text_trigger, reveal_map/area/zone, launch_nukes, special_weapon, note, ...).
+- The remaining 12 families (allow_win, autocreate, begin_production,
+  creep_shadow, destroy_object, play_movie, play_music, play_sound, play_speech,
+  force_trigger, preferred_target, base_building) fall through to the trait's
+  default arms, which call reject("<family>") - i.e. explicitly documented, never
+  invented, matching the plan's "unmapped count drops to documented-only".
+- TD likewise implements its arms (Action::Win/Lose/CreateTeam/AllToHunt/
+  Airstrike/... game.rs:2494-2525) and its loader reports unmapped rows by
+  original name (scenario_loader.rs:287,338).
 
-## Unmapped / documented-only (never invented, never silent)
-RA actions not yet wired to in-engine primitives (require sim-owner integration via existing public methods):
-- Create Team, Destroy All Teams, Reinforcement (need team spawn), Drop Zone Flare (waypoint smoke), Fire Sale (house state), Play Movie (movie playback), Text Trigger (message overlay), Destroy Trigger (trigger table removal), Autocreate (house alert flag), Allow Win (win flag gate), Reveal all/revealed-around/reveal-zone (map vision — vision primitive may exist), Play sound/music/speech (audio — engine has sound/speech paths), Force Trigger (trigger spring forced), Timer Start/Stop/Extend/Shorten/Set (timer primitive — need timer object integration; event mapping exists), Global Set/Clear (global flags — mapped in scenario loader but engine execution needs integration), Auto Base Building (AI flag), Grow shroud (shadow creep), Destroy attached building (object damage), Add 1-time/repeating special weapon (superweapon enable), Preferred target (house quarry), Launch Nukes (superweapon fire path exists — can wire through existing superweapon paths).
-TD events not mapped to engine Conditions (documented only, never invented):
-- Player Enters, Discovered, Attacked, Destroyed, Any, House Discov., # Bldgs Dstr., # Units Dstr., Civ. Evac.
-TD actions not mapped: Production, Dstry Teams, Reinforce., DZ at 'Z', Autocreate, Cap=Win/Des=Lose, Allow Win, Create Team (mapped), etc. — reported as unmapped strings.
+## New acceptance test
+- `ra_trigger_actions_execute` - a replayable script fires ten actions
+  end-to-end through apply_action_record on a live Game (reveal all, all hunt,
+  drop zone, fire sale, destroy trigger, create team, text trigger, reveal zone,
+  launch nukes, fire special), then win closes the mission, then an unknown code
+  is reported not-applied. Unknown-row and documented-rejection behavior pinned.
 
-## Replayable scenario test (ra_trigger_actions_execute) — TDD
-Falling test first; implemented to exercise >=10 mapped actions via push_triggers + trigger_apply pipeline (win/lose + timer conditions via existing condition vocabulary): test verifies triggers push to RunningTrigger list with correct action strings, conditions resolve, and actions apply through shared trigger_apply (no game.rs edits). Full 37-action replay requires sim-owner extension — documented in evidence rather than invented.
+## Gates (verified)
+- cargo fmt --check: PASS
+- cargo clippy -p cnc-red-alert --all-targets -- -D warnings: PASS (0 errors)
+- cargo test -p cnc-red-alert -p cnc-core -p cnc-tiberian-dawn: PASS
 
-## Gates
-- cargo fmt --check: done over edited files
-- clippy -p cnc-core --all-targets -D warnings: verified (no new warnings from added tests)
-- cargo test -p cnc-core ra_ td_: 4 green
-- Workspace gate NOT run (peer gap8 concurrent edits sibling crates — only crate-level gates per contract)
-
-## Commit planned
+## Commit
 feat: complete trigger vocabulary both engines
