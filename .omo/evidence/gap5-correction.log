@@ -1,0 +1,30 @@
+# gap-5 correction: update-loop regression + test repair
+
+## Finding
+Gap 5 committed `7090265 feat(ra): projectiles with flight time, misses, splash`
+with the RA suite red (225 pass / 2 fail). Root causes:
+
+1. **Regression**: gap5's refactor dropped `self.update_unit_combat(delta)` from
+   `Game::update` (cnc-red-alert/src/game.rs:2091 now). Unit combat never ran, so
+   no unit ever fired and no unit took damage through the top-level `update()`.
+   Direct `update_unit_combat` callers (tests at 7863/7997/8032/8201) still worked,
+   which is why gap5's own new tests passed while full-`update` tests failed.
+   → Restored the call immediately before `update_projectiles(delta)`.
+
+2. **Test timing**: two pre-existing tests assumed instant damage:
+   - `combat_damages_and_removes_an_enemy` — unmodified logic still passes now that
+     unit combat runs again (damage lands within the 10-tick step: 350→260→170→80).
+   - `guard_retaliates_then_returns` — the guard's in-flight projectile keeps its
+     target set for its flight time, and walking further after clearing consumes
+     the return path. Test now steps until the target clears and asserts a
+     non-empty path at that point. Semantics unchanged (same expectations, wider
+     tick window only to accommodate flight time).
+
+## Gates (after fix)
+- cargo fmt --check: OK
+- CARGO_BUILD_JOBS=2 cargo clippy -p cnc-red-alert --all-targets -- -D warnings: OK
+- CARGO_BUILD_JOBS=2 cargo test -p cnc-red-alert: 227 + 1 + 14 = 242 passed, 0 failed
+- CARGO_BUILD_JOBS=2 cargo test --workspace: all 27 crate suites pass, 0 failures
+
+## Commit
+`fix(ra): restore update_unit_combat in the sim loop`

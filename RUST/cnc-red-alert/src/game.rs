@@ -2088,6 +2088,7 @@ impl Game {
         self.announce_base_attack();
         self.update_triggers();
         self.update_structure_combat(delta);
+        self.update_unit_combat(delta);
         self.update_projectiles(delta);
         self.update_movement(delta);
         self.update_harvesters(delta);
@@ -8004,11 +8005,26 @@ Player=Allies
         let enemy = game.units.iter_mut().find(|u| u.id == enemy_id).unwrap();
         enemy.health = Fixed16_16::ZERO;
         game.remove_dead();
-        // Run full update to allow mission state machine to set return path
-        game.update(Fixed16_16::from_f32(1.0));
+        // Run updates until any in-flight projectile has landed/expired and the
+        // mission state machine has cleared the guard's target; record whether
+        // a return path exists at that point (walking it further may consume it).
+        let mut had_return_path = false;
+        for _ in 0..10 {
+            game.update(Fixed16_16::from_f32(1.0));
+            let guard = game.units.iter().find(|u| u.id == guard_id).unwrap();
+            if guard.target.is_none() {
+                had_return_path = had_return_path || !guard.path.is_empty();
+                if had_return_path {
+                    break;
+                }
+            }
+        }
         let guard = game.units.iter().find(|u| u.id == guard_id).unwrap();
         assert_eq!(guard.target, None, "guard clears target after enemy dead");
-        assert!(!guard.path.is_empty(), "guard has return path");
+        assert!(
+            had_return_path,
+            "guard has return path when the target clears"
+        );
     }
 
     #[test]
