@@ -136,3 +136,38 @@ texels-per-quad-pixel and is clamped to a quarter extent. Note: the headless
 editor uses the software renderer, which already clamped sampling to the
 sprite's own rect, so this change is verified by code reading only, not by a
 rendered diff.
+
+---
+
+# Rounded terrain borders (2026-10-25, user request)
+
+User asked for terrain transitions (grass/dirt/etc.) to be rounded like the
+water shoreline instead of square-edged.
+
+## Cause
+`terrain_transition()` used two square devices:
+1. `profile()` with steps only every 3rd pixel - correct-ish, but the corner
+   cut-outs were straight diagonals: `if not ne and n and e and x >= TILE-5 and
+   y < 5 and x+y < 8` cuts a 45-degree *square stair* at each open diagonal.
+2. Water's `connected_shore()` reads organic because its banks use per-column
+   depths (5..9 with x%3 variation) and corners overlap into coves.
+
+## Fix (pack generator + regenerated atlas)
+- Corner cut-outs replaced with quarter-circle arcs: each open diagonal with
+  both adjacent cardinals connected now tests distance from a corner centre
+  `(x-cx)^2 + (y-cy)^2 < r^2` with a per-corner jittered radius 6..10, so the
+  seam between two transition edges is rounded like the shoreline's coves.
+- Depth profiles kept (they were fine); the arc + jitter is what removes the
+  square look.
+- Regenerated all 940 blob tiles in `terrain_transition.png`.
+
+## Verification
+- Before/after crop on `grass_to_dirt/blob_14`: the NEW tile shows a curved
+  grass lobe (quarter-arc bottom-right + a rounded hole) where the OLD tile had
+  straight diagonals and square stair-steps; 279 px changed.
+- In-game editor render (seed 42, zoom 1.0): terrain borders now curve (dirt
+  lobes arc, corners round).
+- Gates: cnc-asset 16/16 engine tests (incl. composition determinism),
+  cnc-map-editor suite green.
+NOTE: the grey region in the render is the rock base art (mean 115,115,107 with
+32 colours) - verified terrain, not a regression from this change.
