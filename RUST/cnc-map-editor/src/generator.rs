@@ -239,9 +239,16 @@ pub fn generate(settings: &MapGenSettings) -> MapModel {
             let m = moisture[index].clamp(0.0, 1.0);
             let terrain = classify(e, m, settings);
             model.terrain[index] = terrain.id();
-            // Persist the normalised elevation field (0-255) so the renderer
-            // can derive cliffs, ramps and plateaus later.
-            model.elevation[index] = (e * 255.0).round().clamp(0.0, 255.0) as u8;
+            // Persist the elevation field as DISCRETE levels (0-255) rather
+            // than the raw continuous fbm: a smooth gradient puts nearly
+            // every cell through the CLIFF_STEP threshold, so the renderer
+            // drew cliff art (filled dark bands + stroke lines) on the whole
+            // map, which tiled into a hatch lattice. Quantising means only
+            // genuine level steps cross the threshold; the smooth field
+            // still drives terrain classification.
+            const ELEVATION_LEVELS: u8 = 4;
+            let level = ((e * ELEVATION_LEVELS as f32).floor() as u8).min(ELEVATION_LEVELS - 1);
+            model.elevation[index] = level * (255 / ELEVATION_LEVELS);
 
             if terrain == TerrainType::Water {
                 continue;
