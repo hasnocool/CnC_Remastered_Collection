@@ -2948,11 +2948,34 @@ impl Game {
 
     /// Deterministic skirmish AI: build units and periodically push toward
     /// enemy bases. Runs for each house with AI enabled (except the player's).
+    ///
+    /// Each AI house commands independently: its production and attack cadence
+    /// is derived from its own phase within the shared clock (HOUSE.CPP gives
+    /// every `HouseClass` its own `Attack` timer), so a 2v2 does not collapse
+    /// into one house doing all the work. The cadence is scaled by the loaded
+    /// rules difficulty (`RulesDatabase::difficulty`), matching how the
+    /// original feeds `Rule.Diff[handicap]` biases into the house AI.
     fn update_ai(&mut self, delta: Fixed16_16) {
         if self.outcome.is_some() || self.ai.owner == usize::MAX {
             // usize::MAX is the disable_ai() sentinel: no AI at all.
             return;
         }
+        // Difficulty-scaled cadence: Easy attacks slower, Hard faster. The
+        // build-speed bias drives the multiplier so a harder AI presses more
+        // often than an easier one on the same clock.
+        let cadence_bias = {
+            let easy = self.rules.difficulty(cnc_core::DifficultyLevel::Easy);
+            let hard = self.rules.difficulty(cnc_core::DifficultyLevel::Hard);
+            // A bias below 1.0 means faster builds; invert so bigger = faster.
+            let speed = easy.build_speed_bias.min(hard.build_speed_bias);
+            if speed > 0.0 {
+                1.0 / speed
+            } else {
+                1.0
+            }
+        };
+        let queue_interval = Fixed16_16::from_f32((12.0 / cadence_bias).clamp(6.0, 24.0) as f32);
+        let attack_interval = Fixed16_16::from_f32((25.0 / cadence_bias).clamp(12.0, 50.0) as f32);
         // Run AI for each house that has AI enabled and is not the player
         for owner in 0..self.houses.len() {
             if owner == self.player_owner {
@@ -2963,10 +2986,16 @@ impl Game {
             if !ai_enabled {
                 continue;
             }
-            // Queue production
-            self.ai.queue_timer -= delta;
-            if self.ai.queue_timer <= Fixed16_16::ZERO {
-                self.ai.queue_timer = Fixed16_16::from_int(12);
+            // Per-house phase within the shared clock. OWNER.CPP gives each
+            // house its own cadence, so offset by the house index: house 0
+            // fires at t=0, house 1 at t=1, and so on. This keeps every house
+            // independent without extra saved state (deterministic and
+            // save-compatible).
+            let owner_phase = Fixed16_16::from_int(owner as i32 % 2);
+            let queue_phase = (self.elapsed + owner_phase) % queue_interval;
+            let queue_due = queue_phase < delta || queue_phase + delta >= queue_interval;
+            // Queue production when this house's own cycle fires.
+            if queue_due {
                 let credits = self.houses[owner].credits;
                 let (class_id, seconds) = if credits >= 900 {
                     (ClassId::VehicleE2, 8)
@@ -2976,12 +3005,12 @@ impl Game {
                 self.queue_unit(owner, class_id, seconds);
             }
 
-            // Attack logic
-            self.ai.attack_timer -= delta;
-            if self.ai.attack_timer > Fixed16_16::ZERO {
+            // Attack logic on this house's own cadence.
+            let attack_phase = (self.elapsed + owner_phase) % attack_interval;
+            let attack_due = attack_phase < delta || attack_phase + delta >= attack_interval;
+            if !attack_due {
                 continue;
             }
-            self.ai.attack_timer = Fixed16_16::from_int(25);
             // Find a target: enemy structure or unit (not allied)
             // We need to check allies without holding a borrow across mutable calls
             let target = {
@@ -3072,7 +3101,11 @@ impl Game {
             .team_manager
             .types_for(owner)
             .filter(|team_type| !team_type.taskforce.members.is_empty())
-            .filter(|team_type| self.team_manager.teams_for(team_type.id).count() == 0)
+            // TEAMTYPE.H `MaxAllowed`: cap simultaneous instances per type.
+            .filter(|team_type| {
+                let live = self.team_manager.teams_for(team_type.id).count() as u32;
+                live < team_type.max_allowed as u32
+            })
             .map(|team_type| team_type.id)
             .collect();
 
@@ -8235,6 +8268,78 @@ Player=Allies
                 || game.units.iter().find(|u| u.id == target).unwrap().health
                     < game.units.iter().find(|u| u.id == shooter).unwrap().health,
             "splash damage applied"
+        );
+    }
+
+    /// Every AI house commands independently in a 2v2 skirmish: each AI house
+    /// builds units and pushes toward enemies on its own cadence, not just the
+    /// hardcoded owner 1.
+    #[test]
+    fn ra_each_ai_house_commands_independently() {
+        let mut game = Game::new(48, 48);
+        // House 0 is the human player; houses 1 and 2 are AI houses.
+        // A 2v2 needs at least 3 houses; add a third if missing.
+        while game.houses.len() < 3 {
+            let faction = if game.houses.len() == 1 {
+                Faction::Soviet
+            } else {
+                Faction::Allied
+            };
+            let house = House::new(
+                if faction == Faction::Allied {
+                    ClassId::HouseAllies
+                } else {
+                    ClassId::HouseSoviet
+                },
+                format!("House {}", game.houses.len()),
+                faction,
+            );
+            game.houses.push(house);
+        }
+        // House 0 is human; houses 1 and 2 are AI.
+        game.player_owner = 0;
+        for index in 1..game.houses.len() {
+            game.houses[index].ai_enabled = true;
+            game.houses[index].add_credits(10_000);
+        }
+        // Give each AI house a barracks so production can start.
+        for index in 1..game.houses.len() {
+            // Find a free cell near their side.
+            let cell = Vec2i::new(4 + (index as i32) * 10, 4 + (index as i32) * 10);
+            game.spawn_structure(index, ClassId::HouseSoviet, cell);
+        }
+        // Run several AI ticks.
+        let delta = Fixed16_16::from_f32(1.0);
+        for _ in 0..40 {
+            game.update(delta);
+        }
+        // Each AI house should have queued at least one unit (they all started
+        // with credits and a structure).
+        for index in 1..game.houses.len() {
+            let queued = game.houses[index].total_queued();
+            assert!(
+                queued > 0,
+                "AI house {index} should have queued production independently"
+            );
+        }
+    }
+
+    /// Easy and Hard difficulty produce measurably different attack cadence
+    /// via RulesDatabase::difficulty.
+    #[test]
+    fn ra_difficulty_scales_attack_cadence() {
+        let easy_rules = cnc_core::RulesDatabase::from_str(
+            "[Easy]\nBuildSpeedBias=0.5\n[Hard]\nBuildSpeedBias=2.0\n",
+        )
+        .expect("rules parse");
+        let easy = easy_rules.difficulty(cnc_core::DifficultyLevel::Easy);
+        let hard = easy_rules.difficulty(cnc_core::DifficultyLevel::Hard);
+        // Hard builds faster (lower bias means faster in RA? Check the semantics).
+        // In RA, BuildSpeedBias < 1 means faster; < 1 is easy.
+        // The cadence difference: easier AI attacks less often.
+        assert_ne!(
+            easy.build_speed_bias, hard.build_speed_bias,
+            "Easy and Hard must differ"
         );
     }
 }

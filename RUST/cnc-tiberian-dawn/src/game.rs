@@ -2271,6 +2271,21 @@ impl Game {
         })
     }
 
+    /// Count of unassigned, living units of `class_id` owned by `owner`.
+    pub fn count_free_units_of_class(&self, owner: u8, class_id: ClassId) -> u32 {
+        let claimed = self.team_assigned_units();
+        self.units
+            .iter()
+            .enumerate()
+            .filter(|(index, unit)| {
+                unit.owner == owner
+                    && unit.is_alive()
+                    && unit.class_id == class_id
+                    && !claimed.contains(index)
+            })
+            .count() as u32
+    }
+
     /// Units already claimed by an active team.
     fn team_assigned_units(&self) -> std::collections::HashSet<usize> {
         self.team_manager

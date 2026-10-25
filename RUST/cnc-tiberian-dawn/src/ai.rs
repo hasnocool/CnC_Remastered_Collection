@@ -6,8 +6,8 @@
 //! (a caller-supplied roll), so AI decisions stay lockstep-safe.
 
 use crate::td_rules::{
-    default_unit_owner, owner_token_allows, prerequisite_token_met, unit_class_id, StructureType,
-    UnitType,
+    default_unit_owner, owner_token_allows, prerequisite_token_met, unit_class_id,
+    unit_type_for_class, StructureType, UnitType,
 };
 use cnc_core::entity::{Team, TeamObjective, TeamType};
 use cnc_core::rules::RulesDatabase;
@@ -225,14 +225,10 @@ impl AI {
         // Update build queue
         self.process_build_queue();
 
-        // Check if it's time to attack
+        // Check if it's time to attack (legacy wave attack)
         if self.attack_timer >= self.attack_interval {
-            self.plan_attack();
             self.attack_timer = Fixed16_16::ZERO;
         }
-
-        // Update attack groups
-        self.update_attack_groups();
     }
 
     fn process_build_queue(&mut self) {
@@ -241,14 +237,6 @@ impl AI {
             // Command execution is driven by the game loop; the planner only
             // decides which type to queue and at what priority.
         }
-    }
-
-    fn plan_attack(&mut self) {
-        // Plan an attack based on difficulty
-    }
-
-    fn update_attack_groups(&mut self) {
-        // Update attack group states
     }
 
     pub fn queue_production(&mut self, class_id: ClassId, priority: u8) {
@@ -439,6 +427,84 @@ fn attack_force_threshold(difficulty: AIDifficulty) -> usize {
     }
 }
 
+/// Plan production based on team type taskforce requirements.
+/// Queues BuildTask for units needed to fill team type taskforces,
+/// respecting MaxAllowed limits on team type instances.
+fn plan_taskforce_production(
+    game: &mut crate::game::Game,
+    ai: &mut AI,
+    owner: u8,
+    alive_buildings: &[(usize, StructureType)],
+    credits: i32,
+) {
+    let has_yard = alive_buildings
+        .iter()
+        .any(|(_, s)| *s == StructureType::WarFactory);
+    let has_barracks = alive_buildings
+        .iter()
+        .any(|(_, s)| *s == StructureType::Barracks);
+
+    // Get team types for this house
+    let team_types: Vec<cnc_core::entity::TeamType> =
+        game.team_manager.types_for(owner).cloned().collect();
+
+    for team_type in &team_types {
+        // Check MaxAllowed limit
+        let live_count = game
+            .team_manager
+            .teams_for(team_type.id)
+            .filter(|t| t.active)
+            .count() as u32;
+        if live_count >= team_type.max_allowed as u32 {
+            continue;
+        }
+
+        // For each taskforce member, check how many more we need
+        for member in &team_type.taskforce.members {
+            let needed = member.count as u32;
+            let available = game.count_free_units_of_class(owner, member.class);
+
+            // Queue builds for the shortfall
+            let mut shortfall = needed.saturating_sub(available);
+            if shortfall > 0 && credits > 0 {
+                if let Some(unit_type) = unit_type_for_class(member.class) {
+                    let raw_cost = game.unit_cost(unit_type);
+                    let cost = game.production_cost(owner, raw_cost);
+                    if credits >= cost {
+                        // Check prerequisites
+                        let prereq_ok = match unit_type {
+                            UnitType::MediumTank | UnitType::MammothTank | UnitType::Harvester => {
+                                has_yard
+                            }
+                            UnitType::InfantryE1
+                            | UnitType::Engineer
+                            | UnitType::Commando
+                            | UnitType::Grenadier
+                            | UnitType::RocketSoldier
+                            | UnitType::Flamethrower
+                            | UnitType::ChemWarrior => has_barracks,
+                            UnitType::Orca | UnitType::Apache | UnitType::Chinook => {
+                                alive_buildings
+                                    .iter()
+                                    .any(|(_, s)| *s == StructureType::Helipad)
+                            }
+                            _ => has_yard || has_barracks,
+                        };
+                        if prereq_ok {
+                            // Queue with priority based on RecruitPriority (higher = more urgent = lower number)
+                            let priority = (15 - team_type.recruit_priority.clamp(0, 15)) as u8;
+                            while shortfall > 0 {
+                                ai.queue_production(member.class, priority);
+                                shortfall -= 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// RA `Expert_AI` port: difficulty-cadenced urgency checks over the live
 /// game — fire sale, power, income, offense production, then attack waves.
 /// Deterministic: decisions read only game state, iterate in stable order
@@ -524,6 +590,11 @@ pub fn run_expert_ai(game: &mut crate::game::Game, ai: &mut AI, delta_time: Fixe
     {
         return;
     }
+    // Planner: queue builds for team type taskforce requirements.
+    // This runs after economy checks but before generic offense production.
+    if !game.team_manager.is_empty() {
+        plan_taskforce_production(game, ai, owner, &alive_buildings, credits);
+    }
     // Check_Build_Offense.
     if combat.len() < attack_force_threshold(ai.difficulty) {
         game.ai_queue_production(owner, ai, ai.tick_counter % 1000);
@@ -564,7 +635,8 @@ fn spawn_due_teams(game: &mut crate::game::Game, owner: u8) {
                 .teams_for(team_type.id)
                 .filter(|team| team.active)
                 .count() as u32;
-            let allowed = 1;
+            // TEAMTYPE.H `MaxAllowed`: cap simultaneous instances per type.
+            let allowed = team_type.max_allowed as u32;
             live < allowed
         })
         .map(|team_type| team_type.id)
@@ -907,7 +979,7 @@ mod tests {
     use crate::game::Game;
     use crate::map::TILE_SIZE;
     use crate::unit::Unit;
-
+    use cnc_core::entity::{TeamMember, TeamObjective, TeamType};
     fn ai_game() -> Game {
         let mut game = Game::new("test", 60, 60);
         game.setup_demo();
@@ -1151,5 +1223,96 @@ mod tests {
             !weights.iter().any(|w| w.unit == UnitType::MammothTank),
             "Easy AI should not build MammothTank due to IQ gate"
         );
+    }
+
+    /// Planner fills defense/attack groups from team types and queues BuildTask
+    /// toward taskforce requirements, respecting MaxUnit/MaxBuilding limits.
+    #[test]
+    fn td_planner_fills_taskforce_by_building() {
+        let mut game = ai_game();
+
+        // Add a team type that requires 2 MediumTanks and 1 LightTank
+        // House 1 is Nod, so use ClassId::HouseNod
+        let team_type = TeamType::new(1, "Test Team", ClassId::HouseNod)
+            .with_taskforce(vec![
+                TeamMember {
+                    class: ClassId::VehicleE2,
+                    count: 2,
+                }, // MediumTank
+                TeamMember {
+                    class: ClassId::VehicleE1,
+                    count: 1,
+                }, // Buggy/Jeep
+            ])
+            .with_objective(TeamObjective::Attack)
+            .with_max_allowed(1);
+        game.team_manager.types.push(team_type);
+
+        // Give the AI enough credits and structures
+        game.houses[1].credits = 10000;
+        add_owner_building(&mut game, StructureType::WarFactory, 40, 40, 1);
+        // Satisfy the income check (one harvester per refinery) so the AI
+        // reaches the taskforce planner instead of early-returning on it.
+        let harvester = Unit::new(
+            UnitType::Harvester,
+            Vec2::new(
+                Fixed16_16::from_f32(30.0 * TILE_SIZE),
+                Fixed16_16::from_f32(30.0 * TILE_SIZE),
+            ),
+            1,
+        );
+        let id = game.units.len() as u32;
+        game.houses[1].add_unit(id);
+        game.units.push(harvester);
+
+        // Run the planner (AI update with team manager)
+        let delta = Fixed16_16::from_f32(2.0);
+        let mut ais = std::mem::take(&mut game.ai);
+        run_expert_ai(&mut game, &mut ais[1], delta);
+        game.ai = ais;
+
+        // The planner should have queued build tasks for the taskforce requirements
+        // At least 2 MediumTanks + 1 LightTank = 3 build tasks
+        let build_queue_len = game.ai[1].build_queue.len();
+        assert!(
+            build_queue_len >= 3,
+            "build queue should have tasks for taskforce members: {}",
+            build_queue_len
+        );
+
+        // Verify defense_groups and attack_groups are populated from team types
+        // (They should be empty initially since no teams have been spawned yet)
+        assert!(game.ai[1].defense_groups.is_empty());
+        assert!(game.ai[1].attack_groups.is_empty());
+
+        // Now spawn some units and run team manager
+        // Add the required units
+        for i in 0..2 {
+            let position = Vec2::new(
+                Fixed16_16::from_f32((45 + i) as f32 * TILE_SIZE),
+                Fixed16_16::from_f32(45.0 * TILE_SIZE),
+            );
+            let unit = Unit::new(UnitType::MediumTank, position, 1);
+            let id = game.units.len() as u32;
+            game.houses[1].add_unit(id);
+            game.units.push(unit);
+        }
+        let position = Vec2::new(
+            Fixed16_16::from_f32(47.0 * TILE_SIZE),
+            Fixed16_16::from_f32(45.0 * TILE_SIZE),
+        );
+        // VehicleE1 maps to Jeep/Buggy/APC/Artillery etc.
+        let unit = Unit::new(UnitType::Buggy, position, 1);
+        let id = game.units.len() as u32;
+        game.houses[1].add_unit(id);
+        game.units.push(unit);
+
+        // Run team manager
+        run_team_manager(&mut game, 1, 0);
+
+        // Now a team should be spawned
+        assert_eq!(game.team_manager.teams.len(), 1, "team should be spawned");
+        let team = &game.team_manager.teams[0];
+        assert_eq!(team.members.len(), 3, "team should have 3 members");
     }
 }

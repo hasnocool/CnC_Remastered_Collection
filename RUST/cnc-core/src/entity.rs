@@ -260,6 +260,18 @@ pub struct TeamType {
     /// is alerted (`TACTION_AUTOCREATE`, original `IsAutocreate`).
     #[serde(default)]
     pub autocreate: bool,
+    /// `RecruitPriority=` INI flag: priority for recruiting members (0-15).
+    #[serde(default)]
+    pub recruit_priority: i32,
+    /// `MaxAllowed=` INI flag: max simultaneous instances of this team type.
+    #[serde(default)]
+    pub max_allowed: u8,
+    /// `InitNum=` INI flag: initial number of this team type at scenario start.
+    #[serde(default)]
+    pub init_num: u8,
+    /// `Fear=` INI flag: fear level (0-15) - higher = more cautious.
+    #[serde(default)]
+    pub fear: u8,
 }
 
 impl TeamType {
@@ -276,9 +288,12 @@ impl TeamType {
             objective: TeamObjective::None,
             active_at_start: true,
             autocreate: false,
+            recruit_priority: 0,
+            max_allowed: 1,
+            init_num: 0,
+            fear: 0,
         }
     }
-
     /// Replace the taskforce members.
     pub fn with_taskforce(mut self, members: Vec<TeamMember>) -> Self {
         self.taskforce.members = members;
@@ -300,6 +315,30 @@ impl TeamType {
     /// Replace the objective.
     pub fn with_objective(mut self, objective: TeamObjective) -> Self {
         self.objective = objective;
+        self
+    }
+
+    /// Set the `RecruitPriority=` flag (0-15).
+    pub fn with_recruit_priority(mut self, priority: i32) -> Self {
+        self.recruit_priority = priority;
+        self
+    }
+
+    /// Set the `MaxAllowed=` flag (max simultaneous instances).
+    pub fn with_max_allowed(mut self, max: u8) -> Self {
+        self.max_allowed = max;
+        self
+    }
+
+    /// Set the `InitNum=` flag (initial team count at scenario start).
+    pub fn with_init_num(mut self, init: u8) -> Self {
+        self.init_num = init;
+        self
+    }
+
+    /// Set the `Fear=` flag (fear level 0-15).
+    pub fn with_fear(mut self, fear: u8) -> Self {
+        self.fear = fear;
         self
     }
 
@@ -684,6 +723,10 @@ pub fn team_types_from_ini(ini: &IniFile) -> Result<Vec<TeamType>> {
             objective,
             active_at_start: section_bool(section, "Active", true),
             autocreate: section_bool(section, "Autocreate", false),
+            recruit_priority: section_i32(section, "RecruitPriority", 0),
+            max_allowed: section_u8(section, "MaxAllowed", 1),
+            init_num: section_u8(section, "InitNum", 0),
+            fear: section_u8(section, "Fear", 0),
         });
     }
     Ok(types)
@@ -807,11 +850,26 @@ fn ini_item_text(value: &crate::ini::IniValue) -> String {
 fn section_string<'s>(section: &'s IniSection, key: &str) -> Option<&'s str> {
     section.get_ci(key).and_then(|value| value.as_string())
 }
-
 fn section_bool(section: &IniSection, key: &str, default: bool) -> bool {
     section
         .get_ci(key)
         .and_then(|value| value.as_bool().ok())
+        .unwrap_or(default)
+}
+
+fn section_i32(section: &IniSection, key: &str, default: i32) -> i32 {
+    section
+        .get_ci(key)
+        .and_then(|value| value.as_i64().ok())
+        .map(|v| v as i32)
+        .unwrap_or(default)
+}
+
+fn section_u8(section: &IniSection, key: &str, default: u8) -> u8 {
+    section
+        .get_ci(key)
+        .and_then(|value| value.as_i64().ok())
+        .map(|v| v as u8)
         .unwrap_or(default)
 }
 

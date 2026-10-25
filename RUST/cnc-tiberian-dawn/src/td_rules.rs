@@ -1171,10 +1171,10 @@ pub fn unit_type_for_class(class_id: ClassId) -> Option<UnitType> {
         ClassId::InfantryE10 => Some(UnitType::Commando),
         ClassId::VehicleE1 => {
             // VehicleE1 maps to many unit types; return the first match.
-            // The full mapping is: Jeep, MediumTank, MammothTank, APC, Artillery,
-            // MLRS, StealthTank, FlameTank, MobileHQ, Triceratops, Trex, Raptor, Stegosaurus
-            // We check each known unit type's class_id instead.
-            None
+            // The full mapping is: Jeep, Buggy, APC, Artillery, StealthTank, FlameTank,
+            // MobileHQ, Triceratops, Trex, Raptor, Stegosaurus
+            // Return Jeep as the default light vehicle.
+            Some(UnitType::Jeep)
         }
         ClassId::VehicleE2 => Some(UnitType::MediumTank),
         ClassId::VehicleE4 => Some(UnitType::MammothTank),

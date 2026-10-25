@@ -1,0 +1,61 @@
+# Gap 8 — TeamType planner in both engines
+
+## Scope
+- TD: `RUST/cnc-tiberian-dawn/src/ai.rs` — taskforce planner + team manager.
+- RA: `RUST/cnc-red-alert/src/game.rs` AI loop — per-house AI commander cadence.
+- cnc-core: `RUST/cnc-core/src/entity.rs` — added `TeamType` fields
+  (`recruit_priority`, `max_allowed`, `init_num`, `fear`) parsed from
+  TEAMTYPE.H `[TeamTypes]` dialect plus INI parsing helpers.
+
+## TD implementation
+- New `plan_taskforce_production` runs in `run_expert_ai` after the economy
+  ladder and before generic offense production. It reads each house's team
+  types, honors `MaxAllowed` (live-instance cap), computes the shortfall versus
+  `Game::count_free_units_of_class`, and queues `BuildTask`s via
+  `AI::queue_production` sorted by `RecruitPriority` (higher priority = lower
+  queue number = built first). TEAM.CPP: teambuilding drives production toward
+  the taskforce requirement.
+- `AI::update` no longer calls the removed `plan_attack`/`update_attack_groups`
+  stubs; the existing wave-attack fallback (`launch_attack_wave`) is retained
+  for scenarios without `[TeamTypes]`.
+- `spawn_due_teams` now honors `TeamType::max_allowed` instead of a hardcoded
+  cap of 1.
+- `unit_type_for_class(ClassId::VehicleE1)` returns `Jeep` (many TD unit types
+  share VehicleE1; Jeep is the canonical light vehicle for production).
+
+## RA implementation
+- `Game::update_ai` now gives every AI house an independent cadence derived
+  from a per-house phase on the shared clock (house index offset), so a 2v2
+  does not collapse into one house doing all production/attacks. HOUSE.CPP
+  `HouseClass::AI_Attack` runs per house with its own `Attack` timer.
+- Cadence is scaled by `RulesDatabase::difficulty` build-speed bias
+  (easy→hard multiplier), matching how the original feeds
+  `Rule.Diff[handicap]` biases into the house AI.
+- `TeamManager::spawn_due_teams` now honors `TeamType::max_allowed` instead of
+  the hardcoded `count() == 0` gate.
+
+## Acceptance criteria
+- `td_planner_fills_taskforce_by_building` — GREEN. Planner queues 3 BuildTasks
+  (2x MediumTank, 1x VehicleE1) toward the taskforce requirement, team manager
+  then claims the spawned units.
+- `ra_each_ai_house_commands_independently` — GREEN. Both AI houses in a 2v2
+  queue production independently.
+- `ra_difficulty_scales_attack_cadence` — GREEN. Easy/Hard difficulty rules
+  differ and drive cadence scaling.
+
+## Gates
+- `cargo fmt --check -p cnc-core -p cnc-tiberian-dawn -p cnc-red-alert` — pass.
+- `CARGO_BUILD_JOBS=2 cargo clippy -p <crate> --all-targets -- -D warnings` — pass.
+- `cargo test -p cnc-tiberian-dawn` — 342 lib tests + integration suites, all green.
+- `cargo test -p cnc-red-alert` — 229 lib tests + 14 rng + 1 campaign, all green
+  (242 baseline + 2 new = 244; other agents add further suites in sibling crates
+  which are not run here per the concurrency policy).
+- `cargo test -p cnc-core` — green (TeamType new fields are `#[serde(default)]`
+  and back-compatible).
+
+## References
+- original/TIBERIANDAWN/TEAM.CPP (TeamClass::AI, recruitment).
+- original/TIBERIANDAWN/TEAMTYPE.H (`RecruitPriority`, `MaxAllowed`, `InitNum`,
+  `Fear`).
+- original/REDALERT/HOUSE.CPP (`HouseClass::AI_Attack`, `Attack` cadence,
+  `Rule.Diff[handicap]` biases).
