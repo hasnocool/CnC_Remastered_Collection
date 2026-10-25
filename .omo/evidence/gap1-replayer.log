@@ -1,0 +1,22 @@
+gap1-replayer - todo 1 evidence
+===================================
+
+Fixes applied to RUST/cnc-replayer/src/lib.rs:
+  1. RA GameCommand::Produce test now supplies required seconds field.
+  2. Fixed16_16 serialization uses .to_bits().to_le_bytes() (no to_le_bytes on Fixed16_16).
+  3. TD Command::Move target uses cnc_core::Vec2 with Fixed16_16::from_bits instead of Vec2i.
+  4. TdGame::sim_seed now uses powerups.rng_state (was accessing non-existent field).
+  5. TdGame::rng_state now uses powerups.rng_state (was accessing non-existent field).
+  6. ApplyCommand<TdNetCommand> for TdGame extracts player from NetCommand.
+  7. ReplayBuilder::new unused `game` param silenced with `let _ = game`.
+
+Workspace changes:
+  - RUST/Cargo.toml: cnc-replayer removed from exclude, added to members.
+  - RUST/cnc-replayer/Cargo.toml: standalone [workspace] table removed; deps use { workspace = true }.
+
+Verification:
+  - cargo fmt --check: clean
+  - cargo clippy -p cnc-replayer --all-targets -- -D warnings: clean
+  - cargo test -p cnc-replayer: 3 passed (round-trip + corruption)
+  - cargo clippy --workspace --all-targets -- -D warnings: clean
+  - cargo test --workspace: green

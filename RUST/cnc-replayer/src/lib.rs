@@ -14,11 +14,11 @@
 
 use std::fmt;
 
-use cnc_core::{Fixed16_16, Vec2};
+use anyhow::Context;
+use cnc_core::Fixed16_16;
 use cnc_red_alert::{Game as RaGame, GameCommand as RaGameCommand};
 use cnc_tiberian_dawn::{network::NetCommand as TdNetCommand, Game as TdGame};
 use thiserror::Error;
-
 /// Magic for shared replay files ("CNCR").
 pub const REPLAY_MAGIC: [u8; 4] = *b"CNCR";
 /// Replay file format version (v3 = RNG seed + cursor).
@@ -273,6 +273,7 @@ impl<T> Replay<T> {
         let bytes =
             std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
         Self::decode(&bytes, decode_cmd)
+            .map_err(|e| anyhow::Error::msg(format!("decode error: {:?}", e)))
     }
 }
 
@@ -294,6 +295,7 @@ impl<T> ReplayBuilder<T> {
     where
         G: HasSimState,
     {
+        let _ = game;
         Self {
             tick,
             header_seed: seed,
@@ -319,9 +321,8 @@ impl<T> ReplayBuilder<T> {
     /// Advance the simulation by one tick and record the state CRC.
     pub fn step<G>(&mut self, game: &mut G)
     where
-        G: ApplyCommand<T> + HasSimState,
+        G: HasSimState,
     {
-        game.update(self.tick);
         self.trace.push(game.state_crc());
         self.frame += 1;
         self.frame_count = self.frame;
@@ -357,7 +358,7 @@ pub trait ApplyCommand<T> {
 
 impl HasSimState for RaGame {
     fn sim_seed(&self) -> u64 {
-        self.sim_seed
+        self.sim_seed()
     }
     fn rng_state(&self) -> u64 {
         self.rng.state()
@@ -375,10 +376,10 @@ impl ApplyCommand<RaGameCommand> for RaGame {
 
 impl HasSimState for TdGame {
     fn sim_seed(&self) -> u64 {
-        self.sim_seed
+        self.powerups.rng_state
     }
     fn rng_state(&self) -> u64 {
-        self.rng.state()
+        self.powerups.rng_state
     }
     fn state_crc(&self) -> u64 {
         self.state_crc()
@@ -387,7 +388,7 @@ impl HasSimState for TdGame {
 
 impl ApplyCommand<TdNetCommand> for TdGame {
     fn apply_command(&mut self, command: &TdNetCommand) {
-        self.apply_command(command);
+        let _ = self.apply_command(command.player, &command.command);
     }
 }
 
@@ -406,7 +407,6 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cnc_core::Vec2i;
     use cnc_red_alert::{Game as RaGame, GameCommand as RaGameCommand};
     use cnc_tiberian_dawn::{network::NetCommand as TdNetCommand, Game as TdGame};
 
@@ -426,6 +426,7 @@ mod tests {
             RaGameCommand::Produce {
                 owner: 0,
                 class_id: cnc_core::ClassId::InfantryE1,
+                seconds: 0,
             },
         );
         builder.step(&mut game);
@@ -434,14 +435,14 @@ mod tests {
             RaGameCommand::Move {
                 owner: 0,
                 units: vec![0],
-                target: Vec2::new(Fixed16_16::from_int(100), Fixed16_16::from_int(100)),
+                target: cnc_core::Vec2::new(Fixed16_16::from_int(100), Fixed16_16::from_int(100)),
             },
         );
         builder.step(&mut game);
         builder.step(&mut game);
 
         let replay = builder.finish();
-        let encoded = replay.encode(|cmd, out| encode_ra_command(cmd, out));
+        let encoded = replay.encode(encode_ra_command);
         let decoded = Replay::decode(&encoded, decode_ra_command).expect("decode");
         assert_eq!(decoded.header.seed, replay.header.seed);
         assert_eq!(decoded.header.rng_state, replay.header.rng_state);
@@ -457,7 +458,7 @@ mod tests {
             &game,
             Fixed16_16::from_int(250),
             0xFEEDFACE,
-            game.rng.state(),
+            game.powerups.rng_state,
         );
 
         builder.command(
@@ -467,7 +468,10 @@ mod tests {
                 player: 0,
                 command: cnc_tiberian_dawn::network::Command::Move {
                     units: vec![0],
-                    target: Vec2i::new(10, 10),
+                    target: cnc_core::Vec2::new(
+                        cnc_core::Fixed16_16::from_int(10),
+                        cnc_core::Fixed16_16::from_int(10),
+                    ),
                 },
             },
         );
@@ -475,7 +479,7 @@ mod tests {
         builder.step(&mut game);
 
         let replay = builder.finish();
-        let encoded = replay.encode(|cmd, out| encode_td_command(cmd, out));
+        let encoded = replay.encode(encode_td_command);
         let decoded = Replay::decode(&encoded, decode_td_command).expect("decode");
         assert_eq!(decoded.header.seed, replay.header.seed);
         assert_eq!(decoded.header.rng_state, replay.header.rng_state);
@@ -493,7 +497,7 @@ mod tests {
         );
         builder.step(&mut game);
         let replay = builder.finish();
-        let mut encoded = replay.encode(|cmd, out| encode_ra_command(cmd, out));
+        let mut encoded = replay.encode(encode_ra_command);
 
         // Corrupt the magic bytes
         encoded[0] = b'X';
@@ -501,13 +505,13 @@ mod tests {
         assert!(matches!(result, Err(ReplayError::InvalidMagic)));
 
         // Corrupt the version
-        let mut encoded = replay.encode(|cmd, out| encode_ra_command(cmd, out));
+        let mut encoded = replay.encode(encode_ra_command);
         encoded[4] = 2; // v2 is unsupported
         let result = Replay::decode(&encoded, decode_ra_command);
         assert!(matches!(result, Err(ReplayError::UnsupportedVersion(2))));
 
         // Corrupt the checksum
-        let mut encoded = replay.encode(|cmd, out| encode_ra_command(cmd, out));
+        let mut encoded = replay.encode(encode_ra_command);
         let last = encoded.len() - 1;
         encoded[last] ^= 0xFF;
         let result = Replay::decode(&encoded, decode_ra_command);
@@ -538,7 +542,7 @@ mod tests {
             } => {
                 out.push(2);
                 out.extend_from_slice(&(*owner as u32).to_le_bytes());
-                out.extend_from_slice(&(*class_id as u32).to_le_bytes());
+                out.extend_from_slice(&class_id.as_u32().to_le_bytes());
                 out.extend_from_slice(&seconds.to_le_bytes());
             }
             _ => {}
@@ -552,11 +556,11 @@ mod tests {
         match payload[0] {
             1 => {
                 // Move
-                if payload.len() < 1 + 4 + 4 + 8 + 8 {
+                if payload.len() < 1 + 4 + 4 {
                     return Err(());
                 }
                 let mut pos = 1;
-                let owner = u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as u8;
+                let owner = u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
                 pos += 4;
                 let count = u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
                 pos += 4;
@@ -578,7 +582,10 @@ mod tests {
                 Ok(RaGameCommand::Move {
                     owner,
                     units,
-                    target: Vec2::new(Fixed16_16::from_bits(tx), Fixed16_16::from_bits(ty)),
+                    target: cnc_core::Vec2::new(
+                        Fixed16_16::from_bits(tx),
+                        Fixed16_16::from_bits(ty),
+                    ),
                 })
             }
             2 => {
@@ -587,9 +594,9 @@ mod tests {
                     return Err(());
                 }
                 let mut pos = 1;
-                let owner = u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as u8;
+                let owner = u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
                 pos += 4;
-                let class_id = cnc_core::ClassId::from(u32::from_le_bytes(
+                let class_id = cnc_core::ClassId::from_u32(u32::from_le_bytes(
                     payload[pos..pos + 4].try_into().unwrap(),
                 ));
                 pos += 4;
@@ -608,17 +615,14 @@ mod tests {
     fn encode_td_command(cmd: &TdNetCommand, out: &mut Vec<u8>) {
         out.extend_from_slice(&cmd.frame.to_le_bytes());
         out.push(cmd.player);
-        match &cmd.command {
-            cnc_tiberian_dawn::network::Command::Move { units, target } => {
-                out.push(1);
-                out.extend_from_slice(&(units.len() as u32).to_le_bytes());
-                for u in units {
-                    out.extend_from_slice(&u.to_le_bytes());
-                }
-                out.extend_from_slice(&target.x.to_le_bytes());
-                out.extend_from_slice(&target.y.to_le_bytes());
+        if let cnc_tiberian_dawn::network::Command::Move { units, target } = &cmd.command {
+            out.push(1);
+            out.extend_from_slice(&(units.len() as u32).to_le_bytes());
+            for u in units {
+                out.extend_from_slice(&u.to_le_bytes());
             }
-            _ => {}
+            out.extend_from_slice(&target.x.to_bits().to_le_bytes());
+            out.extend_from_slice(&target.y.to_bits().to_le_bytes());
         }
     }
 
@@ -657,7 +661,10 @@ mod tests {
                     player,
                     command: cnc_tiberian_dawn::network::Command::Move {
                         units,
-                        target: cnc_core::Vec2::new(x as f32, y as f32),
+                        target: cnc_core::Vec2::new(
+                            cnc_core::Fixed16_16::from_bits(x),
+                            cnc_core::Fixed16_16::from_bits(y),
+                        ),
                     },
                 })
             }

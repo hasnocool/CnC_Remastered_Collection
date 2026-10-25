@@ -1,14 +1,13 @@
 [workspace]
 resolver = "2"
 exclude = [
-    "cnc-replayer",
     "cnc-console",
 ]
 members = [
     "cnc-core",
     "cnc-tiberian-dawn",
     "cnc-red-alert",
-    # "cnc-replayer",  # temporarily disabled - compile errors
+    "cnc-replayer",
     "cnc-renderer",
     "cnc-audio",
     "cnc-asset",
@@ -25,7 +24,6 @@ members = [
     "cnc-console",
     "cnc-events",
 ]
-
 [workspace.package]
 version = "0.1.1"
 edition = "2021"
@@ -44,6 +42,8 @@ panic = "abort"
 
 [workspace.dependencies]
 cnc-core = { path = "cnc-core" }
+cnc-tiberian-dawn = { path = "cnc-tiberian-dawn" }
+cnc-red-alert = { path = "cnc-red-alert" }
 anyhow = "1.0"
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
