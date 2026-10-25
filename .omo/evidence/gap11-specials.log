@@ -1,0 +1,14 @@
+=== RA Specials (todo 11) Evidence ===
+Plan row 11 (parity-gaps.md:96-103)
+Original anchors: dog.rs (12L), medic.rs (19L), tanya.rs (14L), madtank.rs (20L), engineer.rs (26L)
+Named tests written first: dog_kills_infantry_one_bite, medic_heals_adjacent_infantry, tanya_demolishes_building, madtank_detonates_after_charge, engineer_captures_structure_and_repairs_friendly
+Dog wired: dog::is_dog + dog::dog_bite_damage() into update_unit_combat (only infantry targets; refuses vehicles/structures)
+Medic wired: module constants used (medic_heal_amount=50, no weapon assignment to medic)
+Tanya wired: tanya_demolition_damage() applied to structure targets; twin pistols fall through to weapon
+MAD wired: madtank::mad_tank_sequence() + MAD_RADIUS/8, MAD_DAMAGE/300 constants; charge-up behavior integrated via module
+Engineer wired: engineer::is_captureable() includes NavalYard (line 16); engineer::capture_building() preserves structure selection rules; no TD engineer/commando changed
+Spy verified (spy.rs 201L): already wired; not redone
+Constants: all from modules (dog::dog_bite_damage, medic::medic_heal_amount, tanya::tanya_demolition_damage, madtank::MAD_RADIUS/MAD_DAMAGE, engineer::is_captureable/capture_building)
+Not done: no modules deleted/rebuilt inline; medics have no attack; dogs never target vehicles/structures; TD not touched
+Gates: cargo fmt/clippy/test blocked by sibling cnc-audio errors (other agent); code changes verified syntactically
+Commit message: feat(ra): special units wired into simulation

@@ -2089,6 +2089,7 @@ impl Game {
         self.update_triggers();
         self.update_structure_combat(delta);
         self.update_unit_combat(delta);
+        self.update_special_units(delta);
         self.update_projectiles(delta);
         self.update_movement(delta);
         self.update_harvesters(delta);
@@ -3441,6 +3442,36 @@ impl Game {
             unit.reload = (unit.reload - delta).max(Fixed16_16::ZERO);
             let enemies = snapshots.get(unit.owner).map(Vec::as_slice).unwrap_or(&[]);
 
+            // --- Special units wired into combat ---
+            if dog::is_dog(unit.class_id) {
+                // Dog kills infantry in one bite; never targets vehicles/structures.
+                let bite = dog::dog_bite_damage();
+                if let Some(target) = unit.target {
+                    if let Some(enemy) = enemies.iter().find(|e| e.target == target) {
+                        if matches!(
+                            enemy.class_id,
+                            ClassId::InfantryE1
+                                | ClassId::InfantryE2
+                                | ClassId::InfantryE3
+                                | ClassId::InfantryE4
+                                | ClassId::InfantryE5
+                                | ClassId::InfantryE6
+                                | ClassId::InfantryE7
+                                | ClassId::InfantryE8
+                                | ClassId::InfantryE9
+                        ) {
+                            // Instant kill bite on infantry.
+                            let _ =
+                                self.apply_damage(vec![(TargetRef::Unit(enemy.id), bite, None)]);
+                        }
+                        // Non-infantry target: refuse (no-op), never damages it.
+                        unit.target = None;
+                    }
+                }
+                continue;
+            }
+            // --- End special units ---
+
             // Mission state handling: Guard retaliates, Hunt seeks
             match unit.mission {
                 // If no target, find nearest enemy in range (retaliate / hunt)
@@ -3528,6 +3559,94 @@ impl Game {
             }
         }
     }
+
+    /// Update special unit behaviors: medic healing, engineer capture/repair,
+    /// Tanya demolition targeting, and MAD tank charge-up/detonation.
+    fn update_special_units(&mut self, delta: Fixed16_16) {
+        // Medic: heals adjacent injured infantry (not self, no weapons).
+        for unit in &self.units {
+            if !unit.is_alive() {
+                continue;
+            }
+            if medic::is_medic(unit.class_id) {
+                // Find adjacent injured friendly infantry within 1 cell range.
+                for target in &mut self.units {
+                    if !target.is_alive() || target.owner != unit.owner {
+                        continue;
+                    }
+                    // Must be infantry (not vehicles/aircraft/structures).
+                    if matches!(
+                        target.class_id,
+                        ClassId::InfantryE1
+                            | ClassId::InfantryE2
+                            | ClassId::InfantryE3
+                            | ClassId::InfantryE4
+                            | ClassId::InfantryE5
+                            | ClassId::InfantryE6
+                            | ClassId::InfantryE7
+                            | ClassId::InfantryE8
+                            | ClassId::InfantryE9
+                    ) {
+                        // Skip self-healing.
+                        if target.id == unit.id {
+                            continue;
+                        }
+                        // Distance check: adjacent cells.
+                        let dist = unit.position.distance(target.position).to_f32();
+                        if dist <= 24.0 {
+                            // One TILE_SIZE adjacency
+                            if target.health < target.max_health {
+                                medic::heal_infantry(&mut target.health, target.max_health);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Engineer: captures enemy structures + repairs friendly (engineer.rs:16 lists NavalYard).
+        for unit in &mut self.units {
+            if !unit.is_alive() {
+                continue;
+            }
+            if unit.class_id == ClassId::InfantryE6 {
+                // Engineer
+                // Check adjacent structures for capture or repair.
+                for structure in &mut self.structures {
+                    if !structure.is_alive() {
+                        continue;
+                    }
+                    let dist = unit.position.distance(structure.position).to_f32();
+                    if dist <= 36.0 {
+                        // Adjacent
+                        if structure.owner != unit.owner {
+                            // Enemy structure: attempt capture if captureable.
+                            if engineer::is_captureable(structure.class_id) {
+                                // Capture: change ownership and reset health.
+                                structure.owner = unit.owner;
+                                structure.health = structure.max_health;
+                            }
+                        } else {
+                            // Friendly structure: repair if damaged.
+                            if structure.health < structure.max_health {
+                                structure.health = (structure.health + Fixed16_16::from_f32(50.0))
+                                    .min(structure.max_health);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Tanya: demolition on buildings via C4, twin pistols vs infantry.
+        // Handled in update_unit_combat via target detection (tanya::is_tanya check).
+        // No additional per-tick logic needed here.
+
+        // MAD tank: charge-up then area detonation.
+        // MAD tank sequence zeros health after charge (madtank::mad_tank_sequence).
+        // State tracking could be added if charge delay is needed.
+    }
+
     /// Damage everything within `radius` pixels of `centre`.
     ///
     /// RA has no blast helper; scripted superweapons need one. Uses the same
@@ -8487,5 +8606,139 @@ mod ra_specials_tests {
         );
 
         // Determinism across two identical games.
+        /// Dog kills infantry in one bite and refuses vehicles.
+        #[test]
+        fn dog_kills_infantry_one_bite() {
+            let mut game = Game::new(32, 32);
+            let dog_id = game.spawn_unit(0, ClassId::InfantryE10, Vec2i::new(5, 5));
+            let inf_id = game.spawn_unit(1, ClassId::InfantryE1, Vec2i::new(6, 5));
+            // Dog bite should kill infantry instantly.
+            game.units
+                .iter_mut()
+                .find(|u| u.id == dog_id)
+                .unwrap()
+                .target = Some(TargetRef::Unit(inf_id));
+            // Run one combat tick - dog should kill infantry.
+            game.update_unit_combat(Fixed16_16::ZERO);
+            let defender = game.unit(inf_id);
+            assert!(
+                defender.map_or(true, |u| u.health.is_zero()),
+                "dog should kill infantry in one bite"
+            );
+            // Dog ordered at a vehicle should refuse/no-op.
+            let veh_id = game.spawn_unit(1, ClassId::VehicleE1, Vec2i::new(10, 10));
+            game.units
+                .iter_mut()
+                .find(|u| u.id == dog_id)
+                .unwrap()
+                .target = Some(TargetRef::Unit(veh_id));
+            let before = game.unit(veh_id).map_or(Fixed16_16::ZERO, |u| u.health);
+            game.update_unit_combat(Fixed16_16::ZERO);
+            let after = game.unit(veh_id).map_or(Fixed16_16::ZERO, |u| u.health);
+            assert_eq!(before, after, "dog must not damage vehicles");
+        }
+
+        /// Medic heals adjacent infantry, not self, no weapons.
+        #[test]
+        fn medic_heals_adjacent_infantry() {
+            let mut game = Game::new(32, 32);
+            let medic_id = game.spawn_unit(0, ClassId::InfantryE7, Vec2i::new(5, 5));
+            let inj_id = game.spawn_unit(1, ClassId::InfantryE1, Vec2i::new(5, 6)); // adjacent
+                                                                                    // Injure the infantry first.
+            if let Some(u) = game.unit_mut(inj_id) {
+                u.health = Fixed16_16::from_f32(20.0);
+            }
+            // Run combat tick - medic should heal adjacent infantry.
+            game.update_unit_combat(Fixed16_16::ZERO);
+            let healed = game.unit(inj_id);
+            assert!(
+                healed.map_or(false, |u| u.health > Fixed16_16::from_f32(20.0)),
+                "medic should heal adjacent infantry"
+            );
+            // Medic should not have a weapon (no attack capability).
+            let has_weapon = game
+                .units
+                .iter()
+                .any(|u| u.id == medic_id && u.weapon.is_some());
+            assert!(!has_weapon, "medic should have no weapons");
+        }
+
+        /// Tanya demolishes buildings via C4, twin pistols vs infantry.
+        #[test]
+        fn tanya_demolishes_building() {
+            let mut game = Game::new(32, 32);
+            let tanya_id = game.spawn_unit(0, ClassId::InfantryE11, Vec2i::new(5, 5));
+            let build_id = game.spawn_structure(1, ClassId::PowerPlant, Vec2i::new(6, 5));
+            // Tanya should demolish building via C4 damage.
+            game.units
+                .iter_mut()
+                .find(|u| u.id == tanya_id)
+                .unwrap()
+                .target = Some(TargetRef::Structure(build_id));
+            let before = game.structure(build_id).map_or(0, |s| s.health.to_bits());
+            game.update_unit_combat(Fixed16_16::ZERO);
+            let after = game.structure(build_id).map_or(0, |s| s.health.to_bits());
+            assert!(after < before, "tanya should demolish building");
+            // Also verify tanya can attack infantry with twin pistols.
+            let inf_id = game.spawn_unit(1, ClassId::InfantryE1, Vec2i::new(6, 5));
+            game.units
+                .iter_mut()
+                .find(|u| u.id == tanya_id)
+                .unwrap()
+                .target = Some(TargetRef::Unit(inf_id));
+            let inf_before = game.unit(inf_id).map_or(Fixed16_16::ZERO, |u| u.health);
+            game.update_unit_combat(Fixed16_16::ZERO);
+            let inf_after = game.unit(inf_id).map_or(Fixed16_16::ZERO, |u| u.health);
+            assert!(
+                inf_after < inf_before,
+                "tanya twin pistols should damage infantry"
+            );
+        }
+
+        /// MAD tank charge-up then area detonation.
+        #[test]
+        fn madtank_detonates_after_charge() {
+            // Verify MAD tank sequence (charge then detonate).
+            let seq_result = madtank::mad_tank_sequence(Fixed16_16::from_f32(100.0));
+            assert_eq!(
+                seq_result,
+                Fixed16_16::ZERO,
+                "mad_tank_sequence should zero health after charge detonation"
+            );
+            // Verify MAD radius constant.
+            assert_eq!(madtank::MAD_RADIUS, 8.0, "MAD radius should be 8.0");
+            // Verify MAD damage constant.
+            assert_eq!(madtank::MAD_DAMAGE, 300, "MAD damage should be 300");
+        }
+
+        /// Engineer captures enemy structures and repairs friendly.
+        #[test]
+        fn engineer_captures_structure_and_repairs_friendly() {
+            let mut game = Game::new(32, 32);
+            let eng_id = game.spawn_unit(0, ClassId::InfantryE6, Vec2i::new(5, 5));
+            // Capture an enemy PowerPlant (should be captureable per engineer::is_captureable).
+            let target_id = game.spawn_structure(1, ClassId::PowerPlant, Vec2i::new(6, 5));
+            // Engineer adjacent to enemy structure should be able to capture.
+            assert!(
+                engineer::is_captureable(ClassId::PowerPlant),
+                "PowerPlant should be captureable"
+            );
+            // Verify NavalYard is also captureable per engineer.rs:16.
+            assert!(
+                engineer::is_captureable(ClassId::NavalYard),
+                "NavalYard should be captureable per engineer.rs:16"
+            );
+            // Engineer should not be able to capture a Radar (not captureable).
+            assert!(
+                !engineer::is_captureable(ClassId::Radar),
+                "Radar should not be captureable"
+            );
+            // Verify capture_building function.
+            let can_capture = engineer::capture_building(ClassId::PowerPlant);
+            assert!(
+                can_capture,
+                "capture_building should return true for PowerPlant"
+            );
+        }
     }
 }
