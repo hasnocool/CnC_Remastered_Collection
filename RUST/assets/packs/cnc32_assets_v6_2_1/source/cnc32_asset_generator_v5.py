@@ -170,25 +170,23 @@ def terrain_transition(kind: str, same_mask: int, seed: str, alt_kind: str | Non
     primary = terrain_base(kind, seed + ":primary")
     rng = random.Random(stable_seed(f"{seed}:{kind}:{alt}:{same_mask}:edge"))
     n, ne, e, se, so, sw, w, nw = [(same_mask >> i) & 1 for i in range(8)]
-    # Stable boundary profiles with short plateaus create chunky, authored-looking
-    # edges - the same per-column depth family the shoreline uses, so terrain
-    # borders read as organic banks rather than square cuts.
+    # Chunky pixel-art boundary: shallow +/-1 px sawtooth over a fixed base
+    # depth (the legacy 16px pack's style), NOT wide organic banks. Steep steps
+    # with occasional 2-px jags read as authored rock/terrain edges at map scale.
     def profile(base: int, count: int, lo: int, hi: int) -> list[int]:
-        values=[]; current=base
+        values=[]
         for i in range(count):
-            if i % 3 == 0: current=max(lo,min(hi,current+rng.choice((-2,-1,0,1,2))))
-            values.append(current)
+            if i % 4 == 0: base = max(lo, min(hi, base + rng.choice((-1, 0, 1))))
+            values.append(base)
         return values
-    north = profile(7, TILE, 4, 11); south = profile(7, TILE, 4, 11)
-    west = profile(7, TILE, 4, 11); east = profile(7, TILE, 4, 11)
+    north = profile(7, TILE, 6, 8); south = profile(7, TILE, 6, 8)
+    west = profile(7, TILE, 6, 8); east = profile(7, TILE, 6, 8)
 
-    # Corner radius per corner, so the seam where two transition edges meet is a
-    # rounded quarter-arc (the water shoreline's coves) instead of a square
-    # stair. Each corner keeps its own jitter so tiles do not repeat.
-    corner_r = {
-        "ne": rng.randrange(6, 10), "se": rng.randrange(6, 10),
-        "sw": rng.randrange(6, 10), "nw": rng.randrange(6, 10),
-    }
+    # Corners: a compact chamfered notch (the legacy wall_curve style), not a
+    # circle: a 6x6 pocket whose outer tip is a single 45-degree chamfer. This
+    # keeps the tile reading as pixel art while softening the 90-degree meet.
+    notch = {"nw": rng.randrange(5, 7), "ne": rng.randrange(5, 7),
+             "sw": rng.randrange(5, 7), "se": rng.randrange(5, 7)}
     mask = Image.new("L", (TILE,TILE), 0); px=mask.load()
     for y in range(TILE):
         for x in range(TILE):
@@ -197,21 +195,21 @@ def terrain_transition(kind: str, same_mask: int, seed: str, alt_kind: str | Non
             if not so and y >= TILE-south[x]: inside=False
             if not w and x < west[y]: inside=False
             if not e and x >= TILE-east[y]: inside=False
-            # Rounded corners: a missing diagonal with BOTH adjacent cardinals
-            # connected cuts a quarter-circle notch (distance from the corner
-            # centre must exceed the radius) instead of a square stair.
+            # Chamfered corner notches: a compact pocket cut from the corner,
+            # axis-aligned with a single 45-degree tip. The legacy pack's
+            # wall_curve_ne is [(8,0),(8,8),(15,8)] - the same geometry scaled.
             if not ne and n and e:
-                r = corner_r["ne"]; cx, cy = TILE - r, r
-                if (x-cx)*(x-cx) + (y-cy)*(y-cy) < r*r: inside=False
+                r = notch["ne"]
+                if x >= TILE-r and y < r and (TILE-1-x) + y >= r: inside=False
             if not se and e and so:
-                r = corner_r["se"]; cx, cy = TILE - r, TILE - r
-                if (x-cx)*(x-cx) + (y-cy)*(y-cy) < r*r: inside=False
+                r = notch["se"]
+                if x >= TILE-r and y >= TILE-r and (TILE-1-x) + (TILE-1-y) >= r: inside=False
             if not sw and so and w:
-                r = corner_r["sw"]; cx, cy = r, TILE - r
-                if (x-cx)*(x-cx) + (y-cy)*(y-cy) < r*r: inside=False
+                r = notch["sw"]
+                if x < r and y >= TILE-r and x + (TILE-1-y) >= r: inside=False
             if not nw and w and n:
-                r = corner_r["nw"]; cx, cy = r, r
-                if (x-cx)*(x-cx) + (y-cy)*(y-cy) < r*r: inside=False
+                r = notch["nw"]
+                if x < r and y < r and x + y >= r: inside=False
             if inside: px[x,y]=255
     im.paste(primary, (0,0), mask)
     # Add a one-pixel edge shadow and a few material-specific transition pixels.
