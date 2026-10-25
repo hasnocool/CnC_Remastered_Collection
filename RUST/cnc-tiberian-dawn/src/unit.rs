@@ -71,6 +71,8 @@ pub struct Unit {
     pub secondary_weapon: Option<Weapon>,
     /// Index into Game::units of the enemy this unit is attacking.
     pub attack_target: Option<usize>,
+    /// Index into Game::buildings of the enemy building this unit is attacking.
+    pub building_attack_target: Option<usize>,
     /// Seconds remaining before the weapon can fire again.
     pub reload: Fixed16_16,
     /// UDATA.CPP "Is it equipped with a combat turret?".
@@ -179,6 +181,7 @@ impl Unit {
             weapon: stats.weapon.map(Weapon::from_type),
             secondary_weapon: unit_type.secondary_weapon().map(Weapon::from_type),
             attack_target: None,
+            building_attack_target: None,
             reload: Fixed16_16::ZERO,
             has_turret: stats.has_turret,
             two_shooter: stats.two_shooter,

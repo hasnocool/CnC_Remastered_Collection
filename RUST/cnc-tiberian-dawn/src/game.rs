@@ -2813,23 +2813,42 @@ impl Game {
     /// Rotate turrets (or bodies for non-turret vehicles) toward the target.
     fn update_facings(&mut self, delta_time: Fixed16_16) {
         for index in 0..self.units.len() {
-            let Some(target_index) = self.units[index].attack_target else {
-                continue;
-            };
-            let Some(target) = self.units.get(target_index) else {
-                continue;
-            };
-            if !target.is_alive() {
-                continue;
+            // Handle unit-to-unit facing
+            if let Some(target_index) = self.units[index].attack_target {
+                let Some(target) = self.units.get(target_index) else {
+                    continue;
+                };
+                if !target.is_alive() {
+                    continue;
+                }
+
+                let dx = target.position.x.to_f32() - self.units[index].position.x.to_f32();
+                let dy = target.position.y.to_f32() - self.units[index].position.y.to_f32();
+                if dx == 0.0 && dy == 0.0 {
+                    continue;
+                }
+                let desired = dy.atan2(dx);
+                self.units[index].rotate_toward(desired, delta_time);
             }
 
-            let dx = target.position.x.to_f32() - self.units[index].position.x.to_f32();
-            let dy = target.position.y.to_f32() - self.units[index].position.y.to_f32();
-            if dx == 0.0 && dy == 0.0 {
-                continue;
+            // Handle unit-to-building facing
+            if let Some(building_index) = self.units[index].building_attack_target {
+                let Some(building) = self.buildings.get(building_index) else {
+                    continue;
+                };
+                if !building.is_alive() {
+                    continue;
+                }
+
+                let target_pos = Self::building_center(building);
+                let dx = target_pos.x.to_f32() - self.units[index].position.x.to_f32();
+                let dy = target_pos.y.to_f32() - self.units[index].position.y.to_f32();
+                if dx == 0.0 && dy == 0.0 {
+                    continue;
+                }
+                let desired = dy.atan2(dx);
+                self.units[index].rotate_toward(desired, delta_time);
             }
-            let desired = dy.atan2(dx);
-            self.units[index].rotate_toward(desired, delta_time);
         }
     }
 
@@ -3286,150 +3305,293 @@ impl Game {
             }
         }
     }
-
     fn update_attacks(&mut self) {
         for index in 0..self.units.len() {
-            let Some(target_index) = self.units[index].attack_target else {
-                continue;
-            };
-            let target_info = self
-                .units
-                .get(target_index)
-                .map(|target| (target.position, target.owner, target.is_alive()));
-            let Some((target_position, target_owner, target_alive)) = target_info else {
-                self.units[index].attack_target = None;
-                continue;
-            };
-
-            let (position, owner, primary, secondary, reload) = {
-                let unit = &self.units[index];
-                (
-                    unit.position,
-                    unit.owner,
-                    unit.weapon.clone(),
-                    unit.secondary_weapon.clone(),
-                    unit.reload,
-                )
-            };
-
-            if !target_alive || target_owner == owner {
-                self.units[index].attack_target = None;
-                continue;
-            }
-
-            let Some(primary) = primary else {
-                continue;
-            };
-
-            let distance = position.distance(target_position);
-            let secondary_range = secondary
-                .as_ref()
-                .map(|weapon| weapon.range)
-                .unwrap_or(Fixed16_16::ZERO);
-            let max_range = primary.range.max(secondary_range);
-
-            let chosen = if distance <= primary.range {
-                Some((primary.clone(), true))
-            } else if let Some(secondary) = secondary.clone() {
-                if distance <= secondary.range {
-                    Some((secondary, true))
-                } else {
-                    Some((primary.clone(), false))
-                }
-            } else {
-                Some((primary.clone(), false))
-            };
-            let Some((weapon, in_range)) = chosen else {
-                continue;
-            };
-
-            if in_range {
-                self.units[index].target = None;
-                let desired = (target_position.y.to_f32() - position.y.to_f32())
-                    .atan2(target_position.x.to_f32() - position.x.to_f32());
-
-                let has_ammo = self.units[index].max_ammo == 0 || self.units[index].ammo > 0;
-                if reload <= Fixed16_16::ZERO && has_ammo && self.units[index].aiming_at(desired) {
-                    self.projectiles.push(Projectile::new(
-                        weapon.clone(),
-                        position,
-                        target_position,
-                        index as u32,
-                        Some(target_index as u32),
-                    ));
-                    self.projectiles_fired += 1;
-                    // AUDIO.CPP fire-effect hook: observation only.
-                    if let Some(source) = self.event_source.as_ref() {
-                        let owner = self.units[index].owner;
-                        crate::events::weapon_fired(
-                            source,
-                            owner,
-                            index,
-                            (position.x.to_f32() as i32, position.y.to_f32() as i32),
-                        );
-                    }
-                    if weapon.weapon_type != primary.weapon_type {
-                        self.secondary_shots += 1;
-                    }
-                    // TECHNO.CPP Rearm_Delay: single shooters always use the
-                    // normal ROF + 3; two-shooters alternate 9 ticks and ROF + 3.
-                    let delay = self.units[index].next_rearm_delay(&weapon);
-                    self.units[index].reload = if delay > Fixed16_16::ZERO {
-                        delay
-                    } else {
-                        Fixed16_16::from_f32(0.5)
-                    };
-                    self.units[index].note_shot_fired();
-                    if self.units[index].is_aircraft {
-                        self.aircraft_shots += 1;
-                    }
-                    if self.units[index].max_ammo > 0 {
-                        self.units[index].ammo = self.units[index].ammo.saturating_sub(1);
-                        if self.units[index].ammo == 0 {
-                            self.units[index].attack_target = None;
-                        }
-                    }
-                }
-            } else {
-                // FOOT.CPP Approach_Target: stop short of weapon range so the
-                // unit can fire without walking into the target.
-                let approach = (max_range - Fixed16_16::from_f32(leptons_to_px(0x00B7)))
-                    .max(Fixed16_16::from_f32(8.0));
-                let offset = target_position - position;
-                let distance = offset.length();
-                let destination = if distance > approach {
-                    target_position - offset.normalize() * approach
-                } else {
-                    position
+            // Handle unit-to-unit attacks
+            if let Some(target_index) = self.units[index].attack_target {
+                let target_info = self
+                    .units
+                    .get(target_index)
+                    .map(|target| (target.position, target.owner, target.is_alive()));
+                let Some((target_position, target_owner, target_alive)) = target_info else {
+                    self.units[index].attack_target = None;
+                    continue;
                 };
 
-                if self.units[index].path.is_empty() && self.units[index].target.is_none() {
-                    let goal_cell = Vec2i::new(
-                        (destination.x.to_f32() / TILE_SIZE).floor() as i32,
-                        (destination.y.to_f32() / TILE_SIZE).floor() as i32,
-                    );
-                    let used: Vec<(i32, i32)> = self
-                        .occupied_cells(Some(index))
-                        .iter()
-                        .map(|cell| (cell.x, cell.y))
-                        .collect();
-                    let terrain_ok = self.map.grid.in_bounds(goal_cell.x, goal_cell.y)
-                        && self.map.grid.cells[(goal_cell.y as u32 * self.map.grid.width
-                            + goal_cell.x as u32)
-                            as usize]
-                            .is_passable;
-                    let goal = if terrain_ok && !used.contains(&(goal_cell.x, goal_cell.y)) {
-                        goal_cell
-                    } else {
-                        let (x, y) = self.nearby_cell(goal_cell.x, goal_cell.y, &used);
-                        Vec2i::new(x, y)
-                    };
-                    let path = self.path_to_cell(index, goal);
-                    self.units[index].set_path(path);
+                let (position, owner, primary, secondary, reload) = {
+                    let unit = &self.units[index];
+                    (
+                        unit.position,
+                        unit.owner,
+                        unit.weapon.clone(),
+                        unit.secondary_weapon.clone(),
+                        unit.reload,
+                    )
+                };
+
+                if !target_alive || target_owner == owner {
+                    self.units[index].attack_target = None;
+                    continue;
                 }
 
-                self.units[index].target = Some(destination);
-                self.units[index].ordered = true;
+                let Some(primary) = primary else {
+                    continue;
+                };
+
+                let distance = position.distance(target_position);
+                let secondary_range = secondary
+                    .as_ref()
+                    .map(|weapon| weapon.range)
+                    .unwrap_or(Fixed16_16::ZERO);
+                let max_range = primary.range.max(secondary_range);
+
+                let chosen = if distance <= primary.range {
+                    Some((primary.clone(), true))
+                } else if let Some(secondary) = secondary.clone() {
+                    if distance <= secondary.range {
+                        Some((secondary, true))
+                    } else {
+                        Some((primary.clone(), false))
+                    }
+                } else {
+                    Some((primary.clone(), false))
+                };
+                let Some((weapon, in_range)) = chosen else {
+                    continue;
+                };
+
+                if in_range {
+                    self.units[index].target = None;
+                    let desired = (target_position.y.to_f32() - position.y.to_f32())
+                        .atan2(target_position.x.to_f32() - position.x.to_f32());
+
+                    let has_ammo = self.units[index].max_ammo == 0 || self.units[index].ammo > 0;
+                    if reload <= Fixed16_16::ZERO
+                        && has_ammo
+                        && self.units[index].aiming_at(desired)
+                    {
+                        self.projectiles.push(Projectile::new(
+                            weapon.clone(),
+                            position,
+                            target_position,
+                            index as u32,
+                            Some(target_index as u32),
+                        ));
+                        self.projectiles_fired += 1;
+                        // AUDIO.CPP fire-effect hook: observation only.
+                        if let Some(source) = self.event_source.as_ref() {
+                            let owner = self.units[index].owner;
+                            crate::events::weapon_fired(
+                                source,
+                                owner,
+                                index,
+                                (position.x.to_f32() as i32, position.y.to_f32() as i32),
+                            );
+                        }
+                        if weapon.weapon_type != primary.weapon_type {
+                            self.secondary_shots += 1;
+                        }
+                        // TECHNO.CPP Rearm_Delay: single shooters always use the
+                        // normal ROF + 3; two-shooters alternate 9 ticks and ROF + 3.
+                        let delay = self.units[index].next_rearm_delay(&weapon);
+                        self.units[index].reload = if delay > Fixed16_16::ZERO {
+                            delay
+                        } else {
+                            Fixed16_16::from_f32(0.5)
+                        };
+                        self.units[index].note_shot_fired();
+                        if self.units[index].is_aircraft {
+                            self.aircraft_shots += 1;
+                        }
+                        if self.units[index].max_ammo > 0 {
+                            self.units[index].ammo = self.units[index].ammo.saturating_sub(1);
+                            if self.units[index].ammo == 0 {
+                                self.units[index].attack_target = None;
+                            }
+                        }
+                    }
+                } else {
+                    // FOOT.CPP Approach_Target: stop short of weapon range so the
+                    // unit can fire without walking into the target.
+                    let approach = (max_range - Fixed16_16::from_f32(leptons_to_px(0x00B7)))
+                        .max(Fixed16_16::from_f32(8.0));
+                    let offset = target_position - position;
+                    let distance = offset.length();
+                    let destination = if distance > approach {
+                        target_position - offset.normalize() * approach
+                    } else {
+                        position
+                    };
+
+                    if self.units[index].path.is_empty() && self.units[index].target.is_none() {
+                        let goal_cell = Vec2i::new(
+                            (destination.x.to_f32() / TILE_SIZE).floor() as i32,
+                            (destination.y.to_f32() / TILE_SIZE).floor() as i32,
+                        );
+                        let used: Vec<(i32, i32)> = self
+                            .occupied_cells(Some(index))
+                            .iter()
+                            .map(|cell| (cell.x, cell.y))
+                            .collect();
+                        let terrain_ok = self.map.grid.in_bounds(goal_cell.x, goal_cell.y)
+                            && self.map.grid.cells[(goal_cell.y as u32 * self.map.grid.width
+                                + goal_cell.x as u32)
+                                as usize]
+                                .is_passable;
+                        let goal = if terrain_ok && !used.contains(&(goal_cell.x, goal_cell.y)) {
+                            goal_cell
+                        } else {
+                            let (x, y) = self.nearby_cell(goal_cell.x, goal_cell.y, &used);
+                            Vec2i::new(x, y)
+                        };
+                        let path = self.path_to_cell(index, goal);
+                        self.units[index].set_path(path);
+                    }
+
+                    self.units[index].target = Some(destination);
+                    self.units[index].ordered = true;
+                }
+            }
+
+            // Handle unit-to-building attacks (for gunboat bombardment etc.)
+            if let Some(building_index) = self.units[index].building_attack_target {
+                let Some(building) = self.buildings.get(building_index) else {
+                    self.units[index].building_attack_target = None;
+                    continue;
+                };
+                if building.owner == self.units[index].owner || !building.is_alive() {
+                    self.units[index].building_attack_target = None;
+                    continue;
+                }
+
+                let (position, _owner, primary, secondary, reload) = {
+                    let unit = &self.units[index];
+                    (
+                        unit.position,
+                        unit.owner,
+                        unit.weapon.clone(),
+                        unit.secondary_weapon.clone(),
+                        unit.reload,
+                    )
+                };
+
+                let Some(primary) = primary else {
+                    continue;
+                };
+
+                let target_position = Self::building_center(building);
+                let distance = position.distance(target_position);
+                let secondary_range = secondary
+                    .as_ref()
+                    .map(|weapon| weapon.range)
+                    .unwrap_or(Fixed16_16::ZERO);
+                let max_range = primary.range.max(secondary_range);
+
+                let chosen = if distance <= primary.range {
+                    Some((primary.clone(), true))
+                } else if let Some(secondary) = secondary.clone() {
+                    if distance <= secondary.range {
+                        Some((secondary, true))
+                    } else {
+                        Some((primary.clone(), false))
+                    }
+                } else {
+                    Some((primary.clone(), false))
+                };
+                let Some((weapon, in_range)) = chosen else {
+                    continue;
+                };
+
+                if in_range {
+                    self.units[index].target = None;
+                    let desired = (target_position.y.to_f32() - position.y.to_f32())
+                        .atan2(target_position.x.to_f32() - position.x.to_f32());
+
+                    let has_ammo = self.units[index].max_ammo == 0 || self.units[index].ammo > 0;
+                    if reload <= Fixed16_16::ZERO
+                        && has_ammo
+                        && self.units[index].aiming_at(desired)
+                    {
+                        self.projectiles.push(Projectile::new(
+                            weapon.clone(),
+                            position,
+                            target_position,
+                            index as u32,
+                            None, // target_entity is None for buildings
+                        ));
+                        // AUDIO.CPP fire-effect hook: observation only.
+                        if let Some(source) = self.event_source.as_ref() {
+                            let owner = self.units[index].owner;
+                            crate::events::weapon_fired(
+                                source,
+                                owner,
+                                index,
+                                (position.x.to_f32() as i32, position.y.to_f32() as i32),
+                            );
+                        }
+                        if weapon.weapon_type != primary.weapon_type {
+                            self.secondary_shots += 1;
+                        }
+                        // TECHNO.CPP Rearm_Delay: single shooters always use the
+                        // normal ROF + 3; two-shooters alternate 9 ticks and ROF + 3.
+                        let delay = self.units[index].next_rearm_delay(&weapon);
+                        self.units[index].reload = if delay > Fixed16_16::ZERO {
+                            delay
+                        } else {
+                            Fixed16_16::from_f32(0.5)
+                        };
+                        self.units[index].note_shot_fired();
+                        if self.units[index].is_aircraft {
+                            self.aircraft_shots += 1;
+                        }
+                        if self.units[index].max_ammo > 0 {
+                            self.units[index].ammo = self.units[index].ammo.saturating_sub(1);
+                            if self.units[index].ammo == 0 {
+                                self.units[index].building_attack_target = None;
+                            }
+                        }
+                    }
+                } else {
+                    // FOOT.CPP Approach_Target: stop short of weapon range so the
+                    // unit can fire without walking into the target.
+                    let approach = (max_range - Fixed16_16::from_f32(leptons_to_px(0x00B7)))
+                        .max(Fixed16_16::from_f32(8.0));
+                    let offset = target_position - position;
+                    let distance = offset.length();
+                    let destination = if distance > approach {
+                        target_position - offset.normalize() * approach
+                    } else {
+                        position
+                    };
+
+                    if self.units[index].path.is_empty() && self.units[index].target.is_none() {
+                        let goal_cell = Vec2i::new(
+                            (destination.x.to_f32() / TILE_SIZE).floor() as i32,
+                            (destination.y.to_f32() / TILE_SIZE).floor() as i32,
+                        );
+                        let used: Vec<(i32, i32)> = self
+                            .occupied_cells(Some(index))
+                            .iter()
+                            .map(|cell| (cell.x, cell.y))
+                            .collect();
+                        let terrain_ok = self.map.grid.in_bounds(goal_cell.x, goal_cell.y)
+                            && self.map.grid.cells[(goal_cell.y as u32 * self.map.grid.width
+                                + goal_cell.x as u32)
+                                as usize]
+                                .is_passable;
+                        let goal = if terrain_ok && !used.contains(&(goal_cell.x, goal_cell.y)) {
+                            goal_cell
+                        } else {
+                            let (x, y) = self.nearby_cell(goal_cell.x, goal_cell.y, &used);
+                            Vec2i::new(x, y)
+                        };
+                        let path = self.path_to_cell(index, goal);
+                        self.units[index].set_path(path);
+                    }
+
+                    self.units[index].target = Some(destination);
+                    self.units[index].ordered = true;
+                }
             }
         }
     }
@@ -3602,6 +3764,18 @@ impl Game {
                 }
                 let damage = warhead.damage(base_damage, unit.armor, px_to_leptons(distance));
                 unit.take_damage(damage);
+            }
+            // Also apply splash damage to buildings
+            for building in self.buildings.iter_mut() {
+                if !building.is_alive() {
+                    continue;
+                }
+                let distance = building.position.distance(impact).to_f32();
+                if distance > blast_radius {
+                    continue;
+                }
+                let damage = warhead.damage(base_damage, building.armor, px_to_leptons(distance));
+                building.take_damage(damage);
             }
         }
     }
@@ -8981,52 +9155,74 @@ mod prerequisite_tests {
     }
 
     /// Acceptance: a gunboat (the only TD warship) bombards land targets from water.
+    /// Behavioral: gunboat fires a PROJECTILE that travels and damages a land target.
+    /// Weapon = TD 105mm spec (Cannon105); spawn pattern at game.rs:3353.
     #[test]
     fn td_gunboat_bombards_land_target() {
         let mut game = Game::new("test", 40, 40);
-        let gunboat = game.spawn_unit_at(0, UnitType::Gunboat, Vec2i::new(20, 20));
-        // Gunboat must be water-only: cell (20,20) is land initially. In TD default map,
-        // water cells have terrain LAND_WATER = 2. The TD setup here ensures the unit
-        // will either be placed on a valid cell or require a move into water.
-        // For this test, we use a realistic placement: place gunboat on a water cell
-        // to match the engine behavior. Gunboat spawns via queue (which respects unit class
-        // placement rules) but for simplicity we spawn directly at a known water cell.
-        // Step: change cell (20,20) to water.
-        game.map.grid.cells[(20 + 20 * game.map.width) as usize].terrain_type = LAND_WATER;
-        let gunboat_idx = gunboat as usize;
-        let gunboat_unit = &game.units[gunboat_idx];
-        assert_eq!(gunboat_unit.unit_type, UnitType::Gunboat);
-        // Add a target building at a nearby land cell
+
+        // Add a target building at a nearby land cell (20, 24)
         let target_pos = Game::cell_center(20, 24);
         let mut target_building = Building::from_type(StructureType::Refinery, target_pos, 1);
         target_building.set_powered(true);
+        let initial_health = target_building.health;
         game.buildings.push(target_building);
         let target_idx = game.buildings.len() - 1;
-        // Fast-forward the unit's movement to ensure it does not path into land.
-        // Ship class units may attempt to pathfind; confirm the TD unit system
-        // has a simple placement for this test and that bombarding land works.
-        // The gunboat should now be able to fire upon the target structure.
-        // Weapon is optional; we use the default GN?Gun spec (damage, range, ROF).
-        // Fire the gunboat (attack command) - gunboat's combat logic will
-        // handle projectile fire.
-        game.apply_command(
-            0,
-            &Command::Attack {
-                units: vec![gunboat],
-                target: target_idx as u32,
-            },
+
+        // Place gunboat at cell (20, 22) which is water and within Cannon105 range (114px = ~4.75 cells)
+        // cell (20,22) center to cell (20,24) center = 2 cells = 48px, well within range
+        game.map.grid.cells[(20 + 22 * game.map.width) as usize].terrain_type = LAND_WATER;
+        let gunboat = game.spawn_unit_at(0, UnitType::Gunboat, Vec2i::new(20, 22));
+        let gunboat_idx = gunboat as usize;
+
+        // Set gunboat to attack the building using building_attack_target
+        game.units[gunboat_idx].building_attack_target = Some(target_idx);
+        game.units[gunboat_idx].ordered = true;
+        // Pre-aim turret at building_center to match update_facings calculation
+        let target_pos = Game::building_center(&game.buildings[target_idx]);
+        let desired = (target_pos.y.to_f32() - game.units[gunboat_idx].position.y.to_f32())
+            .atan2(target_pos.x.to_f32() - game.units[gunboat_idx].position.x.to_f32());
+        game.units[gunboat_idx].turret_facing = desired;
+        // The TD combat logic at game.rs:3353 spawns a Projectile
+        // First run update to rotate turret toward target (already in range)
+        for _ in 0..30 {
+            game.update(Fixed16_16::from_f32(0.1));
+            if !game.projectiles.is_empty() {
+                break;
+            }
+        }
+        // Verify a projectile was spawned
+        assert!(
+            !game.projectiles.is_empty(),
+            "gunboat must spawn a travelling projectile"
         );
-        // After fire, verify damage applied (target health reduced).
-        let _building = &game.buildings[target_idx];
-        // Expect some damage; we'll check that the building health decreased.
-        // In the engine, the guard tower test (line 8270-8320) shows the expected pattern.
-        // We'll mimic that pattern: health decreases after command.
-        // Since we do not model explicit projectiles here, we assert that the command
-        // was accepted and target was damaged.
-        // For simplicity, assert that the command was applied (the system did not panic).
-        // A stronger test would be to spawn an actual gunboat class with a specific
-        // weapon spec and verify damage reduction; but that requires significant
-        // engine integration beyond this scope.
+        let projectile = &game.projectiles[0];
+        let target_pos = Game::building_center(&game.buildings[target_idx]);
+        assert!(
+            (projectile.target - target_pos).length().to_f32() < 1.0,
+            "projectile targets the building center"
+        );
+        // Run projectile updates until impact
+        for _ in 0..50 {
+            game.update_projectiles(Fixed16_16::from_f32(0.1));
+        }
+
+        // Verify the building took damage
+        let damaged_building = &game.buildings[target_idx];
+        assert!(
+            damaged_building.health < initial_health,
+            "building health must decrease from projectile impact"
+        );
+
+        // Verify gunboat itself didn't path onto land (remains on water)
+        let final_gunboat = &game.units[gunboat_idx];
+        let gunboat_cell = Game::world_cell(final_gunboat.position);
+        let width = game.map.width as i32;
+        assert_eq!(
+            game.map.grid.cells[(gunboat_cell.x + gunboat_cell.y * width) as usize].terrain_type,
+            LAND_WATER,
+            "gunboat must remain on water"
+        );
     }
 
     /// Adversarial: a snapshot whose passenger references a dead unit must
