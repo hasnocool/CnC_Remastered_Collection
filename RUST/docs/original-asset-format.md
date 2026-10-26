@@ -102,15 +102,29 @@ The pack therefore maps:
 | paved_ns / paved_ew | D01 / D02 | 100% |
 | cliff_interior | RV01 | 100% |
 
+## Per-game differences
+
+Both archives share the container and member format but differ in:
+
+| aspect | Tiberian Dawn | Red Alert |
+|---|---|---|
+| archive | `TEXTURES_TD_SRGB.MEG` | `TEXTURES_RA_SRGB.MEG` |
+| theaters | TEMPERATE, WINTER, DESERT | TEMPERATE, SNOW, INTERIOR |
+| suffix codes | TEM / WIN / DES | TEM / SNO / INT |
+| family directory | `SH1\` | `SH01.TEM\` (code appended) |
+| shore template | `SH1` | `SH01` (zero-padded) |
+| mip levels | 0..7 for single-icon families | 0..19 for single-icon families |
+
+So a member lookup probes, in order: template and zero-padded template × plain
+and `<TPL>.<EXT>` family directory × two- and four-digit icon index × levels 0
+up to 20. `MAX_MIP_LEVELS = 20` covers both games.
+
 ## Known gaps
 
-- **Red Alert original art is not wired.** `TEXTURES_RA_SRGB.MEG` opens and
-  indexes, but RA's member names and template families differ (`SH02` vs
-  `SH1`, no `CLEAR1`/`W1` under TEMPERATE), so no RA slot resolves and
-  `CNC_ORIGINAL_TILES=1` falls back to the generated RA pack. Mapping RA needs
-  an RA template table from `original/REDALERT/CDATA.CPP`.
 - The original compose fills every column of a family row with the one icon,
   because original families have no per-variant art. Per-cell shoreline/cliff
   masks still come from the generated pack's `cell_draw` path in the editor
   (`OriginalTileset` serves base terrain only).
-- Only TD terrain is composited: models, UI, audio and movies are out of scope.
+- Only terrain is composited: models, UI, audio and movies are out of scope.
+- RA's INTERIOR theater resolves only `CLEAR1` (its base ground), because the
+  remaining families ship under SNOW/TEMPERATE. 

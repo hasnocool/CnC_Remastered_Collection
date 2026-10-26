@@ -66,7 +66,12 @@ impl OriginalTileset {
     /// Composite one theater of the original terrain art. Returns `None` when
     /// the Steam install is absent or every member fails to decode.
     pub fn load(theater: Theater) -> Option<Self> {
-        let assets = OriginalAssets::open_default(Game::TiberianDawn).ok()?;
+        Self::load_game(Game::TiberianDawn, theater)
+    }
+
+    /// Load one game's original art for a theater.
+    pub fn load_game(game: Game, theater: Theater) -> Option<Self> {
+        let assets = OriginalAssets::open_default(game).ok()?;
         Self::from_assets(&assets, theater)
     }
 

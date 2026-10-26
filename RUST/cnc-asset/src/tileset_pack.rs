@@ -344,7 +344,12 @@ fn build_original_pack(
     // Base ground comes from the PTT patch family: the original engine draws a
     // solid base under `CLEAR1`, which is itself a translucent clear-overlay
     // (28% coverage). See `pack_slots` for the verified family list.
-    const SLOTS: &[(&str, &str, &str, u8, u32)] = &[
+    // Base ground comes from the PTT patch family: the original engines draw a
+    // solid base under `CLEAR1`, which is itself a translucent clear-overlay
+    // (28% coverage). Semantics map onto the 16 rows of the semantic families
+    // the draw code queries (see `PaletteManifest`); the icons come from the
+    // original templates, which differ by game (TD writes `SH1`, RA `SH01`).
+    const TD_SLOTS: &[(&str, &str, &str, u8, u32)] = &[
         ("terrain", "grass", "P01", 0, 0),
         ("terrain", "dirt", "P03", 1, 0),
         ("terrain", "sand", "P04", 2, 0),
@@ -370,9 +375,42 @@ fn build_original_pack(
         ("roads_bridges", "paved_ew", "D02", 1, 0),
         ("cliffs", "cliff_interior", "RV01", 8, 0),
     ];
+    // Red Alert spells its ocean shores zero-padded (`SH01`) and uses the same
+    // patch/slope/road family names for base ground.
+    const RA_SLOTS: &[(&str, &str, &str, u8, u32)] = &[
+        ("terrain", "grass", "P01", 0, 0),
+        ("terrain", "dirt", "P03", 1, 0),
+        ("terrain", "sand", "P04", 2, 0),
+        ("terrain", "rock", "P07", 4, 0),
+        ("terrain", "rough", "P08", 9, 0),
+        ("terrain", "mud", "P13", 7, 0),
+        ("terrain", "concrete", "P14", 14, 0),
+        ("water_edges", "deep_water", "W1", 0, 0),
+        ("water_edges", "shallow_water", "W2", 1, 0),
+        ("water_edges", "shore_north", "SH01", 2, 0),
+        ("water_edges", "shore_east", "SH02", 3, 0),
+        ("water_edges", "shore_south", "SH03", 4, 0),
+        ("water_edges", "shore_west", "SH04", 5, 0),
+        ("water_edges", "shore_nw", "SH05", 6, 0),
+        ("water_edges", "shore_ne", "SH06", 7, 0),
+        ("water_edges", "shore_sw", "SH07", 8, 0),
+        ("water_edges", "shore_se", "SH08", 9, 0),
+        ("transitions", "grass_rock", "S01", 2, 0),
+        ("transitions", "grass_sand", "S02", 1, 0),
+        ("transitions", "dirt_rock", "S03", 6, 0),
+        ("transitions", "sand_rock", "S04", 9, 0),
+        ("roads_bridges", "paved_ns", "D01", 0, 0),
+        ("roads_bridges", "paved_ew", "D02", 1, 0),
+        ("cliffs", "cliff_interior", "RV01", 8, 0),
+    ];
+    let slots = if assets.game() == crate::original_assets::Game::RedAlert {
+        RA_SLOTS
+    } else {
+        TD_SLOTS
+    };
 
     // Slot layout must be deterministic: group by category, alphabetical.
-    let mut cats: Vec<&str> = SLOTS.iter().map(|s| s.0).collect();
+    let mut cats: Vec<&str> = slots.iter().map(|s| s.0).collect();
     cats.sort_unstable();
     cats.dedup();
 
@@ -388,7 +426,7 @@ fn build_original_pack(
         categories.push(((*category).to_string(), (slot_x, slot_y)));
 
         let rows: Vec<&(&str, &str, &str, u8, u32)> =
-            SLOTS.iter().filter(|s| s.0 == *category).collect();
+            slots.iter().filter(|s| s.0 == *category).collect();
         let mut fam_rows: HashMap<String, u8> = HashMap::new();
         for (_cat, family, template, row, icon) in rows {
             let (pixels, w, _h) = match assets.icon_rgba(template, *icon, theater) {
@@ -497,27 +535,21 @@ fn blit_original_tile(
 /// flat-coloured terrain rendering in that case.
 pub fn load_default(default_palette: &str) -> Option<TilesetPack> {
     // `CNC_ORIGINAL_TILES=1` composes the shipped Remaster art for the
-    // palette's game (ra_inspired → Red Alert, everything else → Tiberian
-    // Dawn) instead of the generated pack.
-    //
-    // Red Alert's art uses different member naming and template families, so the
-    // original composite only builds when its semantic families actually
-    // resolve; otherwise this falls through to the generated pack.
+    // palette's game — `ra_inspired` maps to Red Alert (`TEXTURES_RA_SRGB.MEG`,
+    // shores zero-padded as `SH01`), everything else to Tiberian Dawn — instead
+    // of the generated pack. Falls through when the Steam install is absent or a
+    // required family fails to resolve.
     let original = std::env::var("CNC_ORIGINAL_TILES").is_ok_and(|v| v == "1");
     if original {
         use crate::original_assets::{Game, Theater};
-        let (game, required) = if default_palette.starts_with("ra") {
-            (Game::RedAlert, ["grass", "deep_water"])
+        let game = if default_palette.starts_with("ra") {
+            Game::RedAlert
         } else {
-            (Game::TiberianDawn, ["grass", "deep_water"])
+            Game::TiberianDawn
         };
         if let Some(pack) = TilesetPack::load_original(game, Theater::Temperate) {
-            let complete = required
-                .iter()
-                .any(|f| pack.family_row("terrain", f).is_some())
-                && required
-                    .iter()
-                    .any(|f| pack.family_row("water_edges", f).is_some());
+            let complete = pack.family_row("terrain", "grass").is_some()
+                && pack.family_row("water_edges", "deep_water").is_some();
             if complete {
                 return Some(pack);
             }

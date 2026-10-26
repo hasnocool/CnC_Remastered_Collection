@@ -357,8 +357,33 @@ fn load_tileset(options: &Options) -> Option<TileSource> {
     }
     // `--original-tiles` renders the shipped Remaster art instead of the
     // generated 32px pack; an explicit `--tileset <dir>` still forces the pack.
+    // The editor's `--theater` maps onto the shipped archive's theater, whose
+    // spelling differs per game: the editor's Snow is RA's SNOW (and TD's
+    // WINTER), Desert is TD-only, Urban is TD's INTERIOR spelling.
     if options.original_tiles && options.tileset.is_none() {
-        return OriginalTileset::load(cnc_asset::original_assets::Theater::Temperate)
+        // Each editor theater maps onto one shipped archive theater. TD ships
+        // TEMPERATE/WINTER/DESERT; RA ships TEMPERATE/SNOW/INTERIOR. Snow is
+        // TD's WINTER, Urban is RA's INTERIOR (no TD equivalent ships art),
+        // Desert is TD's, and Temperate exists in both (TD's is used).
+        let (game, theater) = match options.theater {
+            Some(Theater::Snow) => (
+                cnc_asset::original_assets::Game::RedAlert,
+                cnc_asset::original_assets::Theater::Snow,
+            ),
+            Some(Theater::Urban) => (
+                cnc_asset::original_assets::Game::RedAlert,
+                cnc_asset::original_assets::Theater::Interior,
+            ),
+            Some(Theater::Desert) => (
+                cnc_asset::original_assets::Game::TiberianDawn,
+                cnc_asset::original_assets::Theater::Desert,
+            ),
+            _ => (
+                cnc_asset::original_assets::Game::TiberianDawn,
+                cnc_asset::original_assets::Theater::Temperate,
+            ),
+        };
+        return OriginalTileset::load_game(game, theater)
             .map(|p| TileSource::Original(Arc::new(p)));
     }
     let loaded = if let Some(dir) = options.tileset.as_deref() {

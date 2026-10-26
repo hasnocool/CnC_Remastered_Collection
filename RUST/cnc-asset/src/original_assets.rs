@@ -37,6 +37,12 @@ use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Highest mip level index a member can carry.
+///
+/// Single-icon families ship one DDS per level: TD stops at 7, RA goes to 19
+/// (`CLEAR1.TEM-0019.DDS`). Walking to 20 covers both.
+pub const MAX_MIP_LEVELS: u32 = 20;
+
 /// Terrain texture archives of the Remaster, per game.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Game {
@@ -62,12 +68,25 @@ impl Game {
     }
 }
 
-/// Theater selector matching the original `TheaterType` (GameData thearters).
+/// Theater selector, named after the archive's directory and member suffix.
+///
+/// TD ships `TEMPERATE`/`WINTER`/`DESERT` (`TEM`/`WIN`/`DES`); RA ships
+/// `TEMPERATE`/`SNOW`/`INTERIOR` (`TEM`/`SNO`/`INT`). The games share the
+/// `TEMPERATE` spelling but spell their cold art differently, so the variant
+/// names carry both the directory and the file extension to use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Theater {
+    /// `TEMPERATE` / `TEM` — both games.
     Temperate,
+    /// TD `WINTER` / `WIN`.
     Winter,
+    /// RA `SNOW` / `SNO`.
+    Snow,
+    /// TD `DESERT` / `DES`.
     Desert,
+    /// RA `INTERIOR` / `INT`.
+    Interior,
+    /// TD `JUNGLE` / `JUN` (declared but never shipped).
     Jungle,
 }
 
@@ -77,8 +96,18 @@ impl Theater {
         match self {
             Self::Temperate => ("TEMPERATE", "TEM"),
             Self::Winter => ("WINTER", "WIN"),
+            Self::Snow => ("SNOW", "SNO"),
             Self::Desert => ("DESERT", "DES"),
+            Self::Interior => ("INTERIOR", "INT"),
             Self::Jungle => ("JUNGLE", "JUN"),
+        }
+    }
+
+    /// Theaters a game actually ships, in preference order.
+    pub fn for_game(game: Game) -> &'static [Theater] {
+        match game {
+            Game::TiberianDawn => &[Theater::Temperate, Theater::Winter, Theater::Desert],
+            Game::RedAlert => &[Theater::Temperate, Theater::Snow, Theater::Interior],
         }
     }
 
@@ -86,8 +115,10 @@ impl Theater {
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_uppercase().as_str() {
             "TEMPERATE" => Some(Self::Temperate),
-            "WINTER" | "SNOW" => Some(Self::Winter),
+            "WINTER" => Some(Self::Winter),
+            "SNOW" => Some(Self::Snow),
             "DESERT" => Some(Self::Desert),
+            "INTERIOR" => Some(Self::Interior),
             "JUNGLE" => Some(Self::Jungle),
             _ => None,
         }
@@ -135,6 +166,11 @@ impl OriginalAssets {
         self.members.keys().map(|s| s.as_str()).collect()
     }
 
+    /// Which game's textures this archive holds.
+    pub fn game(&self) -> Game {
+        self.game
+    }
+
     /// Raw member bytes for one template icon.
     ///
     /// `template` is the original INI name (`"SH1"`), `icon` the flat icon index
@@ -147,14 +183,6 @@ impl OriginalAssets {
         mip: u32,
     ) -> Result<Vec<u8>> {
         let (dir_ext, file_ext) = theater.components();
-        // Two naming forms exist in the archive. Most families store one file
-        // per (mip, icon): `<TEMPLATE>.<EXT>-<mip>-<icon>.DDS`. Small families
-        // store a single image per mip: `<TEMPLATE>.<EXT>-<mip>.DDS`, which is
-        // the template's only (first) icon. When the requested mip level has no
-        // member, fall through to the highest mip that does (families often
-        // omit mip 0 for their single icons).
-        // RA zero-pads shoreline families (`SH01` where TD writes `SH1`);
-        // try the given name then the padded variant.
         // `SH1` -> `SH01` (RA zero-pads two-digit shoreline families).
         let padded = |name: &str| -> String {
             if name.len() > 2 {
@@ -165,21 +193,32 @@ impl OriginalAssets {
             }
             name.to_string()
         };
-        let root = format!(
-            r"DATA\ART\TEXTURES\SRGB\{}\TERRAIN\{}\{}\{}.{}",
+        // The family directory is spelled `<TEMPLATE>` in TD and
+        // `<TEMPLATE>.<EXT>` in RA (`SH1` vs `SH01.TEM`); the file itself always
+        // uses `<TEMPLATE>.<EXT>-<mip>[-<icon>].DDS`. RA also zero-pads the
+        // template name, so probe every combination rather than guessing.
+        let prefix = format!(
+            r"DATA\ART\TEXTURES\SRGB\{}\TERRAIN\{}",
             self.game.member_root(),
             dir_ext,
-            template,
-            template,
-            file_ext,
         );
-        let root_padded = root.replacen(
-            &format!("\\{}", template),
-            &format!("\\{}", padded(template)),
-            1,
-        );
-        for level in mip..8u32 {
-            for base in [&root, &root_padded] {
+        let roots: Vec<String> = [template.to_string(), padded(template)]
+            .iter()
+            .flat_map(|tpl| {
+                // The family directory is either `<TPL>` (TD) or `<TPL>.<EXT>`
+                // (RA); the file basename is always `<TPL>.<EXT>`.
+                [
+                    format!("{prefix}\\{tpl}\\{tpl}.{file_ext}"),
+                    format!("{prefix}\\{tpl}.{file_ext}\\{tpl}.{file_ext}"),
+                ]
+            })
+            .collect();
+        // Level 0 is the sharpest image. Single-icon families ship a flat file
+        // per level (`CLEAR1.TEM-0000.DDS` … `-0019.DDS` — RA carries 20 levels,
+        // TD 8); icon families ship one per (level, icon). Walk outward from the
+        // requested level so callers asking for level 0 get the sharpest art.
+        for level in mip..MAX_MIP_LEVELS {
+            for base in &roots {
                 // Icon indices appear with two or four digits depending on
                 // family (SH1.TEM-0004-00.DDS vs FALLS1.TEM-0000-0000.DDS).
                 for width in [2usize, 4] {
@@ -194,7 +233,10 @@ impl OriginalAssets {
                 }
             }
         }
-        bail!("texture member {root}-[0-7]-[icon].DDS not in archive")
+        bail!(
+            "texture member {}.[EXT]-[0-{MAX_MIP_LEVELS}]-[icon].DDS not in archive",
+            template
+        )
     }
 
     /// Decode one template icon to RGBA at its largest available level.
@@ -594,6 +636,10 @@ mod tests {
         OriginalAssets::open_default(Game::TiberianDawn).ok()
     }
 
+    fn shipped_archive_of(game: Game) -> Option<OriginalAssets> {
+        OriginalAssets::open_default(game).ok()
+    }
+
     #[test]
     fn normalize_keeps_single_level_files() {
         // A well-formed single-level DDS passes through unchanged apart from
@@ -744,6 +790,57 @@ mod tests {
             &bytes[start..end],
             &assets.data[assets.members[name].0..assets.members[name].1]
         );
+    }
+
+    #[test]
+    fn red_alert_templates_resolve_when_archive_present() {
+        let Some(assets) = shipped_archive_of(Game::RedAlert) else {
+            return; // Red Alert archive not installed
+        };
+        // RA spells its ocean shores zero-padded and puts the theater code in
+        // the family directory (`SH01.TEM\SH01.TEM-...`).
+        for tpl in ["CLEAR1", "P01", "W1", "SH01", "SH02", "S01", "D01", "RV01"] {
+            let (rgba, w, h) = assets
+                .icon_rgba(tpl, 0, Theater::Temperate)
+                .unwrap_or_else(|e| panic!("{tpl}: {e:#}"));
+            assert_eq!((w, h), (128, 128));
+            assert_eq!(rgba.len(), (w * h * 4) as usize);
+        }
+    }
+
+    #[test]
+    fn archive_theater_names_differ_by_game() {
+        // TD ships WINTER/DESERT; RA ships SNOW/INTERIOR.
+        let td = Theater::for_game(Game::TiberianDawn);
+        assert!(td.contains(&Theater::Winter));
+        assert!(td.contains(&Theater::Desert));
+        assert!(!td.contains(&Theater::Snow));
+        let ra = Theater::for_game(Game::RedAlert);
+        assert!(ra.contains(&Theater::Snow));
+        assert!(ra.contains(&Theater::Interior));
+        assert!(!ra.contains(&Theater::Winter));
+        assert_eq!(Theater::Snow.components(), ("SNOW", "SNO"));
+        assert_eq!(Theater::Interior.components(), ("INTERIOR", "INT"));
+    }
+
+    #[test]
+    fn pack_slots_resolve_for_both_games() {
+        // The semantic rows each game's composite must produce.
+        for game in [Game::TiberianDawn, Game::RedAlert] {
+            let Some(pack) =
+                crate::tileset_pack::TilesetPack::load_original(game, Theater::Temperate)
+            else {
+                continue; // archive not installed
+            };
+            for fam in ["grass", "dirt", "sand", "rock", "deep_water", "shore_north"] {
+                let row = if fam == "deep_water" || fam.starts_with("shore") {
+                    pack.family_row("water_edges", fam)
+                } else {
+                    pack.family_row("terrain", fam)
+                };
+                assert!(row.is_some(), "{game:?} pack lacks family {fam}");
+            }
+        }
     }
 
     #[test]
