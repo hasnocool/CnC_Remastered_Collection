@@ -78,7 +78,7 @@
 - `cnc-asset::original_assets` reads `Data/TEXTURE/TEXTURES_TD_SRGB.MEG` out of the Steam install **natively** (reverse-engineered MegaFileClass container: marker 0xFFFFFFFF, magic 0x3F7D70A4, u16-prefixed name table, positional 20-byte records, raw DXT5 members) and writes it back (`write_shipped_archive`); `normalize_dds` handles the NVTT `header_size + 4` payload offset and the mip chains padded into the next payload slot; `encode_dds_dxt5` encodes RGBA back to single-level DXT5. Round-trip tests in `original_assets.rs`.
 - **Both surfaces render original art:** launcher and map editor via `--original-tiles` / `CNC_ORIGINAL_TILES=1`, composited by `tileset_pack::build_original_pack` into the same combined-atlas layout so no draw code changed. Red Alert falls back to the generated pack (its member naming/families differ — see evidence). Screenshots: `.omo/evidence/{editor,launcher}-{original,generated}-tiles.png`.
 - `original_templates.rs` ports the 216-entry `TemplateTypeClass` table from `original/TIBERIANDAWN/CDATA.CPP` including `AltIcons` slope lists, so tile semantics (land type, alternate icons) match the original engine.
-- Format write-up + verified family mapping: `RUST/assets/original/original-asset-integration.md`.
+- Format write-up + verified family mapping: `RUST/docs/original-asset-format.md`.
 
 ### 2.10 File formats — ⚠️ Partial
 - `cnc-asset`: MIX/SHP/Format80/VOC/AUD/PAL done **plus LCW both ways** — `format80.rs` ships `decompress` (`:46`) *and* `compress` (`:270`) with round-trip tests; **VQ video and VXL voxels unsupported** (`video.rs:182`); CSF is 17-line stub.
