@@ -14,6 +14,7 @@ Map editor application for the C&C Remastered Collection Rust port. Provides ter
 - **Trigger Editor**: Visual trigger editing (conditions/actions) with INI export
 - **Procedural Generation**: `generator.rs` - integrates `cnc-procgen` for terrain/base generation
 - **Tileset Packing**: `pack_tileset.rs` - exports tilesets for `cnc-asset` consumption
+- **Original Art Source**: `original_tileset.rs` - composites the shipped Remaster MEG textures into the same combined-atlas layout, selected by `--original-tiles`; `ui::TileSource` abstracts generated vs original so the render loop is unchanged
 - **Original Format**: `original.rs` - reads/writes legacy Westwood map format
 - **Fixtures**: `fixtures.rs` - test maps, scenario templates
 
@@ -59,6 +60,7 @@ Map editor application for the C&C Remastered Collection Rust port. Provides ter
 - src/plugin.rs - EditorPlugin trait, TD/RA implementations
 - src/generator.rs - MapGenerator, procedural integration
 - src/pack_tileset.rs - Tileset export for cnc-asset
+- src/original_tileset.rs - Original Remaster texture source (native MEG reads)
 - src/original.rs - Legacy Westwood map format I/O
 - src/fixtures.rs - Test fixtures, scenario templates
 - src/ui.rs - Egui UI components, viewport, panels

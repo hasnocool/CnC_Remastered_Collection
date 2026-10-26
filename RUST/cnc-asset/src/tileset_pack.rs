@@ -21,6 +21,7 @@
 //! atlas pixels and can be obtained with [`TilesetPack::tile_px_rect`].
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -36,6 +37,8 @@ pub const SHEET_SIZE: u32 = 256;
 pub const SHEET_COLUMNS: u32 = 4;
 /// Category sheets composited along the combined atlas Y axis.
 pub const SHEET_ROWS: u32 = 2;
+/// Tiles per row along a 256px sheet at `TILE_SIZE` (16x16 grid).
+pub const SHEET_TILES: u32 = 16;
 
 /// Atlas metadata as written in the pack's `catalog.json`.
 #[derive(Deserialize)]
@@ -233,6 +236,36 @@ impl TilesetPack {
     pub fn family_row(&self, category: &str, family: &str) -> Option<u8> {
         self.families.get(category)?.get(family).copied()
     }
+
+    /// All semantic families of one category as `(name, row)` pairs.
+    pub fn families_of(&self, category: &str) -> Vec<(&str, u8)> {
+        self.families
+            .get(category)
+            .map(|m| m.iter().map(|(n, &r)| (n.as_str(), r)).collect())
+            .unwrap_or_default()
+    }
+
+    /// Load a tileset pack built natively from the shipped Remaster textures.
+    ///
+    /// Reads the Steam `TEXTURES_*_SRGB.MEG` through
+    /// [`crate::original_assets::OriginalAssets`], decodes each template icon of
+    /// `theater` to RGBA, and composites the icons into the same combined-atlas
+    /// layout [`TilesetPack::load`] produces — so every consumer (map editor,
+    /// launcher) renders the original art with no other code change.
+    ///
+    /// Family rows follow the semantic families the draw code queries
+    /// (`terrain.grass`, `water_edges.deep_water`, ...); each family's column
+    /// holds the theater's own art.
+    ///
+    /// Returns `None` when the Steam install is absent or a member fails to
+    /// decode.
+    pub fn load_original(
+        game: crate::original_assets::Game,
+        theater: crate::original_assets::Theater,
+    ) -> Option<TilesetPack> {
+        let assets = crate::original_assets::OriginalAssets::open_default(game).ok()?;
+        build_original_pack(&assets, theater)
+    }
 }
 
 /// Copy one sheet's RGBA rows into the combined atlas at `(slot_x, slot_y)`.
@@ -295,6 +328,167 @@ pub fn default_pack_dir() -> Option<PathBuf> {
     None
 }
 
+/// Composite the original theater tiles into a `TilesetPack`.
+///
+/// Template families and their semantic rows:
+/// - `terrain`: CLEAR1 (grass), P01 (dirt/rough/mud/... patches), B1 (rock)
+/// - `water_edges`: W1 (deep), SH1 icons (shore)
+/// - `transitions`: S01.. (rock slopes), rendered from their slope art
+/// - `cliffs`: RV01.. river banks (elevation look-alikes)
+/// - `roads_bridges`: D01.. roads
+fn build_original_pack(
+    assets: &crate::original_assets::OriginalAssets,
+    theater: crate::original_assets::Theater,
+) -> Option<TilesetPack> {
+    /// (category, family, template, manifest row, icon index)
+    // Base ground comes from the PTT patch family: the original engine draws a
+    // solid base under `CLEAR1`, which is itself a translucent clear-overlay
+    // (28% coverage). See `pack_slots` for the verified family list.
+    const SLOTS: &[(&str, &str, &str, u8, u32)] = &[
+        ("terrain", "grass", "P01", 0, 0),
+        ("terrain", "dirt", "P03", 1, 0),
+        ("terrain", "sand", "P04", 2, 0),
+        ("terrain", "rock", "P07", 4, 0),
+        ("terrain", "rough", "P08", 9, 0),
+        ("terrain", "mud", "P13", 7, 0),
+        ("terrain", "concrete", "P14", 14, 0),
+        ("water_edges", "deep_water", "W1", 0, 0),
+        ("water_edges", "shallow_water", "W2", 1, 0),
+        ("water_edges", "shore_north", "SH1", 2, 0),
+        ("water_edges", "shore_east", "SH1", 3, 1),
+        ("water_edges", "shore_south", "SH1", 4, 2),
+        ("water_edges", "shore_west", "SH1", 5, 3),
+        ("water_edges", "shore_nw", "SH1", 6, 4),
+        ("water_edges", "shore_ne", "SH1", 7, 5),
+        ("water_edges", "shore_sw", "SH1", 8, 6),
+        ("water_edges", "shore_se", "SH1", 9, 7),
+        ("transitions", "grass_rock", "S01", 2, 0),
+        ("transitions", "grass_sand", "S02", 1, 0),
+        ("transitions", "dirt_rock", "S03", 6, 0),
+        ("transitions", "sand_rock", "S04", 9, 0),
+        ("roads_bridges", "paved_ns", "D01", 0, 0),
+        ("roads_bridges", "paved_ew", "D02", 1, 0),
+        ("cliffs", "cliff_interior", "RV01", 8, 0),
+    ];
+
+    // Slot layout must be deterministic: group by category, alphabetical.
+    let mut cats: Vec<&str> = SLOTS.iter().map(|s| s.0).collect();
+    cats.sort_unstable();
+    cats.dedup();
+
+    let width = SHEET_COLUMNS * SHEET_SIZE;
+    let height = SHEET_ROWS * SHEET_SIZE;
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+    let mut categories: Vec<(String, (u32, u32))> = Vec::new();
+    let mut families: HashMap<String, HashMap<String, u8>> = HashMap::new();
+
+    for (slot, category) in cats.iter().enumerate() {
+        let slot_x = ((slot as u32) % SHEET_COLUMNS) * SHEET_SIZE;
+        let slot_y = ((slot as u32) / SHEET_COLUMNS) * SHEET_SIZE;
+        categories.push(((*category).to_string(), (slot_x, slot_y)));
+
+        let rows: Vec<&(&str, &str, &str, u8, u32)> =
+            SLOTS.iter().filter(|s| s.0 == *category).collect();
+        let mut fam_rows: HashMap<String, u8> = HashMap::new();
+        for (_cat, family, template, row, icon) in rows {
+            let (pixels, w, _h) = match assets.icon_rgba(template, *icon, theater) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            // Original families have no per-variant art: one icon stands for the
+            // whole family. Fill every column of the row with it, because both
+            // the editor and launcher pick the column as a deterministic
+            // 0..15 variant and expect art there.
+            for column in 0..SHEET_TILES {
+                blit_original_tile(
+                    &mut rgba,
+                    width,
+                    &pixels,
+                    w,
+                    slot_x + column * u32::from(TILE_SIZE),
+                    slot_y + u32::from(*row) * u32::from(TILE_SIZE),
+                );
+            }
+            fam_rows.insert((*family).to_string(), *row);
+        }
+        if !fam_rows.is_empty() {
+            families.insert((*category).to_string(), fam_rows);
+        }
+    }
+
+    Some(TilesetPack {
+        palette: "original".to_string(),
+        tile_size: TILE_SIZE,
+        width,
+        height,
+        rgba,
+        categories,
+        families,
+    })
+}
+
+/// Downsample one shipped icon (64 or 128 px) into a 16x16 cell.
+///
+/// The original icons are sparse: only ~1/3 of the pixels carry texture, the
+/// rest is transparent gap. A naive every-8th-pixel pick lands on gaps and the
+/// cell comes out empty, so each cell samples every source pixel in its block
+/// and averages the opaque ones, falling back to the first opaque pixel seen.
+fn blit_original_tile(
+    atlas: &mut [u8],
+    atlas_width: u32,
+    icon: &[u8],
+    icon_side: u32,
+    dst_x: u32,
+    dst_y: u32,
+) {
+    let step = icon_side / u32::from(TILE_SIZE);
+    if step == 0 {
+        return;
+    }
+    for ty in 0..u32::from(TILE_SIZE) {
+        for tx in 0..u32::from(TILE_SIZE) {
+            let mut sum = [0u32; 4];
+            let mut opaque = 0usize;
+            let mut last_opaque = 0usize;
+            for sy in (ty * step)..((ty + 1) * step) {
+                for sx in (tx * step)..((tx + 1) * step) {
+                    let o = ((sy * icon_side + sx) * 4) as usize;
+                    if o + 4 > icon.len() {
+                        continue;
+                    }
+                    last_opaque = o;
+                    if icon[o + 3] > 8 {
+                        for c in 0..4 {
+                            sum[c] += u32::from(icon[o + c]);
+                        }
+                        opaque += 1;
+                    }
+                }
+            }
+            let d = ((dst_y + ty) * atlas_width + dst_x + tx) as usize * 4;
+            if d + 4 > atlas.len() {
+                continue;
+            }
+            match NonZeroUsize::new(opaque) {
+                Some(count) => {
+                    for c in 0..3 {
+                        atlas[d + c] = u8::try_from(sum[c] / count.get() as u32).unwrap_or(u8::MAX);
+                    }
+                    atlas[d + 3] = u8::try_from(sum[3] / count.get() as u32).unwrap_or(u8::MAX);
+                }
+                None => {
+                    // No opaque sample in the block: leave the cell transparent
+                    // (the last sampled pixel's colour is kept unlit).
+                    if last_opaque + 4 <= icon.len() {
+                        atlas[d..d + 4].copy_from_slice(&icon[last_opaque..last_opaque + 4]);
+                        atlas[d + 3] = 0;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Load the default pack with process-wide environment overrides.
 ///
 /// `CNC_TILESET_DIR` overrides the pack directory and `CNC_TILESET_PALETTE`
@@ -302,6 +496,33 @@ pub fn default_pack_dir() -> Option<PathBuf> {
 /// Returns `None` when the pack is missing or unreadable; callers fall back to
 /// flat-coloured terrain rendering in that case.
 pub fn load_default(default_palette: &str) -> Option<TilesetPack> {
+    // `CNC_ORIGINAL_TILES=1` composes the shipped Remaster art for the
+    // palette's game (ra_inspired → Red Alert, everything else → Tiberian
+    // Dawn) instead of the generated pack.
+    //
+    // Red Alert's art uses different member naming and template families, so the
+    // original composite only builds when its semantic families actually
+    // resolve; otherwise this falls through to the generated pack.
+    let original = std::env::var("CNC_ORIGINAL_TILES").is_ok_and(|v| v == "1");
+    if original {
+        use crate::original_assets::{Game, Theater};
+        let (game, required) = if default_palette.starts_with("ra") {
+            (Game::RedAlert, ["grass", "deep_water"])
+        } else {
+            (Game::TiberianDawn, ["grass", "deep_water"])
+        };
+        if let Some(pack) = TilesetPack::load_original(game, Theater::Temperate) {
+            let complete = required
+                .iter()
+                .any(|f| pack.family_row("terrain", f).is_some())
+                && required
+                    .iter()
+                    .any(|f| pack.family_row("water_edges", f).is_some());
+            if complete {
+                return Some(pack);
+            }
+        }
+    }
     let dir = match std::env::var("CNC_TILESET_DIR") {
         Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
         _ => default_pack_dir()?,

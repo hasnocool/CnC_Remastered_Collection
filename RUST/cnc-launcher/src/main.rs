@@ -80,6 +80,12 @@ pub(crate) const MAP_SIZE: u32 = 64;
 #[command(name = "cnc-launcher")]
 #[command(about = "Command & Conquer Remastered Collection - Rust Clone")]
 struct Args {
+    /// Render terrain from the original Remaster Steam assets (direct MEG
+    /// reads) instead of the generated pack. Degrades to the generated pack
+    /// when the Steam install is absent.
+    #[arg(long)]
+    original_tiles: bool,
+
     /// Renderer backend: "wgpu" (default) or "software". Omit it to take
     /// the persisted launcher-options choice.
     #[arg(short, long)]
@@ -2893,6 +2899,9 @@ impl LauncherApp {
             camera,
             game,
             sprite_atlas: None,
+            // `--original-tiles` sets CNC_ORIGINAL_TILES so every
+            // `load_default` composite uses the shipped Remaster art (render
+            // paths included), degrading to the generated pack when absent.
             ra_tileset: cnc_asset::tileset_pack::load_default("ra_inspired"),
             td_tileset: cnc_asset::tileset_pack::load_default("td_inspired"),
             tileset_slot: None,
@@ -5911,6 +5920,9 @@ impl RaLauncherApp {
             mixer: AudioMixer::headless(),
             theme_queue: audio_director::ThemeQueue::new(),
             event_subscriber: events_subscriber::EventSubscriber::new(event_bus),
+            // `--original-tiles` sets CNC_ORIGINAL_TILES so every
+            // `load_default` composite uses the shipped Remaster art (render
+            // paths included), degrading to the generated pack when absent.
             ra_tileset: cnc_asset::tileset_pack::load_default("ra_inspired"),
             td_tileset: cnc_asset::tileset_pack::load_default("td_inspired"),
             tileset_slot: None,
@@ -9118,6 +9130,12 @@ fn list_td_missions(dir: &Path) -> Result<()> {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    // Propagate `--original-tiles` so every tileset load (including the
+    // render paths' OnceLock) composites the shipped Remaster art.
+    if args.original_tiles {
+        // SAFETY: single-threaded startup, before any render thread spawns.
+        unsafe { std::env::set_var("CNC_ORIGINAL_TILES", "1") };
+    }
     // Structured logging: `cnc-logs` installs the tracing subscriber with
     // per-target filters and mirrors every enabled event into a bounded
     // in-memory LogBuffer (oldest entries rotate out when it is full).

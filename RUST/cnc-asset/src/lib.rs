@@ -13,6 +13,8 @@ pub mod convert;
 pub mod font;
 pub mod format80;
 pub mod megafile;
+pub mod original_assets;
+pub mod original_templates;
 pub mod palette;
 pub mod ra_pack;
 pub mod registry;

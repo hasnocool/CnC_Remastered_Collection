@@ -21,9 +21,11 @@ use std::time::{Duration, Instant};
 use cnc_core::{Fixed16_16, Vec2};
 use cnc_map_editor::app::{EditorState, PointerButton};
 use cnc_map_editor::generator::{generate, MapGenSettings, OverlayType, TerrainType};
+use cnc_map_editor::original_tileset::OriginalTileset;
 use cnc_map_editor::pack_tileset::PackTileset;
 use cnc_map_editor::plugin::Theater;
 use cnc_map_editor::presenter::SoftPresenter;
+use cnc_map_editor::ui::TileSource;
 use cnc_renderer::{Camera, Renderer, SoftwareRenderer, WgpuRenderer};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -58,6 +60,7 @@ struct Options {
     tileset: Option<PathBuf>,
     /// Disable the tileset pack entirely (fall back to flat colored quads).
     no_tileset: bool,
+    original_tiles: bool,
     /// Headless zoom factor applied before the screenshot (default: the
     /// auto-fit value `fit()` computes). 1.0 = native 32px tiles.
     zoom: Option<f32>,
@@ -90,6 +93,7 @@ impl Default for Options {
             export_templates: None,
             tileset: None,
             no_tileset: false,
+            original_tiles: false,
             zoom: None,
             center: None,
             no_grid: false,
@@ -191,6 +195,7 @@ fn parse_args() -> Result<Options, String> {
                 options.tileset = Some(PathBuf::from(args.next().ok_or("--tileset needs a path")?));
             }
             "--no-tileset" => options.no_tileset = true,
+            "--original-tiles" => options.original_tiles = true,
             "--no-grid" => options.no_grid = true,
             "--zoom" => {
                 let value = args
@@ -346,9 +351,15 @@ fn run_export_templates(dir: &std::path::Path) -> Result<(), Box<dyn std::error:
 /// back to flat colored terrain quads. `--tileset <dir>` is an explicit
 /// override that must be a cnc32-style pack; omission enables discovery
 /// (`Cnc32Pack::fallback_dir()`).
-fn load_tileset(options: &Options) -> Option<Arc<PackTileset>> {
+fn load_tileset(options: &Options) -> Option<TileSource> {
     if options.no_tileset {
         return None;
+    }
+    // `--original-tiles` renders the shipped Remaster art instead of the
+    // generated 32px pack; an explicit `--tileset <dir>` still forces the pack.
+    if options.original_tiles && options.tileset.is_none() {
+        return OriginalTileset::load(cnc_asset::original_assets::Theater::Temperate)
+            .map(|p| TileSource::Original(Arc::new(p)));
     }
     let loaded = if let Some(dir) = options.tileset.as_deref() {
         PackTileset::load(std::path::Path::new(dir))
@@ -363,7 +374,7 @@ fn load_tileset(options: &Options) -> Option<Arc<PackTileset>> {
                 pack.height(),
                 pack.tile_size()
             );
-            Some(Arc::new(pack))
+            Some(TileSource::Generated(Arc::new(pack)))
         }
         Err(_) => {
             eprintln!(

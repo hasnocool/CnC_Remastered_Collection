@@ -11,6 +11,7 @@ pub mod generator;
 pub mod history;
 pub mod map;
 pub mod original;
+pub mod original_tileset;
 pub mod pack_tileset;
 pub mod plugin;
 pub mod presenter;

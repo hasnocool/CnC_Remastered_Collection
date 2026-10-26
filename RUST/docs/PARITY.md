@@ -74,6 +74,12 @@
 - `cnc-sfx` + `cnc-music` (real generators) have **zero runtime consumers**.
 - Video: VQA demuxer uncompressed only; compressed variants need format80.
 
+### 2.10a Original Remastered textures — ♻️ Native replacement *(added 2026-10-26)*
+- `cnc-asset::original_assets` reads `Data/TEXTURE/TEXTURES_TD_SRGB.MEG` out of the Steam install **natively** (reverse-engineered MegaFileClass container: marker 0xFFFFFFFF, magic 0x3F7D70A4, u16-prefixed name table, positional 20-byte records, raw DXT5 members) and writes it back (`write_shipped_archive`); `normalize_dds` handles the NVTT `header_size + 4` payload offset and the mip chains padded into the next payload slot; `encode_dds_dxt5` encodes RGBA back to single-level DXT5. Round-trip tests in `original_assets.rs`.
+- **Both surfaces render original art:** launcher and map editor via `--original-tiles` / `CNC_ORIGINAL_TILES=1`, composited by `tileset_pack::build_original_pack` into the same combined-atlas layout so no draw code changed. Red Alert falls back to the generated pack (its member naming/families differ — see evidence). Screenshots: `.omo/evidence/{editor,launcher}-{original,generated}-tiles.png`.
+- `original_templates.rs` ports the 216-entry `TemplateTypeClass` table from `original/TIBERIANDAWN/CDATA.CPP` including `AltIcons` slope lists, so tile semantics (land type, alternate icons) match the original engine.
+- Format write-up + verified family mapping: `RUST/assets/original/original-asset-integration.md`.
+
 ### 2.10 File formats — ⚠️ Partial
 - `cnc-asset`: MIX/SHP/Format80/VOC/AUD/PAL done **plus LCW both ways** — `format80.rs` ships `decompress` (`:46`) *and* `compress` (`:270`) with round-trip tests; **VQ video and VXL voxels unsupported** (`video.rs:182`); CSF is 17-line stub.
 - **Original format I/O has landed in three of four places** *(corrected 2026-10-20 — previous claim: no SCENARIO.CPP loader, no `.MPR`/LCW/MapPack, editor can't open TD ini+bin or RA .MPR)*: TD `scenario_loader.rs` (ini+bin, raw/LCW), RA `original_scenario.rs` + `ra_pack`/`base64`, editor `MapModel::from_original_ra` (`map.rs:409`) and `MapModel::from_original_td` (`map.rs:500`). Re-verified 2026-10-20 — `.omo/evidence/task-6-parity-100.log` §G. Remaining gap: RA object placement from `[Houses]`/`[Base]`, and no original-format fixture in-tree.

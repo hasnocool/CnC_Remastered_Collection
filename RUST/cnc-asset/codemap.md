@@ -29,6 +29,8 @@ Asset loading and parsing library for Command & Conquer file formats. Handles We
 - convert: convert_shp, convert_vxl, convert_audio, convert_palette
 - font: Font, FontGlyph, load_fnt
 - format80: Format80Decoder, Format80Frame
+- original_assets: OriginalAssets, Game, Theater, index_shipped_archive, write_shipped_archive, normalize_dds, encode_dds_dxt5, steam_install_root
+- original_templates: OriginalTemplate, LandType, ORIGINAL_TEMPLATES
 - palette: Palette, remap, player_color_map, shadow_map
 - registry: AssetRegistry, AssetHandle
 - shape: Shape, ShapeFrame, load_shp

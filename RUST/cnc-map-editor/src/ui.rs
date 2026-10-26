@@ -9,7 +9,66 @@ use std::sync::Arc;
 
 use crate::history::History;
 use crate::map::{MapModel, TILE_SIZE};
+use crate::original_tileset::OriginalTileset;
 use crate::pack_tileset::PackTileset;
+
+/// Tile art source the editor renders with.
+///
+/// `Generated` is the regenerated 32px pack; `Original` composites the shipped
+/// Remaster icon art (see [`OriginalTileset`]). The render loop treats both
+/// through the same `rgba` / `sprite_rect` / `cell_draw` seam.
+#[derive(Clone)]
+pub enum TileSource {
+    Generated(Arc<PackTileset>),
+    Original(Arc<OriginalTileset>),
+}
+
+impl TileSource {
+    pub fn width(&self) -> u32 {
+        match self {
+            Self::Generated(p) => p.width(),
+            Self::Original(p) => p.width(),
+        }
+    }
+
+    pub fn height(&self) -> u32 {
+        match self {
+            Self::Generated(p) => p.height(),
+            Self::Original(p) => p.height(),
+        }
+    }
+
+    pub fn rgba(&self) -> &[u8] {
+        match self {
+            Self::Generated(p) => p.rgba(),
+            Self::Original(p) => p.rgba(),
+        }
+    }
+
+    /// Pixel rect of a semantic tile id, or `None` for an unknown id.
+    pub fn sprite_rect(&self, sprite_id: &str) -> Option<cnc_core::Rect> {
+        match self {
+            Self::Generated(p) => p.sprite_rect(sprite_id),
+            Self::Original(p) => p.sprite_rect(sprite_id),
+        }
+    }
+
+    /// Per-cell pick (base id plus stacked layers).
+    pub fn cell_draw(
+        &self,
+        model: &MapModel,
+        x: i32,
+        y: i32,
+    ) -> Option<crate::pack_tileset::CellTile> {
+        match self {
+            Self::Generated(p) => p.cell_draw(model, x, y),
+            Self::Original(p) => {
+                let index = model.index(cnc_core::Vec2i::new(x, y))?;
+                p.cell_draw(model.terrain[index])
+            }
+        }
+    }
+}
 use crate::tools::Tool;
 use cnc_core::{Fixed16_16, Vec2, Vec2i};
 use cnc_renderer::{Renderer, Sprite, TILESET_TEXTURE_ID};
@@ -132,7 +191,7 @@ pub struct EditorUI {
     /// Optional cnc32 pack tileset: when set, cells draw the same tile layers
     /// as the main editor (shores, blob transitions, resource sprites); when
     /// absent, this view keeps its flat-coloured fallback quads.
-    pub tileset: Option<Arc<PackTileset>>,
+    pub tileset: Option<TileSource>,
 }
 
 impl Default for EditorUI {
@@ -240,13 +299,18 @@ impl EditorUI {
     pub fn render(&mut self, renderer: &mut dyn Renderer, model: &MapModel) {
         let tile = TILE_SIZE * self.zoom.max(0.1);
 
-        // Tileset mode: upload the pack atlas once, then draw the same tile
+        // Tileset mode: upload the atlas once, then draw the same tile
         // layers (shores, cliffs, resource sprites) as the main editor.
         let mut tiled = self.tileset.is_some();
-        if let Some(pack) = self.tileset.as_ref() {
+        if let Some(source) = self.tileset.as_ref() {
             if !renderer.texture_ready(TILESET_TEXTURE_ID)
                 && renderer
-                    .set_atlas_texture(TILESET_TEXTURE_ID, pack.width(), pack.height(), pack.rgba())
+                    .set_atlas_texture(
+                        TILESET_TEXTURE_ID,
+                        source.width(),
+                        source.height(),
+                        source.rgba(),
+                    )
                     .is_err()
             {
                 tiled = false;
@@ -262,18 +326,16 @@ impl EditorUI {
                 let mut drew_sprite = false;
                 let mut drew_overlay_sprite = false;
                 if tiled {
-                    if let Some(pack) = self.tileset.as_ref() {
-                        // `pack` is an Arc<PackTileset>; deref for the borrow.
-                        let pack = pack.as_ref();
-                        if let Some(cell) = pack.cell_draw(model, x as i32, y as i32) {
+                    if let Some(source) = self.tileset.as_ref() {
+                        if let Some(cell) = source.cell_draw(model, x as i32, y as i32) {
                             if let Some(id) =
-                                cell.base.as_deref().and_then(|id| pack.sprite_rect(id))
+                                cell.base.as_deref().and_then(|id| source.sprite_rect(id))
                             {
                                 draw_uv_sprite(renderer, sx, sy, tile, id);
                                 drew_sprite = true;
                             }
                             for layer in &cell.layers {
-                                if let Some(rect) = pack.sprite_rect(layer) {
+                                if let Some(rect) = source.sprite_rect(layer) {
                                     draw_uv_sprite(renderer, sx, sy, tile, rect);
                                     drew_sprite = true;
                                     drew_overlay_sprite = true;

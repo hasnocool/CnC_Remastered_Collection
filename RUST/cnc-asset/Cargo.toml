@@ -21,7 +21,7 @@ bitflags = { workspace = true }
 nom = { workspace = true }
 flate2 = { workspace = true }
 lzw = { workspace = true }
-image = { workspace = true }
+image = { workspace = true, features = ["dds"] }
 audio = { workspace = true }
 hound = { workspace = true }
 symphonia = { workspace = true }

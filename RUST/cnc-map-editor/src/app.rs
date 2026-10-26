@@ -26,10 +26,10 @@ use crate::history::{
     SetObjectClass, SetScenarioInfo, SetTrigger,
 };
 use crate::map::{ImportKind, MapModel, MapObject, Trigger, TILE_SIZE};
-use crate::pack_tileset::PackTileset;
 use crate::plugin::{GamePlugin, RedAlertPlugin, Theater, TiberianDawnPlugin};
 use crate::tools::{EraseTool, ObjectTool, TerrainTool, TriggerTool};
 use crate::ui::EditorUI;
+use crate::ui::TileSource;
 
 /// Height of the top toolbar.
 pub const TOP_H: f32 = 36.0;
@@ -512,7 +512,7 @@ pub struct EditorState {
     pub pan_y: f32,
     pub show_grid: bool,
     /// Tileset pack used for terrain sprites (None = flat colored quads).
-    pub tileset: Option<std::sync::Arc<PackTileset>>,
+    pub tileset: Option<TileSource>,
     /// Shift is held (bulk palette replacement while a selection exists).
     pub shift_held: bool,
     pub focus: Focus,
@@ -4028,7 +4028,6 @@ impl EditorState {
         if let Some(tileset) = self
             .tileset
             .as_ref()
-            .map(|pack| pack.as_ref())
             .filter(|_| !renderer.texture_ready(TERRAIN_TILE_TEXTURE))
         {
             match renderer.set_atlas_texture(
@@ -4042,7 +4041,7 @@ impl EditorState {
             }
         }
 
-        let pack_ref = draw_tiles.then_some(self.tileset.as_ref()).flatten();
+        let source_ref = draw_tiles.then_some(self.tileset.as_ref()).flatten();
         // One-shot upload of the pack's unit animation atlas into texture
         // slot 0, so unit objects sample real art instead of flat quads.
         // Failures leave the quads (the sprite draws simply resolve nothing).
@@ -4070,11 +4069,11 @@ impl EditorState {
                 // bands, blob terrain transitions and auto-connected
                 // road/wall tiles replace the plain ground where applicable
                 // (the pack adapter decides, priority order preserved).
-                let cell = pack_ref.and_then(|pack| pack.cell_draw(&self.map, x, y));
+                let cell = source_ref.and_then(|source| source.cell_draw(&self.map, x, y));
                 let base_rect = cell.as_ref().and_then(|tile| {
                     tile.base
                         .as_deref()
-                        .and_then(|sprite_id| pack_ref.and_then(|pack| pack.sprite_rect(sprite_id)))
+                        .and_then(|sprite_id| source_ref.and_then(|s| s.sprite_rect(sprite_id)))
                 });
                 match base_rect {
                     Some(rect) => {
@@ -4098,11 +4097,11 @@ impl EditorState {
                 // RGBA sprite layers (trees, resource crystals) alpha-
                 // composited over the base tile; the old flat overlay dot
                 // stays as fallback for missing pack art.
-                if let Some(pack) = pack_ref {
+                if let Some(source) = source_ref {
                     let mut drew_sprite = false;
                     if let Some(tile) = cell.as_ref() {
                         for layer in &tile.layers {
-                            if let Some(rect) = pack.sprite_rect(layer) {
+                            if let Some(rect) = source.sprite_rect(layer) {
                                 let mut sprite = Sprite::new(
                                     TERRAIN_TILE_TEXTURE,
                                     Vec2::new(Fixed16_16::from_f32(sx), Fixed16_16::from_f32(sy)),
