@@ -118,6 +118,29 @@ art; coast continuous; seams clean; water variety confirmed).
 - The DOS palette is dark; `--gamma` (default 2.2) brightens for testing.
   Gamma 1.0 = the exact DOS look.
 
+## Shipped-map reverse engineering (2026-10-27, second session)
+
+`tiletools/scenario.py` + `tiletools/learn_maps.py` decode the shipped
+TD scenario files and learn the placement conventions empirically:
+
+- Scenario `.BIN` layout (verified against `MAP.CPP:663-700`): sequential
+  `{u8 TType; u8 TIcon}` pairs over the full 64×64 cell space; TType 255 =
+  none; the INI's `[MAP]` X/Y/Width/Height = the used window. Loose
+  `SC*.INI/.BIN` pairs ship under `CNCDATA/TIBERIAN_DAWN/{COMMUNITY,
+  CONSOLE_1,CONSOLE_2}`; the main campaign maps are packed inside
+  `CD1/CONQUER.MIX` (266 payloads, name-CRC'd with a hash the DOS CRC
+  does not match — the remaster repacked them; payload 0 = a real map grid,
+  the rest = the same for all campaigns).
+- The 17 loose scenarios (17,399 placed cells) yield the empirical tables:
+  the shipped maps draw **coast water as plain `W1`** for every shore mask
+  (the learned water-side table = `W1:0` across all masks) and **put the
+  coast art on the LAND side** — the land-side shelf table shows `CLEAR1`
+  at every water mask. I.e. the DOS maps' coast = water cell + grass cell
+  directly, with the sand shelf as a *wide* band driven by the island
+  shapes, not per-edge arcs.
+- `learned_shore_masks.json` carries the full tables for feeding the
+  generator's placement rules.
+
 ## Architecture
 
 ```
@@ -129,6 +152,8 @@ tiletools/
     ├── art.py           MEG template-icon enumerate/decode (experimental)
     ├── mix.py           classic Westwood MIX reader (CRC-indexed)
     ├── cdata.py         template table parsed from CDATA.CPP
+    ├── scenario.py      shipped scenario .BIN reader ([MAP] window parsing)
+    ├── learn_maps.py    empirical shore-mask learning from shipped maps
     ├── format80.py      LCW decompression
     ├── dos.py           DOS .TEM icon sets + theater palettes
     ├── dds.py           DXT1/DXT3/DXT5 (BC1/2/3) decoding
