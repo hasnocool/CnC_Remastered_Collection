@@ -63,8 +63,62 @@ impl TileSource {
         match self {
             Self::Generated(p) => p.cell_draw(model, x, y),
             Self::Original(p) => {
-                let index = model.index(cnc_core::Vec2i::new(x, y))?;
-                p.cell_draw(model.terrain[index])
+                let here = cnc_core::Vec2i::new(x, y);
+                let index = model.index(here)?;
+                let terrain = model.terrain[index];
+
+                // The join picker scores candidates against the material on
+                // each side, so gather the eight neighbours. Diagonals reuse
+                // the cardinal letter they lean toward: the measured edge
+                // profiles are cardinal, and a diagonal neighbour's material
+                // is still evidence about that corner.
+                const DIRS: [((i32, i32), char); 8] = [
+                    ((0, -1), 'N'),
+                    ((-1, -1), 'N'),
+                    ((1, -1), 'N'),
+                    ((1, 0), 'E'),
+                    ((1, 1), 'S'),
+                    ((0, 1), 'S'),
+                    ((-1, 1), 'S'),
+                    ((-1, 0), 'W'),
+                ];
+                // The join material must be the family the cell's terrain
+                // actually belongs to, not a coarse bucket: sand picks from the
+                // patch templates, scrub from the brush/rock templates, and so
+                // on. Picking "land" for everything collapses the whole map to
+                // CLEAR1.
+                let material = |terrain: u8| -> cnc_asset::tile_join::JoinMaterial {
+                    use super::generator::TerrainType;
+                    use cnc_asset::tile_join::JoinMaterial as M;
+                    match TerrainType::from_id(terrain) {
+                        Some(TerrainType::Water) => M::Water,
+                        Some(TerrainType::Snow | TerrainType::Ice) => M::Shore,
+                        Some(TerrainType::Sand) => M::Patch,
+                        Some(TerrainType::Dirt | TerrainType::Mud | TerrainType::Swamp) => M::Patch,
+                        Some(TerrainType::Rock | TerrainType::Crater | TerrainType::Scorched) => {
+                            M::Rock
+                        }
+                        Some(TerrainType::Rough) => M::Slope,
+                        Some(TerrainType::Concrete) => M::Road,
+                        // `CLEAR1` icons are fully transparent placeholders
+                        // (`Map.CPP` writes them for cells with no template).
+                        // The lived-in base terrain is the `P*` patch family,
+                        // which is where the engine puts clear grass.
+                        Some(TerrainType::ForestFloor | TerrainType::JungleFloor) => M::Land,
+                        Some(TerrainType::Grass) => M::Patch,
+                        // No terrain id maps to shore: that is the generator's
+                        // role for water edges (see the fallback below).
+                        _ => M::Land,
+                    }
+                };
+                let mut neighbours = Vec::with_capacity(8);
+                for ((dx, dy), side) in DIRS {
+                    if let Some(i) = model.index(cnc_core::Vec2i::new(x + dx, y + dy)) {
+                        neighbours.push((material(model.terrain[i]), side));
+                    }
+                }
+                p.cell_draw_joined(material(terrain), &neighbours)
+                    .or_else(|| p.cell_draw(terrain))
             }
         }
     }

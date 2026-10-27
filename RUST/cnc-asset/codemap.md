@@ -35,6 +35,7 @@ Asset loading and parsing library for Command & Conquer file formats. Handles We
 - registry: AssetRegistry, AssetHandle
 - shape: Shape, ShapeFrame, load_shp
 - string_table: StringTable, load_str
+- tile_join: JoinTable, JoinCandidate, JoinMaterial, EdgeProfile, EdgeProfiles, material_for, measure
 - tileset_pack: TilesetPack, TilesetTile, TilesetPackError
 - vxl: Vxl, VxlVoxel, load_vxl
 - video: VideoFrame, VideoDecoder
@@ -57,5 +58,6 @@ Asset loading and parsing library for Command & Conquer file formats. Handles We
 - src/convert.rs - High-level conversion pipelines
 - src/cli.rs - Command-line interface
 - src/tileset_pack.rs - Tileset packaging for terrain
+- src/tile_join.rs - Measured seamless tile matching for the original art: classifies each icon's four edges (transparent/opaque/water), scores candidates against an eight-neighbour material context. Overlay slivers (≥92% transparent edges) are excluded from being a base. `measure(game, theater)` decodes every shipped icon once at tileset load
 - src/classic_pack.rs - Legacy pack format support
 

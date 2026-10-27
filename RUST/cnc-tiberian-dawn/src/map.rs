@@ -27,6 +27,11 @@ pub struct CellGrid {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Cell {
     pub terrain_type: u8,
+    /// Original `TemplateType`: which terrain template set the cell belongs to
+    /// (matches `original_templates::ORIGINAL_TEMPLATES` by index).
+    pub template_type: u8,
+    /// Original `TIcon`: icon index inside that template set.
+    pub template_icon: u8,
     pub overlay_type: u8,
     pub overlay_hp: u8,
     pub tiberium_amount: u8,
@@ -47,6 +52,8 @@ impl CellGrid {
         for _ in 0..(width * height) {
             cells.push(Cell {
                 terrain_type: 0,
+                template_type: 0,
+                template_icon: 0,
                 overlay_type: 0,
                 overlay_hp: 0,
                 tiberium_amount: 0,

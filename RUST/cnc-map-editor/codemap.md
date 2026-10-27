@@ -14,7 +14,7 @@ Map editor application for the C&C Remastered Collection Rust port. Provides ter
 - **Trigger Editor**: Visual trigger editing (conditions/actions) with INI export
 - **Procedural Generation**: `generator.rs` - integrates `cnc-procgen` for terrain/base generation
 - **Tileset Packing**: `pack_tileset.rs` - exports tilesets for `cnc-asset` consumption
-- **Original Art Source**: `original_tileset.rs` - composites the shipped Remaster MEG textures into the same combined-atlas layout, selected by `--original-tiles`; `ui::TileSource` abstracts generated vs original so the render loop is unchanged
+- **Original Art Source**: `original_tileset.rs` - composites the shipped Remaster MEG textures into the same combined-atlas layout, selected by `--original-tiles`; `ui::TileSource` abstracts generated vs original so the render loop is unchanged. Tile choice is seamless rather than a fixed family row: `tile_join::JoinTable` (measured edge profiles) picks the icon whose facing edges match the neighbour materials, and a cell that carries its own authored `(template, icon)` (an original map does) always wins.
 - **Original Format**: `original.rs` - reads/writes legacy Westwood map format
 - **Fixtures**: `fixtures.rs` - test maps, scenario templates
 
@@ -60,7 +60,7 @@ Map editor application for the C&C Remastered Collection Rust port. Provides ter
 - src/plugin.rs - EditorPlugin trait, TD/RA implementations
 - src/generator.rs - MapGenerator, procedural integration
 - src/pack_tileset.rs - Tileset export for cnc-asset
-- src/original_tileset.rs - Original Remaster texture source (native MEG reads)
+- src/original_tileset.rs - Original Remaster texture source (native MEG reads); per-cell pick `cell_draw_joined` scores all 1676 shipped icons against the eight-neighbour material context so adjacent tiles join seamlessly; the atlas is sized from measured icon demand (up to ~900 rows for `roads_bridges`) so every candidate resolves
 - src/original.rs - Legacy Westwood map format I/O
 - src/fixtures.rs - Test fixtures, scenario templates
 - src/ui.rs - Egui UI components, viewport, panels

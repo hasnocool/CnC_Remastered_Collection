@@ -50,22 +50,23 @@ fn original_td_scenario_builds_game_with_terrain_overlay_units() {
                 .expect("cell inside the grid");
             let source = image.get(x, y).expect("cell inside the bin image");
             // Every bin cell lands verbatim: template -> terrain_type,
-            // icon -> overlay_type (MAP.CPP Read_Binary).
+            // icon -> template_icon (MAP.CPP Read_Binary).
             assert_eq!(cell.terrain_type, source.template);
-            assert_eq!(cell.overlay_type, source.icon);
+            assert_eq!(cell.template_type, source.template);
+            assert_eq!(cell.template_icon, source.icon);
             if cell.terrain_type != 0 {
                 terrain_cells += 1;
             }
-            if cell.overlay_type != 0 {
+            if cell.template_icon != 0 {
                 overlay_cells += 1;
             }
         }
     }
     assert_eq!(terrain_cells, 256, "every fixture cell carries a template");
-    assert!(overlay_cells > 0, "fixture .bin carries overlay icons");
+    assert!(overlay_cells > 0, "fixture .bin carries cell icons");
     // Anchor cells prove the codec + conversion agree byte for byte.
     let anchor = game.map.grid.get(Vec2i::new(1, 0)).expect("anchor cell");
-    assert_eq!((anchor.terrain_type, anchor.overlay_type), (5, 3));
+    assert_eq!((anchor.terrain_type, anchor.template_icon), (5, 3));
 
     // --- units: house + health from the original 0..=255 fraction --------
     assert_eq!(game.units.len(), 3);

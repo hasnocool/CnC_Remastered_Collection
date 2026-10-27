@@ -20,6 +20,7 @@ pub mod ra_pack;
 pub mod registry;
 pub mod shape;
 pub mod string_table;
+pub mod tile_join;
 pub mod tileset_pack;
 pub mod unit_atlas;
 pub mod video;

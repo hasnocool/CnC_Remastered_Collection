@@ -1188,8 +1188,14 @@ fn apply_bin_terrain(game: &mut Game, image: &ScenarioMap) {
                 continue;
             };
             if let Some(grid_cell) = game.map.grid.get_mut(Vec2i::new(x as i32, y as i32)) {
+                // The original `.bin` stores (TemplateType, TIcon) per cell:
+                // the template set and the icon inside it. `terrain_type` keeps
+                // the template id so terrain logic (land type, passability)
+                // matches the original, and the icon is kept separately for
+                // rendering that exact tile from the original art.
                 grid_cell.terrain_type = cell.template;
-                grid_cell.overlay_type = cell.icon;
+                grid_cell.template_type = cell.template;
+                grid_cell.template_icon = cell.icon;
             }
         }
     }
@@ -1624,9 +1630,11 @@ Action1=Win
         let (game, _) = scenario_to_game(&parsed(), Some(&image));
         let corner = game.map.grid.get(Vec2i::new(0, 0)).unwrap();
         assert_eq!(corner.terrain_type, 9);
-        assert_eq!(corner.overlay_type, 1);
+        assert_eq!(corner.template_type, 9);
+        assert_eq!(corner.template_icon, 1);
         let far = game.map.grid.get(Vec2i::new(1, 1)).unwrap();
         assert_eq!(far.terrain_type, 4);
+        assert_eq!(far.template_icon, 2);
         assert_eq!(game.map.width, 2, "the map takes the .bin dimensions");
     }
 

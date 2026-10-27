@@ -370,9 +370,12 @@ fn load_tileset(options: &Options) -> Option<TileSource> {
                 cnc_asset::original_assets::Game::RedAlert,
                 cnc_asset::original_assets::Theater::Snow,
             ),
+            // Urban has no shipped art of its own: RA's INTERIOR theater ships
+            // only `CLEAR1`. TD's DESERT ships full ground/shore/road sets, so
+            // it stands in for Urban rather than degrading to flat quads.
             Some(Theater::Urban) => (
-                cnc_asset::original_assets::Game::RedAlert,
-                cnc_asset::original_assets::Theater::Interior,
+                cnc_asset::original_assets::Game::TiberianDawn,
+                cnc_asset::original_assets::Theater::Desert,
             ),
             Some(Theater::Desert) => (
                 cnc_asset::original_assets::Game::TiberianDawn,
