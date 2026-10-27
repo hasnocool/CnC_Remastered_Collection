@@ -126,9 +126,32 @@ impl TileSource {
                         neighbours.push((material(model.terrain[i]), side));
                     }
                 }
-                let joined = template(terrain)
-                    .and_then(|tpl| p.cell_draw_from(tpl, &neighbours))
-                    .or_else(|| p.cell_draw_joined(material(terrain), &neighbours));
+                // Same-terrain interiors otherwise collapse to one icon:
+                // `cell_draw_from` scores every icon of the template and on
+                // a uniform neighbourhood all of them tie, so the first
+                // candidate wins (one repeated grass tile over 10 000
+                // cells). An interior cell (all neighbours in the same
+                // material) picks an icon with a position hash instead,
+                // scattering the template's icon set like the original
+                // engine's patch mixes. Edge cells keep the join score.
+                let m = material(terrain);
+                let interior = neighbours.iter().all(|(neighbour, _)| *neighbour == m);
+                let joined = match template(terrain) {
+                    Some(tpl) if interior => {
+                        let icons = p.icons_of(tpl);
+                        if icons.is_empty() {
+                            p.cell_draw_from(tpl, &neighbours)
+                        } else {
+                            let icon = icons[scatter(x, y, terrain) % icons.len()];
+                            Some(crate::pack_tileset::CellTile {
+                                base: Some(format!("terrain/{tpl}#{icon}")),
+                                layers: Vec::new(),
+                            })
+                        }
+                    }
+                    Some(tpl) => p.cell_draw_from(tpl, &neighbours),
+                    None => p.cell_draw_joined(m, &neighbours),
+                };
                 joined.or_else(|| p.cell_draw(terrain))
             }
         }
@@ -162,6 +185,21 @@ pub fn terrain_color(value: u8) -> [f32; 4] {
         [0.22, 0.29, 0.21, 1.0], // 14 JungleFloor
     ];
     PALETTE[(value as usize).min(PALETTE.len() - 1)]
+}
+
+/// Deterministic interior scatter key: same cell, same pick, no style of
+/// noise. Splitmix32 over the cell coordinates and the terrain id.
+fn scatter(x: i32, y: i32, terrain: u8) -> usize {
+    let mut h = 0x9E37_79B9_u32;
+    h = h.wrapping_add((x.unsigned_abs()).wrapping_mul(0x85EB_CA6B));
+    h = h.wrapping_add((y.unsigned_abs()).wrapping_mul(0xC2B2_AE35));
+    h = h.wrapping_add((terrain as u32).wrapping_mul(0x27D4_EB2F));
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x21F0_AAAD);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x735A_2D97);
+    h ^= h >> 15;
+    h as usize
 }
 
 /// Colour for a placed object: buildings warm, units cool.

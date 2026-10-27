@@ -177,4 +177,27 @@ fn main() {
     for i in m.validate().iter().take(20) {
         println!("  - {i}");
     }
+
+    // --- tile census: distinct base sprites the canvas would draw
+    let Some(tileset) = cnc_map_editor::original_tileset::OriginalTileset::load(
+        cnc_asset::original_assets::Theater::Temperate,
+    ) else {
+        eprintln!("tileset unavailable; tile census skipped");
+        return;
+    };
+    let source = cnc_map_editor::ui::TileSource::Original(std::sync::Arc::new(tileset));
+    let mut census: std::collections::BTreeMap<String, u32> = Default::default();
+    for y in 0..m.height as i32 {
+        for x in 0..m.width as i32 {
+            if let Some(tile) = source.cell_draw(&m, x, y) {
+                if let Some(base) = tile.base {
+                    *census.entry(base).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    println!("\ndistinct base tiles drawn: {}", census.len());
+    for (sprite, count) in census.iter().take(6) {
+        println!("  {sprite}: {count}");
+    }
 }

@@ -186,6 +186,10 @@ pub struct OriginalTileset {
     theater: Theater,
     /// Measured edge profiles of every icon that ships, for join scoring.
     join: cnc_asset::tile_join::JoinTable,
+    /// Registered icon list per canonical template name, filled while the
+    /// atlas is composed. Drives the interior scatter pick that keeps
+    /// same-terrain interiors from rendering as one repeated icon.
+    icons_of_template: std::collections::HashMap<String, Vec<u32>>,
 }
 
 impl OriginalTileset {
@@ -249,6 +253,8 @@ impl OriginalTileset {
 
         let mut rows = std::collections::HashMap::new();
         let mut icon_rows = std::collections::HashMap::new();
+        let mut icons_of_template: std::collections::HashMap<String, Vec<u32>> =
+            std::collections::HashMap::new();
         let mut origins = std::collections::HashMap::new();
         let mut next_row = std::collections::HashMap::new();
 
@@ -349,6 +355,10 @@ impl OriginalTileset {
                             );
                             icon_rows
                                 .insert(((*cat).to_string(), Self::icon_id(tpl, icon)), row as u8);
+                            icons_of_template
+                                .entry((*tpl).clone())
+                                .or_default()
+                                .push(icon);
                             row += 1;
                         }
                     }
@@ -364,6 +374,7 @@ impl OriginalTileset {
             icon_rows,
             origins,
             join: tile_join::measure(game, theater),
+            icons_of_template,
             assets,
             theater,
         })
@@ -381,6 +392,9 @@ impl OriginalTileset {
         &self.rgba
     }
 
+    /// Registered icon list per canonical template name, filled while the
+    /// atlas is composed. Drives the interior scatter pick that keeps
+    /// same-terrain interiors from rendering as one repeated icon.
     /// Sprite id for an authored `(template, icon)` pair.
     pub fn icon_id(template: &str, icon: u32) -> String {
         format!("{template}#{icon}")
@@ -450,6 +464,17 @@ impl OriginalTileset {
     /// The measured join table (for evidence and tests).
     pub fn join_table(&self) -> &cnc_asset::tile_join::JoinTable {
         &self.join
+    }
+
+    /// Icons the atlas registered for a template, in insertion order.
+    ///
+    /// Empty when the template does not ship, so callers fall back to the
+    /// join picker instead of guessing.
+    pub fn icons_of(&self, template: &str) -> &[u32] {
+        self.icons_of_template
+            .get(template)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// Join pick restricted to one template family.
@@ -674,13 +699,13 @@ mod tests {
                             // This tile's bottom row vs the tile below's top row.
                             (
                                 ((hr.y as usize + 127) * w + (hr.x as usize + i)) * 4,
-                                ((or.y as usize + 0) * w + (or.x as usize + i)) * 4,
+                                ((or.y as usize) * w + (or.x as usize + i)) * 4,
                             )
                         } else {
                             // This tile's right column vs the neighbour's left column.
                             (
                                 ((hr.y as usize + i) * w + (hr.x as usize + 127)) * 4,
-                                ((or.y as usize + i) * w + (or.x as usize + 0)) * 4,
+                                ((or.y as usize + i) * w + (or.x as usize)) * 4,
                             )
                         };
                         if carries(&px[ao..ao + 4]) {
