@@ -28,7 +28,7 @@ from .join import (
     edge_demand,
     normalize_template,
 )
-from .terrain import TerrainField
+from .terrain import TerrainField, apply_shore, label_pools
 
 
 class Strategy(Enum):
@@ -55,6 +55,186 @@ SHORE_BY_MASK: tuple[tuple[str, int], ...] = (
 _LAND_MASK_SIDES = ((0, -1, 1), (1, 0, 2), (0, 1, 4), (-1, 0, 8))
 
 
+class Patch:
+    """One whole coast template (the DOS art's rounded-edge unit).
+
+    Geometry is measured from the art's index-class arrays, not hand-tuned:
+    a patch cell is land-look / water-look / mixed by its edge and coverage
+    fractions.
+    """
+
+    __slots__ = ("template", "w", "h", "kind")
+
+    def __init__(self, template: str, w: int, h: int, kind: str):
+        self.template = template
+        self.w = w
+        self.h = h
+        self.kind = kind
+
+    def cell_frac(self, classes: dict[str, np.ndarray], icon: int) -> tuple[float, float]:
+        """(land fraction, water fraction) of one patch cell's area."""
+        cls = classes[self.template][icon]
+        return float((cls == 2).mean()), float((cls == 1).mean())
+
+    def cells(self):
+        for cy in range(self.h):
+            for cx in range(self.w):
+                yield cx, cy, cy * self.w + cx
+
+
+# Chain kinds:
+#   ns-W / ns-E : straight N-S coast, land on the W/E patch edge (SH34/SH35);
+#                 chains vertically at 3-cell steps.
+#   ew-S        : straight E-W coast, land on the S edge (SH12/SH13);
+#                 chains horizontally at 3-cell steps.
+#   notch-NW/NE : water pocket in a land corner (SH32/SH33).
+#   island      : land blob in water (SH11).
+#   diag        : diagonal coast arc (SH10, 2x2).
+COAST_PATCHES = (
+    Patch("SH34", 3, 3, "ns-W"),
+    Patch("SH35", 3, 3, "ns-E"),
+    Patch("SH12", 3, 3, "ew-S"),
+    Patch("SH13", 3, 3, "ew-S"),
+    Patch("SH32", 3, 3, "notch-NW"),
+    Patch("SH33", 3, 3, "notch-NE"),
+    Patch("SH11", 3, 3, "island"),
+    Patch("SH10", 2, 2, "diag"),
+)
+
+# Open-water variety: the DOS set ships three 2x2 all-water patches with
+# distinct ripple art. Tiling the ocean interior with them (instead of one
+# W1 everywhere) breaks the monotony while every shared edge stays water.
+WATER_PATCHES = (
+    Patch("W2", 2, 2, "water"),
+    Patch("SH17", 2, 2, "water"),
+    Patch("SH18", 2, 2, "water"),
+)
+
+
+def place_water_patches(
+    field: TerrainField,
+    rng: np.random.Generator,
+    fixed: dict[tuple[int, int], tuple[str, int]],
+) -> None:
+    """Tile plain-water areas with 2x2 water patches on the global lattice."""
+    size = field.size
+    for by in range(0, size - 1, 2):
+        for bx in range(0, size - 1, 2):
+            cells = [(bx + cx, by + cy) for cy in range(2) for cx in range(2)]
+            if any(x >= size or y >= size for x, y in cells):
+                continue
+            if any((x, y) in fixed for x, y in cells):
+                continue
+            if not all(field.materials[y, x] is Material.WATER for x, y in cells):
+                continue
+            patch = WATER_PATCHES[int(rng.integers(len(WATER_PATCHES)))]
+            for cx, cy, icon in patch.cells():
+                fixed[(bx + cx, by + cy)] = (patch.template, icon)
+
+
+def find_coast_strips(field: TerrainField) -> list[tuple[str, str, int, int, int]]:
+    """Straight coast strips: (orientation, land_side, fixed_coord, start, end).
+
+    A strip = maximal run of coast cells in one column/row with land on the
+    same side throughout and open water on the far side. Patches chain along
+    these.
+    """
+    size = field.size
+    wet = (Material.WATER, Material.SHORE)
+    strips: list[tuple[str, str, int, int, int]] = []
+
+    def land(x, y):
+        return 0 <= x < size and 0 <= y < size and field.materials[y, x] is Material.LAND
+
+    def wetish(x, y):
+        return 0 <= x < size and 0 <= y < size and field.materials[y, x] in wet
+
+    # N-S strips: coast cell (x,y) = SHORE, land at W, water at E (and beyond).
+    for x in range(size):
+        y = 0
+        while y < size:
+            if (
+                field.materials[y, x] is Material.SHORE
+                and land(x - 1, y)
+                and wetish(x + 1, y)
+            ):
+                start = y
+                while (
+                    y < size
+                    and field.materials[y, x] is Material.SHORE
+                    and land(x - 1, y)
+                    and wetish(x + 1, y)
+                ):
+                    y += 1
+                if y - start >= 2:
+                    strips.append(("NS", "W", x, start, y))
+            else:
+                y += 1
+    # Mirrored: land at E, water at W.
+    for x in range(size):
+        y = 0
+        while y < size:
+            if (
+                field.materials[y, x] is Material.SHORE
+                and land(x + 1, y)
+                and wetish(x - 1, y)
+            ):
+                start = y
+                while (
+                    y < size
+                    and field.materials[y, x] is Material.SHORE
+                    and land(x + 1, y)
+                    and wetish(x - 1, y)
+                ):
+                    y += 1
+                if y - start >= 2:
+                    strips.append(("NS", "E", x, start, y))
+            else:
+                y += 1
+    # E-W strips: land at S (water N) and land at N (water S).
+    for y in range(size):
+        x = 0
+        while x < size:
+            if (
+                field.materials[y, x] is Material.SHORE
+                and land(x, y - 1) is False
+                and land(x, y + 1)
+            ):
+                start = x
+                while (
+                    x < size
+                    and field.materials[y, x] is Material.SHORE
+                    and not land(x, y - 1)
+                    and land(x, y + 1)
+                ):
+                    x += 1
+                if x - start >= 2:
+                    strips.append(("EW", "S", y, start, x))
+            else:
+                x += 1
+    for y in range(size):
+        x = 0
+        while x < size:
+            if (
+                field.materials[y, x] is Material.SHORE
+                and land(x, y + 1) is False
+                and land(x, y - 1)
+            ):
+                start = x
+                while (
+                    x < size
+                    and field.materials[y, x] is Material.SHORE
+                    and not land(x, y + 1)
+                    and land(x, y - 1)
+                ):
+                    x += 1
+                if x - start >= 2:
+                    strips.append(("EW", "N", y, start, x))
+            else:
+                x += 1
+    return strips
+
+
 def land_mask(field: TerrainField, x: int, y: int) -> int:
     size = field.size
     mask = 0
@@ -65,6 +245,200 @@ def land_mask(field: TerrainField, x: int, y: int) -> int:
         if field.materials[ny, nx] in (Material.LAND, Material.SHORE):
             mask |= bit
     return mask
+
+
+def place_coast_patches(
+    field: TerrainField,
+    classes: dict[str, np.ndarray],
+    seed: int = 0,
+) -> dict[tuple[int, int], tuple[str, int]]:
+    """Chain whole coast templates along straight strips.
+
+    Patches anchor on the global 3-cell lattice (phase-locked so arcs from
+    adjacent strips meet in phase), may hang off the map edge (off-map cells
+    are simply not rendered), and validate per cell:
+    - full-land art needs the field cell to be LAND, full-water art needs
+      water/shore, mixed arc cells accept either (the arc defines the local
+      boundary);
+    - the patch's OUTER edges must agree with the field across them.
+    """
+    size = field.size
+    rng = np.random.default_rng(seed ^ 0x0C0A5)
+    fixed: dict[tuple[int, int], tuple[str, int]] = {}
+
+    def patch_template_for(strip, slot):
+        orientation, land_side = strip[0], strip[1]
+        if orientation == "NS":
+            return "SH34" if land_side == "W" else "SH35"
+        # Alternate the two E-W sand shelves along the coast for variety.
+        return ("SH12", "SH13")[slot % 2]
+
+    def validate(template: str, patch: Patch, px: int, py: int) -> bool:
+        for cx, cy, icon in patch.cells():
+            x, y = px + cx, py + cy
+            if not (0 <= x < size and 0 <= y < size):
+                continue  # clipped off-map
+            if (x, y) in fixed:
+                return False
+            cls = classes[template][icon]
+            f_land, f_water = float((cls == 2).mean()), float((cls == 1).mean())
+            material = field.materials[y, x]
+            if f_land > 0.9:
+                if material is not Material.LAND:
+                    return False
+            elif f_water > 0.9:
+                if material not in (Material.WATER, Material.SHORE):
+                    return False
+            # Outer edges: the field across them must agree with the run.
+            outer = []
+            if cy == 0:
+                outer.append("N")
+            if cy == patch.h - 1:
+                outer.append("S")
+            if cx == 0:
+                outer.append("W")
+            if cx == patch.w - 1:
+                outer.append("E")
+            for side in outer:
+                run = {
+                    "N": cls[0], "S": cls[-1], "W": cls[:, 0], "E": cls[:, -1],
+                }[side]
+                water, land = float((run == 1).mean()), float((run == 2).mean())
+                dx, dy = {"N": (0, -1), "E": (1, 0), "S": (0, 1), "W": (-1, 0)}[side]
+                nx, ny = x + dx, y + dy
+                if not (0 <= nx < size and 0 <= ny < size):
+                    continue
+                nmat = field.materials[ny, nx]
+                if water > 0.75 and nmat not in (Material.WATER, Material.SHORE):
+                    return False
+                if land > 0.75 and nmat is not Material.LAND:
+                    return False
+        return True
+
+    for orientation, land_side, coord, start, end in sorted(
+        find_coast_strips(field), key=lambda s: s[4] - s[3], reverse=True
+    ):
+        # Variety comes from template alternation and the island/water
+        # patches, not from gaps: a gap in the chain renders as an arc that
+        # stops mid-coast.
+        slot = 0
+        # Global lattice anchors inside the strip; the tail (if any) goes to
+        # the per-cell matcher, which run-matches against the placed arcs.
+        stride = 3
+        for k in range((-start) % stride + start, end - stride + 1, stride):
+            slot += 1
+            template = patch_template_for((orientation, land_side), slot)
+            patch = next(p for p in COAST_PATCHES if p.template == template)
+            if orientation == "NS":
+                px = coord - (patch.w - 1) if land_side == "W" else coord
+                py = k
+            elif land_side == "S":
+                # Water row (patch top) on the coast row, land below.
+                py = coord
+                px = k
+            else:
+                # Land N: patch hangs north; water row on the coast row.
+                py = coord - (patch.h - 1)
+                px = k
+            if not validate(template, patch, px, py):
+                continue
+            for cx, cy, icon in patch.cells():
+                x, y = px + cx, py + cy
+                if 0 <= x < size and 0 <= y < size:
+                    fixed[(x, y)] = (template, icon)
+    place_water_patches(field, rng, fixed)
+    return fixed
+
+
+def mask_fitness(table: JoinTable) -> dict[int, float]:
+    """Best achievable seam penalty for each 4-bit land mask.
+
+    The demand model for a shore cell with land mask ``m``: sides with the
+    bit set demand opaque (land continues), sides without demand water.
+    The minimum over all shore candidates = how well the shipped art can
+    join that local geometry. Masks no piece fits (> ~0.6) mark coast
+    shapes the field should not contain.
+    """
+    fitness = {}
+    shore_candidates = table.bases(Material.SHORE) + table.bases(Material.WATER)
+    if not shore_candidates:
+        return fitness
+    for mask in range(16):
+        demands = {
+            "N": "land" if mask & 1 else "water",
+            "E": "land" if mask & 2 else "water",
+            "S": "land" if mask & 4 else "water",
+            "W": "land" if mask & 8 else "water",
+        }
+        fitness[mask] = min(
+            sum(
+                c.edges.__getattribute__(s.lower()).disagreement(demands[s])
+                for s in "NESW"
+            )
+            for c in shore_candidates
+        )
+    return fitness
+
+
+def repair_field(
+    field: TerrainField,
+    table: JoinTable,
+    max_passes: int = 3,
+    threshold: float = 0.6,
+) -> int:
+    """Reshape coast geometry the shipped art cannot join.
+
+    A coast cell whose land mask has no fitting tile (fitness > threshold)
+    is flipped to the majority of its neighbours — 1-cell inlets become
+    land, spurious peninsulas become water — and the shore/pool labelling
+    reruns. Returns the number of repaired cells.
+    """
+    fitness = mask_fitness(table)
+    repaired = 0
+    for _ in range(max_passes):
+        changed = 0
+        size = field.size
+        for y in range(size):
+            for x in range(size):
+                if field.materials[y, x] is not Material.SHORE:
+                    continue
+                land_count = sum(
+                    1
+                    for mat, side in field.neighbours(x, y)
+                    if side in ("N", "E", "S", "W") and mat is Material.LAND
+                )
+                # A water cell nearly enclosed by land has no fitting piece
+                # in the DOS set (the pond pockets cover two-side inlets
+                # only); it renders as a detached sand square. Close it.
+                if land_count >= 3:
+                    field.materials[y, x] = Material.LAND
+                    changed += 1
+                    continue
+                mask = land_mask(field, x, y)
+                if fitness.get(mask, 0.0) <= threshold:
+                    continue
+                field.materials[y, x] = (
+                    Material.LAND if land_count >= 2 else Material.WATER
+                )
+                changed += 1
+        repaired += changed
+        if not changed:
+            break
+        apply_shore(field)
+        label_pools(field)
+    return repaired
+
+
+def _profile_mismatch(a: np.ndarray | None, b: np.ndarray | None) -> float:
+    """Mean |sand-curve difference| between facing edge profiles.
+
+    Both profiles enumerate in the same screen direction, so they compare
+    directly; the arc phase (where the boundary sits along the shared
+    edge) is what this scores.
+    """
+    if a is None or b is None or a.shape != b.shape:
+        return 0.0
+    return float(np.abs(a - b).mean())
 
 
 def _run_mismatch(a: np.ndarray, b: np.ndarray) -> float:
@@ -109,11 +483,30 @@ def scanline_assign(
     families: dict[Material, list[str]] | None = None,
     diagonal_weight: float = 0.5,
     pool_families: list[str] | None = None,
+    icon_classes: dict[str, np.ndarray] | None = None,
 ) -> np.ndarray:
-    """Greedy scanline placement with exact N/W run alignment."""
+    """Greedy scanline placement with exact N/W run alignment.
+
+    Whole coast patches (`place_coast_patches`) are placed first and act as
+    fixed anchors; the per-cell matcher fills the rest around them with
+    exact run alignment against every already-placed neighbour.
+    """
     size = field.size
     rng = np.random.default_rng(seed ^ 0x5EED)
     placed: np.ndarray = np.empty((size, size), dtype=object)
+
+    lookup: dict[tuple[str, int], JoinCandidate] = {}
+    for cands in table.by_material.values():
+        for c in cands:
+            lookup[(c.template, c.icon)] = c
+    repair_field(field, table)
+    fixed = (
+        place_coast_patches(field, icon_classes, seed=seed)
+        if icon_classes is not None
+        else {}
+    )
+    for (x, y), key in fixed.items():
+        placed[y, x] = lookup.get(key)
 
     def allowed_for(material: Material, x: int, y: int) -> list[str] | None:
         allowed = families.get(material) if families else None
@@ -128,24 +521,40 @@ def scanline_assign(
 
     for y in range(size):
         for x in range(size):
+            if placed[y, x] is not None:
+                continue  # fixed by a coast patch
             material = field.materials[y, x]
             allowed = allowed_for(material, x, y)
             candidates = table.bases(material)
             if (
                 allowed is not None
-                and field.pool is not None
-                and field.pool[y, x]
-                and material in (Material.SHORE, Material.WATER)
+                and material is Material.SHORE
             ):
-                # Pool cells draw from the pond templates' FULL icon sets:
-                # their sand-ring icons are CLEAR-land by CDATA but are the
-                # correct pond-shore art.
+                # Coast cells are water-based: their correct art is the arc
+                # pieces of the coast templates, which CDATA types WATER
+                # (sand on the land-facing edge, water elsewhere). The
+                # SHORE bucket holds full-sand island pieces, which render
+                # as square sand blocks here.
                 want = {normalize_template(t).upper() for t in allowed}
                 candidates = [
                     c
-                    for c in table.bases(Material.SHORE)
-                    + table.bases(Material.WATER)
-                    + table.bases(Material.LAND)
+                    for c in table.bases(Material.WATER)
+                    if normalize_template(c.template).upper() in want
+                ]
+                if not candidates:
+                    candidates = table.bases(Material.SHORE)
+            elif (
+                allowed is not None
+                and field.pool is not None
+                and field.pool[y, x]
+                and material is Material.WATER
+            ):
+                # Pond cells whose land is only diagonal (not SHORE by the
+                # 4-neighbour rule) still get the pond pocket pieces.
+                want = {normalize_template(t).upper() for t in pool_families or []}
+                candidates = [
+                    c
+                    for c in table.bases(Material.WATER)
                     if normalize_template(c.template).upper() in want
                 ]
             elif allowed is not None:
@@ -156,16 +565,31 @@ def scanline_assign(
 
             north_run = placed[y - 1, x].runs.get("S") if y > 0 else None
             west_run = placed[y, x - 1].runs.get("E") if x > 0 else None
+            north_candidate_profile = (
+                placed[y - 1, x].profiles if y > 0 and placed[y - 1, x] is not None else {}
+            )
+            west_candidate_profile = (
+                placed[y, x - 1].profiles if x > 0 and placed[y, x - 1] is not None else {}
+            )
 
             neighbours8 = field.neighbours(x, y)
 
             def cost(c):
                 total = 0.0
-                # Exact alignments (weight 2: pixel-exact seams matter most)
+                # Placed neighbours: align the sand contour curves (weight
+                # 3) plus the pixel run (weight 1) — the curve is what the
+                # eye reads as a continuing arc.
                 if north_run is not None:
-                    total += 2.0 * _run_mismatch(c.runs.get("N"), north_run)
+                    north_c = c.profiles.get("N")
+                    total += 3.0 * _profile_mismatch(
+                        north_c, north_candidate_profile.get("S")
+                    )
+                    total += 1.0 * _run_mismatch(c.runs.get("N"), north_run)
                 if west_run is not None:
-                    total += 2.0 * _run_mismatch(c.runs.get("W"), west_run)
+                    total += 3.0 * _profile_mismatch(
+                        c.profiles.get("W"), west_candidate_profile.get("E")
+                    )
+                    total += 1.0 * _run_mismatch(c.runs.get("W"), west_run)
                 # Coarse demands for unplaced sides
                 for mat, side in neighbours8:
                     if side in ("N", "W") and (
@@ -239,6 +663,7 @@ def assign(
     families: dict[Material, list[str]] | None = None,
     shore_mask_restrict: bool = True,
     pool_families: list[str] | None = None,
+    icon_classes: dict[str, np.ndarray] | None = None,
 ) -> np.ndarray:
     if strategy is Strategy.MATCHED:
         return scanline_assign(
@@ -248,6 +673,7 @@ def assign(
             families=families,
             diagonal_weight=diagonal_weight,
             pool_families=pool_families,
+            icon_classes=icon_classes,
         )
     size = field.size
     rng = np.random.default_rng(seed ^ 0x5EED)

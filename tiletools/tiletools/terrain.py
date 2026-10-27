@@ -163,6 +163,41 @@ def label_pools(field: TerrainField, max_pool: int = 4) -> None:
                     field.pool[y, x] = True
 
 
+def smooth(field: TerrainField, passes: int = 2) -> None:
+    """Majority-filter the land/water mask so coasts run straight.
+
+    The DOS coast art chains 3x3/2x2 patches along straight strips; a jagged
+    fBm coastline fragments into 1-2 cell runs where no patch fits, and the
+    per-cell fallback renders it as square wedges. A 3x3 majority filter
+    lengthens the runs.
+    """
+    mats = field.materials
+    for _ in range(passes):
+        land = mats == Material.LAND
+        shore = mats == Material.SHORE
+        solid = land | shore
+        # Wet cells with >= 5 wet 8-neighbours (counting off-map as wet)
+        # become water; wet cells with >= 6 solid neighbours become land.
+        wet_neighbours = _any_neighbour_count(solid)
+        solid_neighbours = _any_neighbour_count(~solid)
+        wet = ~solid
+        new_water = wet & (wet_neighbours >= 5)
+        new_land = wet & (solid_neighbours >= 6)
+        mats[new_water] = Material.WATER
+        mats[new_land] = Material.LAND
+    apply_shore(field)
+    label_pools(field)
+
+
+def _any_neighbour_count(mask: np.ndarray) -> np.ndarray:
+    """Count of 8-neighbours satisfying ``mask``; off-map counts as True."""
+    out = np.zeros(mask.shape, dtype=int)
+    padded = np.pad(mask, 1, constant_values=True)
+    for dx, dy in OFFSETS.values():
+        out += padded[1 + dy : 1 + dy + mask.shape[0], 1 + dx : 1 + dx + mask.shape[1]]
+    return out
+
+
 def _any_cardinal(mask: np.ndarray, pad_value: bool = False) -> np.ndarray:
     out = np.zeros_like(mask)
     padded = np.pad(mask, 1, constant_values=pad_value)

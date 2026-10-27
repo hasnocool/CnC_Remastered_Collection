@@ -1,0 +1,4106 @@
+{
+ "CLEAR1:0": {
+  "template": "CLEAR1",
+  "icon": 0,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "CLEAR1:1": {
+  "template": "CLEAR1",
+  "icon": 1,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "CLEAR1:10": {
+  "template": "CLEAR1",
+  "icon": 10,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "CLEAR1:11": {
+  "template": "CLEAR1",
+  "icon": 11,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "CLEAR1:12": {
+  "template": "CLEAR1",
+  "icon": 12,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "CLEAR1:13": {
+  "template": "CLEAR1",
+  "icon": 13,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "CLEAR1:14": {
+  "template": "CLEAR1",
+  "icon": 14,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "CLEAR1:15": {
+  "template": "CLEAR1",
+  "icon": 15,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "CLEAR1:2": {
+  "template": "CLEAR1",
+  "icon": 2,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "CLEAR1:3": {
+  "template": "CLEAR1",
+  "icon": 3,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "CLEAR1:4": {
+  "template": "CLEAR1",
+  "icon": 4,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "CLEAR1:5": {
+  "template": "CLEAR1",
+  "icon": 5,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "CLEAR1:6": {
+  "template": "CLEAR1",
+  "icon": 6,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "CLEAR1:7": {
+  "template": "CLEAR1",
+  "icon": 7,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "CLEAR1:8": {
+  "template": "CLEAR1",
+  "icon": 8,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "CLEAR1:9": {
+  "template": "CLEAR1",
+  "icon": 9,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH10:0": {
+  "template": "SH10",
+  "icon": 0,
+  "land_frac": 0.432,
+  "water_frac": 0.568,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      3,
+      "water->land"
+     ],
+     [
+      4,
+      "land->water"
+     ],
+     [
+      6,
+      "water->land"
+     ],
+     [
+      7,
+      "land->water"
+     ],
+     [
+      9,
+      "water->land"
+     ],
+     [
+      12,
+      "land->water"
+     ],
+     [
+      13,
+      "water->land"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "mixed",
+    "flips": [
+     [
+      13,
+      "water->land"
+     ],
+     [
+      14,
+      "land->water"
+     ],
+     [
+      18,
+      "water->land"
+     ],
+     [
+      19,
+      "land->water"
+     ],
+     [
+      20,
+      "water->land"
+     ],
+     [
+      21,
+      "land->water"
+     ],
+     [
+      22,
+      "water->land"
+     ]
+    ]
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 0.407
+ },
+ "SH10:1": {
+  "template": "SH10",
+  "icon": 1,
+  "land_frac": 0.998,
+  "water_frac": 0.002,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH10:2": {
+  "template": "SH10",
+  "icon": 2,
+  "land_frac": 0.043,
+  "water_frac": 0.957,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      18,
+      "water->land"
+     ],
+     [
+      19,
+      "land->water"
+     ],
+     [
+      22,
+      "water->land"
+     ],
+     [
+      23,
+      "land->water"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "water",
+    "flips": []
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      2,
+      "water->land"
+     ],
+     [
+      3,
+      "land->water"
+     ],
+     [
+      8,
+      "water->land"
+     ],
+     [
+      9,
+      "land->water"
+     ],
+     [
+      12,
+      "water->land"
+     ],
+     [
+      14,
+      "land->water"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.043
+ },
+ "SH10:3": {
+  "template": "SH10",
+  "icon": 3,
+  "land_frac": 0.389,
+  "water_frac": 0.611,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "water",
+    "flips": []
+   },
+   "W": {
+    "kind": "mixed",
+    "flips": [
+     [
+      3,
+      "land->water"
+     ]
+    ]
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      13,
+      "land->water"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.383
+ },
+ "SH11:0": {
+  "template": "SH11",
+  "icon": 0,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH11:1": {
+  "template": "SH11",
+  "icon": 1,
+  "land_frac": 0.547,
+  "water_frac": 0.453,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      11,
+      "land->water"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "mixed",
+    "flips": [
+     [
+      14,
+      "land->water"
+     ],
+     [
+      21,
+      "water->land"
+     ]
+    ]
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      2,
+      "water->land"
+     ],
+     [
+      3,
+      "land->water"
+     ],
+     [
+      22,
+      "water->land"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.545
+ },
+ "SH11:2": {
+  "template": "SH11",
+  "icon": 2,
+  "land_frac": 0.79,
+  "water_frac": 0.21,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      8,
+      "water->land"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "mixed",
+    "flips": [
+     [
+      1,
+      "water->land"
+     ],
+     [
+      2,
+      "land->water"
+     ],
+     [
+      8,
+      "water->land"
+     ]
+    ]
+   },
+   "W": {
+    "kind": "mixed",
+    "flips": [
+     [
+      17,
+      "water->land"
+     ],
+     [
+      18,
+      "land->water"
+     ],
+     [
+      22,
+      "water->land"
+     ],
+     [
+      23,
+      "land->water"
+     ]
+    ]
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 0.858
+ },
+ "SH11:3": {
+  "template": "SH11",
+  "icon": 3,
+  "land_frac": 0.931,
+  "water_frac": 0.069,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "mixed",
+    "flips": [
+     [
+      2,
+      "water->land"
+     ],
+     [
+      3,
+      "land->water"
+     ],
+     [
+      7,
+      "water->land"
+     ],
+     [
+      19,
+      "land->water"
+     ]
+    ]
+   },
+   "W": {
+    "kind": "mixed",
+    "flips": [
+     [
+      14,
+      "land->water"
+     ],
+     [
+      15,
+      "water->land"
+     ],
+     [
+      16,
+      "land->water"
+     ]
+    ]
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      22,
+      "land->water"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.985
+ },
+ "SH11:4": {
+  "template": "SH11",
+  "icon": 4,
+  "land_frac": 0.509,
+  "water_frac": 0.491,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      15,
+      "land->water"
+     ],
+     [
+      22,
+      "water->land"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "water",
+    "flips": []
+   },
+   "W": {
+    "kind": "mixed",
+    "flips": [
+     [
+      21,
+      "land->water"
+     ]
+    ]
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      2,
+      "land->water"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.55
+ },
+ "SH11:5": {
+  "template": "SH11",
+  "icon": 5,
+  "land_frac": 0.417,
+  "water_frac": 0.583,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      4,
+      "land->water"
+     ],
+     [
+      10,
+      "water->land"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "water",
+    "flips": []
+   },
+   "W": {
+    "kind": "mixed",
+    "flips": [
+     [
+      2,
+      "land->water"
+     ]
+    ]
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      13,
+      "land->water"
+     ],
+     [
+      18,
+      "water->land"
+     ],
+     [
+      20,
+      "land->water"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.43
+ },
+ "SH11:6": {
+  "template": "SH11",
+  "icon": 6,
+  "land_frac": 0.019,
+  "water_frac": 0.981,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      7,
+      "water->land"
+     ],
+     [
+      18,
+      "land->water"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "water",
+    "flips": []
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "water",
+    "flips": []
+   }
+  },
+  "clutter": 0.0
+ },
+ "SH11:7": {
+  "template": "SH11",
+  "icon": 7,
+  "land_frac": 0.003,
+  "water_frac": 0.997,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "water",
+    "flips": []
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "water",
+    "flips": []
+   }
+  },
+  "clutter": 0.005
+ },
+ "SH11:8": {
+  "template": "SH11",
+  "icon": 8,
+  "land_frac": 0.012,
+  "water_frac": 0.988,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "water",
+    "flips": []
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "water",
+    "flips": []
+   }
+  },
+  "clutter": 0.007
+ },
+ "SH12:0": {
+  "template": "SH12",
+  "icon": 0,
+  "land_frac": 0.08,
+  "water_frac": 0.92,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "mixed",
+    "flips": [
+     [
+      7,
+      "water->land"
+     ],
+     [
+      18,
+      "land->water"
+     ],
+     [
+      20,
+      "water->land"
+     ],
+     [
+      23,
+      "land->water"
+     ]
+    ]
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "water",
+    "flips": []
+   }
+  },
+  "clutter": 0.068
+ },
+ "SH12:1": {
+  "template": "SH12",
+  "icon": 1,
+  "land_frac": 0.111,
+  "water_frac": 0.889,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "mixed",
+    "flips": [
+     [
+      1,
+      "land->water"
+     ],
+     [
+      5,
+      "water->land"
+     ],
+     [
+      10,
+      "land->water"
+     ],
+     [
+      11,
+      "water->land"
+     ],
+     [
+      12,
+      "land->water"
+     ],
+     [
+      15,
+      "water->land"
+     ],
+     [
+      16,
+      "land->water"
+     ],
+     [
+      18,
+      "water->land"
+     ],
+     [
+      21,
+      "land->water"
+     ],
+     [
+      22,
+      "water->land"
+     ]
+    ]
+   },
+   "W": {
+    "kind": "mixed",
+    "flips": [
+     [
+      20,
+      "water->land"
+     ],
+     [
+      21,
+      "land->water"
+     ],
+     [
+      23,
+      "water->land"
+     ]
+    ]
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      8,
+      "water->land"
+     ],
+     [
+      9,
+      "land->water"
+     ],
+     [
+      23,
+      "water->land"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.095
+ },
+ "SH12:2": {
+  "template": "SH12",
+  "icon": 2,
+  "land_frac": 0.094,
+  "water_frac": 0.906,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "mixed",
+    "flips": [
+     [
+      2,
+      "land->water"
+     ],
+     [
+      4,
+      "water->land"
+     ],
+     [
+      5,
+      "land->water"
+     ],
+     [
+      6,
+      "water->land"
+     ],
+     [
+      7,
+      "land->water"
+     ],
+     [
+      9,
+      "water->land"
+     ],
+     [
+      10,
+      "land->water"
+     ],
+     [
+      16,
+      "water->land"
+     ],
+     [
+      17,
+      "land->water"
+     ]
+    ]
+   },
+   "W": {
+    "kind": "mixed",
+    "flips": [
+     [
+      9,
+      "water->land"
+     ],
+     [
+      11,
+      "land->water"
+     ],
+     [
+      23,
+      "water->land"
+     ]
+    ]
+   },
+   "E": {
+    "kind": "water",
+    "flips": []
+   }
+  },
+  "clutter": 0.085
+ },
+ "SH12:3": {
+  "template": "SH12",
+  "icon": 3,
+  "land_frac": 0.922,
+  "water_frac": 0.078,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      2,
+      "water->land"
+     ],
+     [
+      3,
+      "land->water"
+     ],
+     [
+      7,
+      "water->land"
+     ],
+     [
+      21,
+      "land->water"
+     ],
+     [
+      22,
+      "water->land"
+     ],
+     [
+      23,
+      "land->water"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "mixed",
+    "flips": [
+     [
+      8,
+      "water->land"
+     ],
+     [
+      9,
+      "land->water"
+     ],
+     [
+      10,
+      "water->land"
+     ]
+    ]
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 0.965
+ },
+ "SH12:4": {
+  "template": "SH12",
+  "icon": 4,
+  "land_frac": 0.917,
+  "water_frac": 0.083,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      3,
+      "water->land"
+     ],
+     [
+      8,
+      "land->water"
+     ],
+     [
+      9,
+      "water->land"
+     ],
+     [
+      10,
+      "land->water"
+     ],
+     [
+      11,
+      "water->land"
+     ],
+     [
+      16,
+      "land->water"
+     ],
+     [
+      18,
+      "water->land"
+     ],
+     [
+      19,
+      "land->water"
+     ],
+     [
+      20,
+      "water->land"
+     ],
+     [
+      23,
+      "land->water"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "mixed",
+    "flips": [
+     [
+      1,
+      "water->land"
+     ],
+     [
+      2,
+      "land->water"
+     ],
+     [
+      3,
+      "water->land"
+     ]
+    ]
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      1,
+      "water->land"
+     ],
+     [
+      2,
+      "land->water"
+     ],
+     [
+      3,
+      "water->land"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.953
+ },
+ "SH12:5": {
+  "template": "SH12",
+  "icon": 5,
+  "land_frac": 0.875,
+  "water_frac": 0.125,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      1,
+      "water->land"
+     ],
+     [
+      7,
+      "land->water"
+     ],
+     [
+      14,
+      "water->land"
+     ],
+     [
+      15,
+      "land->water"
+     ],
+     [
+      22,
+      "water->land"
+     ],
+     [
+      23,
+      "land->water"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "mixed",
+    "flips": [
+     [
+      4,
+      "water->land"
+     ]
+    ]
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      4,
+      "water->land"
+     ],
+     [
+      6,
+      "land->water"
+     ],
+     [
+      8,
+      "water->land"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.935
+ },
+ "SH12:6": {
+  "template": "SH12",
+  "icon": 6,
+  "land_frac": 0.997,
+  "water_frac": 0.003,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 0.995
+ },
+ "SH12:7": {
+  "template": "SH12",
+  "icon": 7,
+  "land_frac": 0.998,
+  "water_frac": 0.002,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 0.998
+ },
+ "SH12:8": {
+  "template": "SH12",
+  "icon": 8,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH13:0": {
+  "template": "SH13",
+  "icon": 0,
+  "land_frac": 0.01,
+  "water_frac": 0.99,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "mixed",
+    "flips": [
+     [
+      2,
+      "water->land"
+     ],
+     [
+      3,
+      "land->water"
+     ],
+     [
+      11,
+      "water->land"
+     ],
+     [
+      12,
+      "land->water"
+     ],
+     [
+      13,
+      "water->land"
+     ],
+     [
+      14,
+      "land->water"
+     ]
+    ]
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "water",
+    "flips": []
+   }
+  },
+  "clutter": 0.0
+ },
+ "SH13:1": {
+  "template": "SH13",
+  "icon": 1,
+  "land_frac": 0.045,
+  "water_frac": 0.955,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "mixed",
+    "flips": [
+     [
+      2,
+      "water->land"
+     ],
+     [
+      3,
+      "land->water"
+     ],
+     [
+      5,
+      "water->land"
+     ],
+     [
+      6,
+      "land->water"
+     ],
+     [
+      8,
+      "water->land"
+     ],
+     [
+      11,
+      "land->water"
+     ],
+     [
+      21,
+      "water->land"
+     ]
+    ]
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      8,
+      "water->land"
+     ],
+     [
+      9,
+      "land->water"
+     ],
+     [
+      20,
+      "water->land"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.025
+ },
+ "SH13:2": {
+  "template": "SH13",
+  "icon": 2,
+  "land_frac": 0.111,
+  "water_frac": 0.889,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "mixed",
+    "flips": [
+     [
+      8,
+      "land->water"
+     ],
+     [
+      9,
+      "water->land"
+     ],
+     [
+      10,
+      "land->water"
+     ],
+     [
+      16,
+      "water->land"
+     ],
+     [
+      17,
+      "land->water"
+     ],
+     [
+      22,
+      "water->land"
+     ],
+     [
+      23,
+      "land->water"
+     ]
+    ]
+   },
+   "W": {
+    "kind": "mixed",
+    "flips": [
+     [
+      9,
+      "water->land"
+     ],
+     [
+      11,
+      "land->water"
+     ],
+     [
+      19,
+      "water->land"
+     ]
+    ]
+   },
+   "E": {
+    "kind": "water",
+    "flips": []
+   }
+  },
+  "clutter": 0.077
+ },
+ "SH13:3": {
+  "template": "SH13",
+  "icon": 3,
+  "land_frac": 0.667,
+  "water_frac": 0.333,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      2,
+      "water->land"
+     ],
+     [
+      3,
+      "land->water"
+     ],
+     [
+      11,
+      "water->land"
+     ],
+     [
+      13,
+      "land->water"
+     ],
+     [
+      15,
+      "water->land"
+     ],
+     [
+      16,
+      "land->water"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "mixed",
+    "flips": [
+     [
+      8,
+      "water->land"
+     ]
+    ]
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      10,
+      "water->land"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.685
+ },
+ "SH13:4": {
+  "template": "SH13",
+  "icon": 4,
+  "land_frac": 0.766,
+  "water_frac": 0.234,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      8,
+      "water->land"
+     ],
+     [
+      9,
+      "land->water"
+     ],
+     [
+      10,
+      "water->land"
+     ],
+     [
+      11,
+      "land->water"
+     ],
+     [
+      23,
+      "water->land"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "mixed",
+    "flips": [
+     [
+      5,
+      "water->land"
+     ],
+     [
+      6,
+      "land->water"
+     ],
+     [
+      8,
+      "water->land"
+     ],
+     [
+      9,
+      "land->water"
+     ],
+     [
+      10,
+      "water->land"
+     ]
+    ]
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      3,
+      "land->water"
+     ],
+     [
+      4,
+      "water->land"
+     ],
+     [
+      5,
+      "land->water"
+     ],
+     [
+      6,
+      "water->land"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.79
+ },
+ "SH13:5": {
+  "template": "SH13",
+  "icon": 5,
+  "land_frac": 0.854,
+  "water_frac": 0.146,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      1,
+      "water->land"
+     ],
+     [
+      7,
+      "land->water"
+     ],
+     [
+      13,
+      "water->land"
+     ],
+     [
+      14,
+      "land->water"
+     ],
+     [
+      16,
+      "water->land"
+     ],
+     [
+      17,
+      "land->water"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "mixed",
+    "flips": [
+     [
+      1,
+      "water->land"
+     ],
+     [
+      3,
+      "land->water"
+     ],
+     [
+      7,
+      "water->land"
+     ],
+     [
+      16,
+      "land->water"
+     ],
+     [
+      17,
+      "water->land"
+     ]
+    ]
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      5,
+      "water->land"
+     ],
+     [
+      7,
+      "land->water"
+     ],
+     [
+      8,
+      "water->land"
+     ],
+     [
+      9,
+      "land->water"
+     ],
+     [
+      10,
+      "water->land"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.915
+ },
+ "SH13:6": {
+  "template": "SH13",
+  "icon": 6,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH13:7": {
+  "template": "SH13",
+  "icon": 7,
+  "land_frac": 0.997,
+  "water_frac": 0.003,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 0.995
+ },
+ "SH13:8": {
+  "template": "SH13",
+  "icon": 8,
+  "land_frac": 0.997,
+  "water_frac": 0.003,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 0.995
+ },
+ "SH17:0": {
+  "template": "SH17",
+  "icon": 0,
+  "land_frac": 0.003,
+  "water_frac": 0.997,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "water",
+    "flips": []
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "water",
+    "flips": []
+   }
+  },
+  "clutter": 0.005
+ },
+ "SH17:1": {
+  "template": "SH17",
+  "icon": 1,
+  "land_frac": 0.003,
+  "water_frac": 0.997,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "water",
+    "flips": []
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "water",
+    "flips": []
+   }
+  },
+  "clutter": 0.005
+ },
+ "SH17:2": {
+  "template": "SH17",
+  "icon": 2,
+  "land_frac": 0.005,
+  "water_frac": 0.995,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "water",
+    "flips": []
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "water",
+    "flips": []
+   }
+  },
+  "clutter": 0.005
+ },
+ "SH17:3": {
+  "template": "SH17",
+  "icon": 3,
+  "land_frac": 0.003,
+  "water_frac": 0.997,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "water",
+    "flips": []
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "water",
+    "flips": []
+   }
+  },
+  "clutter": 0.003
+ },
+ "SH18:0": {
+  "template": "SH18",
+  "icon": 0,
+  "land_frac": 0.005,
+  "water_frac": 0.995,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "water",
+    "flips": []
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      1,
+      "land->water"
+     ],
+     [
+      16,
+      "water->land"
+     ],
+     [
+      17,
+      "land->water"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.003
+ },
+ "SH18:1": {
+  "template": "SH18",
+  "icon": 1,
+  "land_frac": 0.005,
+  "water_frac": 0.995,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "water",
+    "flips": []
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "water",
+    "flips": []
+   }
+  },
+  "clutter": 0.007
+ },
+ "SH18:2": {
+  "template": "SH18",
+  "icon": 2,
+  "land_frac": 0.005,
+  "water_frac": 0.995,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "water",
+    "flips": []
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "water",
+    "flips": []
+   }
+  },
+  "clutter": 0.005
+ },
+ "SH18:3": {
+  "template": "SH18",
+  "icon": 3,
+  "land_frac": 0.003,
+  "water_frac": 0.997,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "water",
+    "flips": []
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "water",
+    "flips": []
+   }
+  },
+  "clutter": 0.005
+ },
+ "SH32:0": {
+  "template": "SH32",
+  "icon": 0,
+  "land_frac": 0.111,
+  "water_frac": 0.889,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "mixed",
+    "flips": [
+     [
+      2,
+      "water->land"
+     ],
+     [
+      3,
+      "land->water"
+     ],
+     [
+      11,
+      "water->land"
+     ],
+     [
+      12,
+      "land->water"
+     ],
+     [
+      18,
+      "water->land"
+     ],
+     [
+      19,
+      "land->water"
+     ],
+     [
+      20,
+      "water->land"
+     ],
+     [
+      21,
+      "land->water"
+     ],
+     [
+      23,
+      "water->land"
+     ]
+    ]
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      1,
+      "water->land"
+     ],
+     [
+      2,
+      "land->water"
+     ],
+     [
+      6,
+      "water->land"
+     ],
+     [
+      8,
+      "land->water"
+     ],
+     [
+      10,
+      "water->land"
+     ],
+     [
+      14,
+      "land->water"
+     ],
+     [
+      17,
+      "water->land"
+     ],
+     [
+      19,
+      "land->water"
+     ],
+     [
+      21,
+      "water->land"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.092
+ },
+ "SH32:1": {
+  "template": "SH32",
+  "icon": 1,
+  "land_frac": 0.936,
+  "water_frac": 0.064,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      8,
+      "water->land"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "mixed",
+    "flips": [
+     [
+      1,
+      "water->land"
+     ],
+     [
+      2,
+      "land->water"
+     ],
+     [
+      5,
+      "water->land"
+     ],
+     [
+      13,
+      "land->water"
+     ],
+     [
+      15,
+      "water->land"
+     ],
+     [
+      21,
+      "land->water"
+     ],
+     [
+      22,
+      "water->land"
+     ]
+    ]
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 0.973
+ },
+ "SH32:2": {
+  "template": "SH32",
+  "icon": 2,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH32:3": {
+  "template": "SH32",
+  "icon": 3,
+  "land_frac": 0.762,
+  "water_frac": 0.238,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      2,
+      "water->land"
+     ],
+     [
+      3,
+      "land->water"
+     ],
+     [
+      12,
+      "water->land"
+     ],
+     [
+      13,
+      "land->water"
+     ],
+     [
+      14,
+      "water->land"
+     ],
+     [
+      15,
+      "land->water"
+     ],
+     [
+      18,
+      "water->land"
+     ],
+     [
+      19,
+      "land->water"
+     ],
+     [
+      20,
+      "water->land"
+     ],
+     [
+      21,
+      "land->water"
+     ],
+     [
+      23,
+      "water->land"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "mixed",
+    "flips": [
+     [
+      5,
+      "water->land"
+     ],
+     [
+      6,
+      "land->water"
+     ],
+     [
+      9,
+      "water->land"
+     ]
+    ]
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      1,
+      "land->water"
+     ],
+     [
+      3,
+      "water->land"
+     ],
+     [
+      4,
+      "land->water"
+     ],
+     [
+      5,
+      "water->land"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.795
+ },
+ "SH32:4": {
+  "template": "SH32",
+  "icon": 4,
+  "land_frac": 0.998,
+  "water_frac": 0.002,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH32:5": {
+  "template": "SH32",
+  "icon": 5,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH32:6": {
+  "template": "SH32",
+  "icon": 6,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH32:7": {
+  "template": "SH32",
+  "icon": 7,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH32:8": {
+  "template": "SH32",
+  "icon": 8,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH33:0": {
+  "template": "SH33",
+  "icon": 0,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH33:1": {
+  "template": "SH33",
+  "icon": 1,
+  "land_frac": 0.988,
+  "water_frac": 0.012,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      1,
+      "land->water"
+     ],
+     [
+      4,
+      "water->land"
+     ],
+     [
+      6,
+      "land->water"
+     ],
+     [
+      7,
+      "water->land"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.995
+ },
+ "SH33:2": {
+  "template": "SH33",
+  "icon": 2,
+  "land_frac": 0.509,
+  "water_frac": 0.491,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "mixed",
+    "flips": [
+     [
+      18,
+      "land->water"
+     ]
+    ]
+   },
+   "W": {
+    "kind": "mixed",
+    "flips": [
+     [
+      1,
+      "water->land"
+     ],
+     [
+      2,
+      "land->water"
+     ],
+     [
+      5,
+      "water->land"
+     ]
+    ]
+   },
+   "E": {
+    "kind": "water",
+    "flips": []
+   }
+  },
+  "clutter": 0.542
+ },
+ "SH33:3": {
+  "template": "SH33",
+  "icon": 3,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH33:4": {
+  "template": "SH33",
+  "icon": 4,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH33:5": {
+  "template": "SH33",
+  "icon": 5,
+  "land_frac": 0.967,
+  "water_frac": 0.033,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      22,
+      "land->water"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      8,
+      "water->land"
+     ],
+     [
+      9,
+      "land->water"
+     ],
+     [
+      10,
+      "water->land"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.988
+ },
+ "SH33:6": {
+  "template": "SH33",
+  "icon": 6,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH33:7": {
+  "template": "SH33",
+  "icon": 7,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH33:8": {
+  "template": "SH33",
+  "icon": 8,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH34:0": {
+  "template": "SH34",
+  "icon": 0,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH34:1": {
+  "template": "SH34",
+  "icon": 1,
+  "land_frac": 0.998,
+  "water_frac": 0.002,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH34:2": {
+  "template": "SH34",
+  "icon": 2,
+  "land_frac": 0.245,
+  "water_frac": 0.755,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      1,
+      "water->land"
+     ],
+     [
+      3,
+      "land->water"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "mixed",
+    "flips": [
+     [
+      3,
+      "land->water"
+     ],
+     [
+      7,
+      "water->land"
+     ],
+     [
+      8,
+      "land->water"
+     ],
+     [
+      20,
+      "water->land"
+     ],
+     [
+      22,
+      "land->water"
+     ]
+    ]
+   },
+   "W": {
+    "kind": "mixed",
+    "flips": [
+     [
+      2,
+      "water->land"
+     ],
+     [
+      9,
+      "land->water"
+     ],
+     [
+      10,
+      "water->land"
+     ]
+    ]
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      11,
+      "water->land"
+     ],
+     [
+      12,
+      "land->water"
+     ],
+     [
+      15,
+      "water->land"
+     ],
+     [
+      16,
+      "land->water"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.193
+ },
+ "SH34:3": {
+  "template": "SH34",
+  "icon": 3,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH34:4": {
+  "template": "SH34",
+  "icon": 4,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH34:5": {
+  "template": "SH34",
+  "icon": 5,
+  "land_frac": 0.314,
+  "water_frac": 0.686,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      4,
+      "land->water"
+     ],
+     [
+      5,
+      "water->land"
+     ],
+     [
+      6,
+      "land->water"
+     ],
+     [
+      7,
+      "water->land"
+     ],
+     [
+      8,
+      "land->water"
+     ],
+     [
+      22,
+      "water->land"
+     ],
+     [
+      23,
+      "land->water"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "mixed",
+    "flips": [
+     [
+      2,
+      "land->water"
+     ],
+     [
+      3,
+      "water->land"
+     ],
+     [
+      4,
+      "land->water"
+     ],
+     [
+      5,
+      "water->land"
+     ],
+     [
+      6,
+      "land->water"
+     ],
+     [
+      7,
+      "water->land"
+     ],
+     [
+      8,
+      "land->water"
+     ],
+     [
+      10,
+      "water->land"
+     ],
+     [
+      11,
+      "land->water"
+     ]
+    ]
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "water",
+    "flips": []
+   }
+  },
+  "clutter": 0.285
+ },
+ "SH34:6": {
+  "template": "SH34",
+  "icon": 6,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH34:7": {
+  "template": "SH34",
+  "icon": 7,
+  "land_frac": 0.981,
+  "water_frac": 0.019,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "mixed",
+    "flips": [
+     [
+      22,
+      "land->water"
+     ]
+    ]
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      5,
+      "land->water"
+     ],
+     [
+      6,
+      "water->land"
+     ],
+     [
+      15,
+      "land->water"
+     ],
+     [
+      16,
+      "water->land"
+     ],
+     [
+      19,
+      "land->water"
+     ],
+     [
+      21,
+      "water->land"
+     ],
+     [
+      22,
+      "land->water"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.998
+ },
+ "SH34:8": {
+  "template": "SH34",
+  "icon": 8,
+  "land_frac": 0.167,
+  "water_frac": 0.833,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      4,
+      "land->water"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "mixed",
+    "flips": [
+     [
+      1,
+      "water->land"
+     ],
+     [
+      2,
+      "land->water"
+     ],
+     [
+      4,
+      "water->land"
+     ],
+     [
+      6,
+      "land->water"
+     ],
+     [
+      16,
+      "water->land"
+     ],
+     [
+      17,
+      "land->water"
+     ]
+    ]
+   },
+   "W": {
+    "kind": "mixed",
+    "flips": [
+     [
+      3,
+      "land->water"
+     ],
+     [
+      4,
+      "water->land"
+     ],
+     [
+      5,
+      "land->water"
+     ],
+     [
+      7,
+      "water->land"
+     ],
+     [
+      8,
+      "land->water"
+     ],
+     [
+      10,
+      "water->land"
+     ],
+     [
+      13,
+      "land->water"
+     ],
+     [
+      15,
+      "water->land"
+     ],
+     [
+      19,
+      "land->water"
+     ],
+     [
+      20,
+      "water->land"
+     ],
+     [
+      21,
+      "land->water"
+     ]
+    ]
+   },
+   "E": {
+    "kind": "water",
+    "flips": []
+   }
+  },
+  "clutter": 0.14
+ },
+ "SH35:0": {
+  "template": "SH35",
+  "icon": 0,
+  "land_frac": 0.017,
+  "water_frac": 0.983,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "water",
+    "flips": []
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      2,
+      "water->land"
+     ],
+     [
+      3,
+      "land->water"
+     ],
+     [
+      11,
+      "water->land"
+     ],
+     [
+      13,
+      "land->water"
+     ],
+     [
+      15,
+      "water->land"
+     ],
+     [
+      16,
+      "land->water"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.007
+ },
+ "SH35:1": {
+  "template": "SH35",
+  "icon": 1,
+  "land_frac": 0.701,
+  "water_frac": 0.299,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      7,
+      "water->land"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "mixed",
+    "flips": [
+     [
+      9,
+      "water->land"
+     ]
+    ]
+   },
+   "W": {
+    "kind": "mixed",
+    "flips": [
+     [
+      2,
+      "water->land"
+     ],
+     [
+      3,
+      "land->water"
+     ],
+     [
+      10,
+      "water->land"
+     ],
+     [
+      12,
+      "land->water"
+     ],
+     [
+      13,
+      "water->land"
+     ],
+     [
+      14,
+      "land->water"
+     ],
+     [
+      16,
+      "water->land"
+     ],
+     [
+      17,
+      "land->water"
+     ]
+    ]
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 0.723
+ },
+ "SH35:2": {
+  "template": "SH35",
+  "icon": 2,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH35:3": {
+  "template": "SH35",
+  "icon": 3,
+  "land_frac": 0.042,
+  "water_frac": 0.958,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "mixed",
+    "flips": [
+     [
+      7,
+      "water->land"
+     ],
+     [
+      8,
+      "land->water"
+     ],
+     [
+      22,
+      "water->land"
+     ],
+     [
+      23,
+      "land->water"
+     ]
+    ]
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      8,
+      "water->land"
+     ],
+     [
+      9,
+      "land->water"
+     ],
+     [
+      10,
+      "water->land"
+     ],
+     [
+      11,
+      "land->water"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.03
+ },
+ "SH35:4": {
+  "template": "SH35",
+  "icon": 4,
+  "land_frac": 0.804,
+  "water_frac": 0.196,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      4,
+      "water->land"
+     ],
+     [
+      5,
+      "land->water"
+     ],
+     [
+      7,
+      "water->land"
+     ],
+     [
+      8,
+      "land->water"
+     ],
+     [
+      9,
+      "water->land"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "mixed",
+    "flips": [
+     [
+      1,
+      "water->land"
+     ],
+     [
+      2,
+      "land->water"
+     ],
+     [
+      3,
+      "water->land"
+     ],
+     [
+      4,
+      "land->water"
+     ],
+     [
+      5,
+      "water->land"
+     ]
+    ]
+   },
+   "W": {
+    "kind": "mixed",
+    "flips": [
+     [
+      2,
+      "water->land"
+     ],
+     [
+      3,
+      "land->water"
+     ],
+     [
+      4,
+      "water->land"
+     ],
+     [
+      5,
+      "land->water"
+     ],
+     [
+      8,
+      "water->land"
+     ],
+     [
+      11,
+      "land->water"
+     ],
+     [
+      21,
+      "water->land"
+     ],
+     [
+      23,
+      "land->water"
+     ]
+    ]
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 0.83
+ },
+ "SH35:5": {
+  "template": "SH35",
+  "icon": 5,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "SH35:6": {
+  "template": "SH35",
+  "icon": 6,
+  "land_frac": 0.089,
+  "water_frac": 0.911,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      8,
+      "water->land"
+     ],
+     [
+      10,
+      "land->water"
+     ],
+     [
+      22,
+      "water->land"
+     ],
+     [
+      23,
+      "land->water"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "water",
+    "flips": []
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "mixed",
+    "flips": [
+     [
+      1,
+      "water->land"
+     ],
+     [
+      2,
+      "land->water"
+     ],
+     [
+      6,
+      "water->land"
+     ],
+     [
+      7,
+      "land->water"
+     ],
+     [
+      13,
+      "water->land"
+     ],
+     [
+      14,
+      "land->water"
+     ],
+     [
+      16,
+      "water->land"
+     ],
+     [
+      17,
+      "land->water"
+     ]
+    ]
+   }
+  },
+  "clutter": 0.072
+ },
+ "SH35:7": {
+  "template": "SH35",
+  "icon": 7,
+  "land_frac": 0.889,
+  "water_frac": 0.111,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "mixed",
+    "flips": [
+     [
+      1,
+      "water->land"
+     ],
+     [
+      2,
+      "land->water"
+     ],
+     [
+      6,
+      "water->land"
+     ]
+    ]
+   },
+   "S": {
+    "kind": "mixed",
+    "flips": [
+     [
+      4,
+      "water->land"
+     ],
+     [
+      6,
+      "land->water"
+     ],
+     [
+      7,
+      "water->land"
+     ],
+     [
+      8,
+      "land->water"
+     ],
+     [
+      9,
+      "water->land"
+     ]
+    ]
+   },
+   "W": {
+    "kind": "mixed",
+    "flips": [
+     [
+      1,
+      "water->land"
+     ],
+     [
+      2,
+      "land->water"
+     ],
+     [
+      4,
+      "water->land"
+     ],
+     [
+      5,
+      "land->water"
+     ],
+     [
+      9,
+      "water->land"
+     ],
+     [
+      10,
+      "land->water"
+     ],
+     [
+      11,
+      "water->land"
+     ],
+     [
+      12,
+      "land->water"
+     ],
+     [
+      14,
+      "water->land"
+     ],
+     [
+      15,
+      "land->water"
+     ],
+     [
+      22,
+      "water->land"
+     ],
+     [
+      23,
+      "land->water"
+     ]
+    ]
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 0.948
+ },
+ "SH35:8": {
+  "template": "SH35",
+  "icon": 8,
+  "land_frac": 1.0,
+  "water_frac": 0.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "land",
+    "flips": []
+   },
+   "S": {
+    "kind": "land",
+    "flips": []
+   },
+   "W": {
+    "kind": "land",
+    "flips": []
+   },
+   "E": {
+    "kind": "land",
+    "flips": []
+   }
+  },
+  "clutter": 1.0
+ },
+ "W1:0": {
+  "template": "W1",
+  "icon": 0,
+  "land_frac": 0.0,
+  "water_frac": 1.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "water",
+    "flips": []
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "water",
+    "flips": []
+   }
+  },
+  "clutter": 0.0
+ },
+ "W2:0": {
+  "template": "W2",
+  "icon": 0,
+  "land_frac": 0.0,
+  "water_frac": 1.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "water",
+    "flips": []
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "water",
+    "flips": []
+   }
+  },
+  "clutter": 0.0
+ },
+ "W2:1": {
+  "template": "W2",
+  "icon": 1,
+  "land_frac": 0.0,
+  "water_frac": 1.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "water",
+    "flips": []
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "water",
+    "flips": []
+   }
+  },
+  "clutter": 0.0
+ },
+ "W2:2": {
+  "template": "W2",
+  "icon": 2,
+  "land_frac": 0.0,
+  "water_frac": 1.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "water",
+    "flips": []
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "water",
+    "flips": []
+   }
+  },
+  "clutter": 0.0
+ },
+ "W2:3": {
+  "template": "W2",
+  "icon": 3,
+  "land_frac": 0.0,
+  "water_frac": 1.0,
+  "transparent_frac": 0.0,
+  "edges": {
+   "N": {
+    "kind": "water",
+    "flips": []
+   },
+   "S": {
+    "kind": "water",
+    "flips": []
+   },
+   "W": {
+    "kind": "water",
+    "flips": []
+   },
+   "E": {
+    "kind": "water",
+    "flips": []
+   }
+  },
+  "clutter": 0.0
+ }
+}

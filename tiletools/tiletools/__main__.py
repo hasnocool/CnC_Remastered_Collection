@@ -33,7 +33,7 @@ from .matcher import Strategy, assign
 from .meg import steam_install_root
 from .render import Renderer, comparison_sheet, save, to_preview
 from .seam import dumps as seam_dumps, seam_score
-from .terrain import apply_shore, generate_field, label_pools
+from .terrain import apply_shore, generate_field, label_pools, smooth
 
 THEATERS = {
     "td": ("temperate", "winter", "desert"),
@@ -79,7 +79,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--theater", default=None, help="default: game's first theater")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--size", type=int, default=48)
-    parser.add_argument("--sea", type=float, default=0.35)
+    parser.add_argument("--sea", type=float, default=0.40)
+    parser.add_argument("--smooth", type=int, default=2, help="coastline smoothing passes")
     parser.add_argument(
         "--out",
         type=Path,
@@ -91,6 +92,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scale", type=float, default=4.0, help="screenshot scale (DOS pixels)")
     parser.add_argument("--gamma", type=float, default=2.2, help="palette gamma (1 = DOS look)")
     parser.add_argument("--full", action="store_true", help="use every joinable family, not just the v1 vocabulary")
+    parser.add_argument(
+        "--zoom-crop",
+        type=int,
+        nargs=4,
+        metavar=("X0", "Y0", "X1", "Y1"),
+        help="also render the cell-rect crop at high zoom for seam inspection",
+    )
+    parser.add_argument("--zoom-scale", type=float, default=8.0, help="crop zoom (DOS-pixel scale)")
     args = parser.parse_args(argv)
     out = args.out
     if out is None:
@@ -116,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     field = generate_field(args.seed, args.size, sea_level=args.sea)
     apply_shore(field)
     label_pools(field)
+    smooth(field, passes=args.smooth)
     counts = {m.name: int((field.materials == m).sum()) for m in set(field.materials.flat)}
     print(f"field: {counts}")
 
@@ -128,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         families = {
             Material.LAND: ["CLEAR1"],
             Material.WATER: ["W1"],
-            Material.SHORE: ["SH10", "SH11", "SH12", "SH13"],
+            Material.SHORE: ["SH10", "SH12", "SH13", "SH34", "SH35"],
         }
     picks = assign(
         Strategy.MATCHED,
@@ -138,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         families=families,
         shore_mask_restrict=False,
         pool_families=["SH32", "SH33", "SH34", "SH35"],
+        icon_classes=theater.index_classes(),
     )
     renderer = Renderer(theater)
     screenshot = renderer.compose(picks, scale=args.scale)
@@ -152,6 +163,17 @@ def main(argv: list[str] | None = None) -> int:
     ))
     print(f"seams: holes {stats.holes}/{stats.checked_edges}, "
           f"transitions {stats.transitions} (coastline/arc), worst {stats.worst_edge:.2f}")
+
+    if args.zoom_crop:
+        x0, y0, x1, y1 = args.zoom_crop
+        size_c = picks.shape[0]
+        x0, y0 = max(0, x0), max(0, y0)
+        x1, y1 = min(size_c, x1), min(size_c, y1)
+        crop = picks[y0:y1, x0:x1]
+        zoom = renderer.compose(crop, scale=args.zoom_scale)
+        save(zoom, out / f"zoom_{x0}_{y0}_{x1}_{y1}.png")
+        print(f"zoom: {x1-x0}x{y1-y0} cells at {args.zoom_scale}x -> "
+              f"zoom_{x0}_{y0}_{x1}_{y1}.png ({zoom.width}x{zoom.height})")
 
     if args.compare:
         naive = assign(Strategy.NAIVE, field, table, seed=args.seed, families=families,

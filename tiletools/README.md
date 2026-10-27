@@ -24,10 +24,13 @@ Outputs go to `--out` (default `RUST/target/scratch-tiletools/`):
 
 | File             | What it is                                            |
 |------------------|-------------------------------------------------------|
-| `map.png`        | Screenshot at native 128px/cell                       |
+| `map.png`        | Screenshot at native scale (96px/cell by default)     |
 | `map_preview.png`| Same, downscaled to ≤1600px for vision QA             |
 | `map_cells.json` | `(template, icon)` per cell (row-major)               |
-| `seams.json`     | Quantitative seam metric for the matched pick         |
+| `seams.json`     | Seam metric (holes = real defects, transitions = coastlines) |
+| `tiles.json`     | Per-tile classification (edge kinds, arc flips, clutter) |
+| `tile_atlas.png` | Labeled contact sheet of every vocabulary tile        |
+| `zoom_X0_Y0_X1_Y1.png` | With `--zoom-crop`: high-zoom seam inspection   |
 | `compare.png`    | With `--compare`: naive vs matched sheet + seam stats |
 
 ## Requirements

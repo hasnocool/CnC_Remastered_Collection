@@ -66,44 +66,55 @@ Why not WFC: the constraint is one material field, candidate sets are small,
 and material-based scoring is complete. WFC adds contradiction handling and
 nondeterminism without visual benefit. Kept as a possible future extension.
 
-## Final method and results (2026-10-26)
+## Final method and results (2026-10-27)
 
-The working matcher is a **greedy scanline Wang-tile placement over the
-shipped art's edge class-runs** (`tiletools/matcher.py: scanline_assign`):
+The working matcher is a **three-layer placement over the shipped art**:
 
-1. Field: seeded value-noise fBm + island falloff → land/water; water cells
-   with a land 4-neighbour become shore (beach arcs live on the water side).
-2. Icons: DOS `.TEM` art (24×24, palette-indexed) decoded from the theater
-   MIX; water/grass index sets learned from the pure templates (W1/W2 vs
-   CLEAR1) — the DOS palette's dark dithers are index-disjoint between
-   grass and water, so classification is exact.
-3. Per-cell pick: the North and West neighbours are already placed
-   (row-major scan), so their facing edge class-runs are known exactly and
-   the candidate's N/W edge runs are compared pixel-for-pixel; E/S and
-   diagonals score by fractional demands (`join.edge_demand`). Ties break
-   seeded-random among near-equal, so shorelines vary.
-4. Small non-border water regions (≤4 cells) render with the pond
-   templates (SH32-35, water ringed by sand); everything else uses
-   CLEAR1 + W1 + SH10-13.
+1. **Field**: seeded value-noise fBm + island falloff → land/water; 2
+   passes of 3×3 majority smoothing (jagged fBm coasts fragment into
+   1-2-cell runs where no patch fits); water cells with a land
+   4-neighbour become shore; small non-border wet regions (≤4 cells) are
+   ponds.
+2. **Patches**: whole coast templates chain on a global 3-cell lattice —
+   `SH34`/`SH35` (N-S coasts, land W/E), `SH12`/`SH13` alternating (E-W
+   coasts, land S), origin may hang off the map edge (clipped). Patches
+   validate per cell: full-land art needs field LAND, full-water art
+   needs water/shore, arc cells accept either; outer edges must agree
+   with the field across them. Plain-water interiors tile with 2×2
+   variety patches (`W2`/`SH17`/`SH18`).
+3. **Per-cell scanline** (Wang-tile) fills the rest: placed N/W
+   neighbours contribute their exact edge runs and smoothed sand-curve
+   profiles (5px window over the dithered arc — pixel-exact run matching
+   can never join two different dithered arcs); unplaced sides score
+   presence-based demands (`join.edge_demand`: a land-facing edge needs
+   sand *present*, not full-coverage).
 
-Metric (`seam.py`): **0 holes / 1984 edges** (transparency mismatches — the
-real seam class) for both naive and matched; class-change *transitions*
-(289 matched vs ~scattered for naive) are coastlines and arc notches, which
-the DOS art produces by design. The naive-vs-matched difference is
-qualitative: naive scatters beach teeth through grass; matched hugs coasts.
+**Classification** (`classify.py`, `tiles.json`, `tile_atlas.png`): every
+vocabulary tile gets per-edge kinds (land/water/mixed + arc flip
+positions), coverage fractions, and interior clutter (rock/tree detail).
+The per-mask fitness table built from it drives **field repair**: coast
+shapes no shipped tile fits — near-enclosed inlets (3+ land sides) — are
+closed to land so no detached sand squares render. With presence-based
+demands every one of the 16 land masks has a fitting tile (max penalty
+0.52).
+
+Metric (`seam.py`): **0 holes / 1984 edges**. Vision QA (3 passes, VL
+model): pass 1 found floating/blocky coast pieces and missing water
+variety → fixed by patch chains + smoothing + water variety patches; pass
+2 found border-strip gaps (the strip finder skipped map-edge columns) and
+pond bypass gaps → fixed; pass 3: **pass** (atlas classification matches
+art; coast continuous; seams clean; water variety confirmed).
 
 ### Known limits / next steps
-- Shore arcs repeat per cell (scalloped "wallpaper") instead of forming
-  template-scale curves — full fidelity needs template-level placement:
-  chain 3x3 shore templates along coasts the way the original editor
-  authors them (SH11 = land W, SH12 = land E, SH13 = land SW; masks are
-  encoded in the `_slope<mask>` array names in CDATA.CPP).
+- The DOS temperate set ships exactly one N-S coast template per land
+  side (SH34/SH35), so long straight N-S coasts repeat their 3×3 art;
+  the E-W coasts alternate SH12/SH13. Wider variety needs the diagonal
+  pieces (SH10/SH11) chained at coast turns — next step.
 - Roads (D*), slopes (S*), rivers (RV*), FALLS/FORD are decoded and
-  measured (they're in the join table) but not yet placed by the
-  generator; the same run-matching machinery applies.
+  measured but not yet placed by the generator; the same machinery
+  applies.
 - The remaster's re-authored MEG art is unreachable without the closed
-  client's member-name logic (see `tiletools/art.py` STATUS note); if that
-  mapping is ever recovered, `art.py` slots in behind the same interface.
+  client's member-name logic (see `tiletools/art.py` STATUS note).
 - The DOS palette is dark; `--gamma` (default 2.2) brightens for testing.
   Gamma 1.0 = the exact DOS look.
 

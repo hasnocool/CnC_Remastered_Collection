@@ -62,14 +62,19 @@ class EdgeProfile:
         return self.opaque + self.water
 
     def disagreement(self, demand: str) -> float:
-        """``demand`` in {'opaque', 'water', 'any', 'transparent'}."""
-        if demand == "opaque":
-            return 1.0 - self.opaque
+        """``demand`` semantics:
+        - 'land'  : the edge must carry sand (a partial arc is fine);
+        - 'water' : the edge must read as water;
+        - 'any'   : the edge must carry material (land or water);
+        - 'yield' : the edge must be transparent.
+        """
+        if demand == "land":
+            return 1.0 if self.opaque < 0.2 else 0.3 * (1.0 - self.opaque)
         if demand == "water":
-            return 1.0 - self.water
+            return 1.0 if self.water < 0.3 else 0.3 * (1.0 - self.water)
         if demand == "any":
             return 1.0 - self.wants_opaque
-        return self.wants_opaque  # transparent
+        return self.wants_opaque  # yield
 
 
 @dataclass
@@ -86,11 +91,11 @@ class EdgeProfiles:
 def edge_demand(self_material: Material, neighbour: Material) -> str:
     """What the shared edge must look like, from both sides.
 
-    - facing the same or compatible material: carry it (opaque land, or
-      water colour);
-    - facing a different material: yield (transparent), except shore art,
-      which is opaque water with a beach on its land edge, so a shore tile
-      facing water demands WATER colour and facing land demands OPAQUE.
+    Presence-based: same or compatible material -> carry it ('land'/'water'
+    accept partial arcs — the rounded beach curves); different material ->
+    yield (transparent), except shore art, which is opaque water with sand
+    on its land edge, so a shore tile demands 'water' facing water and
+    'land' facing land.
     """
     if self_material is neighbour:
         return "any"
@@ -98,14 +103,14 @@ def edge_demand(self_material: Material, neighbour: Material) -> str:
     if Material.WATER in pair and Material.LAND in pair:
         # Water directly against land: the water side yields (the shore
         # system draws the transition on the water side).
-        return "transparent" if self_material is Material.WATER else "opaque"
+        return "yield" if self_material is Material.WATER else "land"
     if self_material is Material.SHORE:
-        return "water" if neighbour is Material.WATER else "opaque"
+        return "water" if neighbour is Material.WATER else "land"
     if self_material is Material.WATER:
-        return "water" if neighbour in (Material.WATER, Material.SHORE) else "transparent"
+        return "water" if neighbour in (Material.WATER, Material.SHORE) else "yield"
     if self_material is Material.LAND:
-        return "opaque" if neighbour in (Material.LAND, Material.SHORE) else "transparent"
-    return "transparent"
+        return "land" if neighbour in (Material.LAND, Material.SHORE) else "yield"
+    return "yield"
 
 
 def measure_edge(rgba: np.ndarray, coords: np.ndarray) -> EdgeProfile:
@@ -175,6 +180,7 @@ class JoinCandidate:
     edges: EdgeProfiles
     material: Material
     runs: dict[str, np.ndarray] = field(default_factory=dict)
+    profiles: dict[str, np.ndarray] = field(default_factory=dict)
 
     def score(
         self,
@@ -272,6 +278,21 @@ class JoinTable:
         return sum(len(v) for v in self.by_material.values())
 
 
+def sand_profile(run: np.ndarray, window: int = 5) -> np.ndarray:
+    """Smoothed sand fraction along an edge run (0=water .. 1=land).
+
+    The DOS arcs are dithered — pixel-exact run comparison can never match
+    two different arc tiles — so the matcher aligns the smoothed boundary
+    curve instead: where along the edge the sand/water dither density
+    crosses over.
+    """
+    sand = (run == 2).astype(np.float32)
+    if len(sand) < window:
+        return sand
+    kernel = np.ones(window, dtype=np.float32) / window
+    return np.convolve(sand, kernel, mode="same")
+
+
 def build_table_from_icons(
     measured: dict[tuple[str, int], EdgeProfiles],
     materials: dict[tuple[str, int], Material],
@@ -283,12 +304,14 @@ def build_table_from_icons(
         if material is None:
             continue
         template, icon = key
+        icon_runs = (runs or {}).get(key, {})
         table.push(JoinCandidate(
             template=template,
             icon=icon,
             edges=edges,
             material=material,
-            runs=(runs or {}).get(key, {}),
+            runs=icon_runs,
+            profiles={side: sand_profile(run) for side, run in icon_runs.items()},
         ))
     return table
 
