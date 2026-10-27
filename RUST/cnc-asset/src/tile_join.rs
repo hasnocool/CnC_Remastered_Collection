@@ -273,6 +273,17 @@ impl JoinTable {
             .unwrap_or(&[])
     }
 
+    /// A view whose candidates are only those matching `template`.
+    pub fn restricted(&self, material: JoinMaterial, template: &str) -> JoinTable {
+        let mut out = JoinTable::new();
+        for c in self.candidates(material) {
+            if c.template == template {
+                out.push(c.clone());
+            }
+        }
+        out
+    }
+
     /// Pick the icon that joins best against `neighbours`.
     ///
     /// Returns `None` only when no candidate exists for `material`, so a

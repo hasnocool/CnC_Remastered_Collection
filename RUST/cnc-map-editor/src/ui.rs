@@ -82,17 +82,34 @@ impl TileSource {
                     ((-1, 1), 'S'),
                     ((-1, 0), 'W'),
                 ];
-                // The join material must be the family the cell's terrain
-                // actually belongs to, not a coarse bucket: sand picks from the
-                // patch templates, scrub from the brush/rock templates, and so
-                // on. Picking "land" for everything collapses the whole map to
-                // CLEAR1.
+                // The original engine stores `TemplateType` per cell
+                // (`MAP.CPP:678`), and the template is what sets the base
+                // material: `P01` clear grass, `S01` grass-to-cliff slope,
+                // `RV01` river, `W1` open water. Pick the template from the
+                // cell's terrain, then let the join score choose the icon
+                // inside it. Picking by material alone collapses a whole map
+                // to one tile.
+                let template = |terrain: u8| -> Option<&'static str> {
+                    use super::generator::TerrainType;
+                    Some(match TerrainType::from_id(terrain)? {
+                        TerrainType::Water => "W1",
+                        TerrainType::Snow | TerrainType::Ice => "W2",
+                        TerrainType::Sand => "P04",
+                        TerrainType::Dirt | TerrainType::Mud | TerrainType::Swamp => "P03",
+                        TerrainType::Rock | TerrainType::Crater => "P07",
+                        TerrainType::Scorched => "P13",
+                        TerrainType::Rough => "P08",
+                        TerrainType::Concrete => "D01",
+                        TerrainType::ForestFloor | TerrainType::JungleFloor => "P02",
+                        TerrainType::Grass => "P01",
+                    })
+                };
                 let material = |terrain: u8| -> cnc_asset::tile_join::JoinMaterial {
                     use super::generator::TerrainType;
                     use cnc_asset::tile_join::JoinMaterial as M;
                     match TerrainType::from_id(terrain) {
                         Some(TerrainType::Water) => M::Water,
-                        Some(TerrainType::Snow | TerrainType::Ice) => M::Shore,
+                        Some(TerrainType::Snow | TerrainType::Ice) => M::Water,
                         Some(TerrainType::Sand) => M::Patch,
                         Some(TerrainType::Dirt | TerrainType::Mud | TerrainType::Swamp) => M::Patch,
                         Some(TerrainType::Rock | TerrainType::Crater | TerrainType::Scorched) => {
@@ -100,15 +117,7 @@ impl TileSource {
                         }
                         Some(TerrainType::Rough) => M::Slope,
                         Some(TerrainType::Concrete) => M::Road,
-                        // `CLEAR1` icons are fully transparent placeholders
-                        // (`Map.CPP` writes them for cells with no template).
-                        // The lived-in base terrain is the `P*` patch family,
-                        // which is where the engine puts clear grass.
-                        Some(TerrainType::ForestFloor | TerrainType::JungleFloor) => M::Land,
-                        Some(TerrainType::Grass) => M::Patch,
-                        // No terrain id maps to shore: that is the generator's
-                        // role for water edges (see the fallback below).
-                        _ => M::Land,
+                        _ => M::Patch,
                     }
                 };
                 let mut neighbours = Vec::with_capacity(8);
@@ -117,8 +126,10 @@ impl TileSource {
                         neighbours.push((material(model.terrain[i]), side));
                     }
                 }
-                p.cell_draw_joined(material(terrain), &neighbours)
-                    .or_else(|| p.cell_draw(terrain))
+                let joined = template(terrain)
+                    .and_then(|tpl| p.cell_draw_from(tpl, &neighbours))
+                    .or_else(|| p.cell_draw_joined(material(terrain), &neighbours));
+                joined.or_else(|| p.cell_draw(terrain))
             }
         }
     }

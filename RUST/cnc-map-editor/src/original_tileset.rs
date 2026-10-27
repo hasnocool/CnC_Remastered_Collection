@@ -452,6 +452,30 @@ impl OriginalTileset {
         &self.join
     }
 
+    /// Join pick restricted to one template family.
+    ///
+    /// The original engine stores `TemplateType` per cell (`MAP.CPP:678`), and
+    /// the template is what decides the base material: `P01` is clear grass,
+    /// `P02` a slightly rougher patch, `S01` grass-to-cliff slope, `RV01`
+    /// river water, and so on. Picking only by material collapses 80 patch
+    /// variants into whichever one scores best, so a whole map becomes one
+    /// tile. This overload keeps the `template` constraint and lets the join
+    /// score choose the icon inside it.
+    pub fn cell_draw_from(
+        &self,
+        template: &str,
+        neighbours: &[(JoinMaterial, char)],
+    ) -> Option<CellTile> {
+        let material = tile_join::material_for(template)?;
+        let restricted = self.join.restricted(material, template);
+        let pick = restricted.select(material, neighbours)?;
+        let cat = category_for_material(material);
+        Some(CellTile {
+            base: Some(format!("{cat}/{}#{}", pick.template, pick.icon)),
+            layers: Vec::new(),
+        })
+    }
+
     /// Per-cell pick aware of the neighbouring land mask.
     ///
     /// `land_mask` uses the editor's bit order (N=1, E=2, S=4, W=8); a bit is
