@@ -1,0 +1,174 @@
+"""CLI: generate a procedural map from original DOS assets and screenshot it.
+
+    python -m tiletools --game td --theater temperate --seed 42 --size 48
+
+Decodes the DOS `.TEM` icon sets straight from the Steam install's
+`CNCDATA/<GAME>/CD1/<THEATER>.MIX`, parses the compiled template table from
+`original/<GAME>/CDATA.CPP`, measures every icon's edge material profile,
+builds a material field, picks `(template, icon)` per cell, composites a
+screenshot PNG, and prints the seam metric. `--compare` adds a naive-vs-
+matched sheet for visual debugging.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+from PIL import Image
+
+from .cdata import td_templates, ra_templates
+from .dos import DosTheater
+from .join import (
+    LAND_TYPE_MATERIAL,
+    Material,
+    build_table_from_icons,
+    measure_icon_classes,
+)
+from .matcher import Strategy, assign
+from .meg import steam_install_root
+from .render import Renderer, comparison_sheet, save, to_preview
+from .seam import dumps as seam_dumps, seam_score
+from .terrain import apply_shore, generate_field, label_pools
+
+THEATERS = {
+    "td": ("temperate", "winter", "desert"),
+    "ra": ("temperate", "snow", "interior"),
+}
+
+
+def build_dos_join_table(theater: DosTheater, templates):
+    """Measure every shipped DOS icon once; materials from the CDATA table."""
+    measured = {}
+    materials = {}
+    runs = {}
+    classes = theater.index_classes()
+    for template, cls_frames in classes.items():
+        definition = templates.get(template)
+        if definition is None:
+            continue
+        for icon in range(cls_frames.shape[0]):
+            key = (template, icon)
+            try:
+                edges, icon_runs = measure_icon_classes(cls_frames[icon])
+            except ValueError:
+                continue
+            measured[key] = edges
+            runs[key] = icon_runs
+            land = definition.icon_land(icon)
+            material = LAND_TYPE_MATERIAL.get(land, Material.LAND)
+            # Pond templates (SH32-35: CLEAR land with WATER alt icons) draw
+            # water bounded by grass — pond-shore pieces, not open water.
+            if (
+                material is Material.WATER
+                and definition.land == "CLEAR"
+                and definition.alt_land == "WATER"
+            ):
+                material = Material.SHORE
+            materials[key] = material
+    return build_table_from_icons(measured, materials, runs), measured
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--game", choices=["td", "ra"], default="td")
+    parser.add_argument("--theater", default=None, help="default: game's first theater")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--size", type=int, default=48)
+    parser.add_argument("--sea", type=float, default=0.35)
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="default: <repo>/RUST/target/scratch-tiletools",
+    )
+    parser.add_argument("--install-root", type=Path, default=None)
+    parser.add_argument("--compare", action="store_true", help="naive vs matched sheet")
+    parser.add_argument("--scale", type=float, default=4.0, help="screenshot scale (DOS pixels)")
+    parser.add_argument("--gamma", type=float, default=2.2, help="palette gamma (1 = DOS look)")
+    parser.add_argument("--full", action="store_true", help="use every joinable family, not just the v1 vocabulary")
+    args = parser.parse_args(argv)
+    out = args.out
+    if out is None:
+        out = Path(__file__).resolve().parents[2] / "RUST" / "target" / "scratch-tiletools"
+
+    theater_name = args.theater or THEATERS[args.game][0]
+    root = args.install_root or steam_install_root()
+    if root is None:
+        print("C&C Remastered Steam install not found", file=sys.stderr)
+        return 2
+    print(f"install: {root}")
+
+    templates = td_templates() if args.game == "td" else ra_templates()
+    theater = DosTheater.open(root, args.game, theater_name, gamma=args.gamma)
+    print(f"theater: {theater.theater}, {len(theater.frames)} icon sets, "
+          f"palette {theater.palette.shape}")
+
+    started = time.time()
+    table, measured = build_dos_join_table(theater, templates)
+    print(f"join table: {len(table)} candidates from {len(measured)} icons "
+          f"in {time.time() - started:.1f}s")
+
+    field = generate_field(args.seed, args.size, sea_level=args.sea)
+    apply_shore(field)
+    label_pools(field)
+    counts = {m.name: int((field.materials == m).sum()) for m in set(field.materials.flat)}
+    print(f"field: {counts}")
+
+    if args.full:
+        families = None
+    else:
+        # v1 vocabulary: CLEAR1 grass, W1/W2 water, water-based SH* shore.
+        # SH14/15/16 (rock shore) and SH32-35 (grass-side ponds) join the
+        # set with --full; roads, slopes, rivers stay extensions.
+        families = {
+            Material.LAND: ["CLEAR1"],
+            Material.WATER: ["W1"],
+            Material.SHORE: ["SH10", "SH11", "SH12", "SH13"],
+        }
+    picks = assign(
+        Strategy.MATCHED,
+        field,
+        table,
+        seed=args.seed,
+        families=families,
+        shore_mask_restrict=False,
+        pool_families=["SH32", "SH33", "SH34", "SH35"],
+    )
+    renderer = Renderer(theater)
+    screenshot = renderer.compose(picks, scale=args.scale)
+    # out resolved above
+    save(screenshot, out / "map.png")
+    save(to_preview(screenshot), out / "map_preview.png")
+    stats = seam_score(theater, picks, materials=field.materials,
+                       classes=theater.index_classes())
+    (out / "seams.json").write_text(seam_dumps(stats))
+    (out / "map_cells.json").write_text(json.dumps(
+        [[{"t": p.template, "i": p.icon} for p in row] for row in picks], indent=1
+    ))
+    print(f"seams: holes {stats.holes}/{stats.checked_edges}, "
+          f"transitions {stats.transitions} (coastline/arc), worst {stats.worst_edge:.2f}")
+
+    if args.compare:
+        naive = assign(Strategy.NAIVE, field, table, seed=args.seed, families=families,
+                       shore_mask_restrict=False)
+        naive_img = renderer.compose(naive)
+        matched_img = renderer.compose(picks)
+        sheet = comparison_sheet([
+            ("naive (no matching)", naive_img),
+            ("matched (edge-profile join)", matched_img),
+        ])
+        save(to_preview(sheet), out / "compare.png")
+        naive_stats = seam_score(theater, naive, materials=field.materials,
+                                 classes=theater.index_classes())
+        print(f"naive seams: {naive_stats.holes}/{naive_stats.checked_edges} holes "
+              f"({naive_stats.hole_fraction:.1%})")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
