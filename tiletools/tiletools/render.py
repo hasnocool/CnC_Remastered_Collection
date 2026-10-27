@@ -83,16 +83,21 @@ def label(img: Image.Image, text: str) -> Image.Image:
 
 
 def comparison_sheet(
-    panels: list[tuple[str, Image.Image]], columns: int = 2
+    panels: list[tuple[str, Image.Image]], columns: int = 2, gap: int = 24
 ) -> Image.Image:
     """Grid of labelled panels, normalized to the first panel's size."""
     first = panels[0][1]
     size = (first.width, first.height)
+    banner = 34
     rows = (len(panels) + columns - 1) // columns
-    sheet = Image.new("RGBA", (size[0] * columns, (size[1] + 34) * rows), (12, 12, 12, 255))
+    sheet = Image.new(
+        "RGBA",
+        (size[0] * columns + gap * (columns - 1), (size[1] + banner) * rows + gap * (rows - 1)),
+        (60, 60, 80, 255),
+    )
     for i, (name, img) in enumerate(panels):
-        x = (i % columns) * size[0]
-        y = (i // columns) * (size[1] + 34)
+        x = (i % columns) * (size[0] + gap)
+        y = (i // columns) * (size[1] + banner + gap)
         sheet.paste(label(img.resize(size, Image.LANCZOS), name), (x, y))
     return sheet
 
