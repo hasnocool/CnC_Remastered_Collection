@@ -140,6 +140,22 @@ TD scenario files and learn the placement conventions empirically:
   shapes, not per-edge arcs.
 - `learned_shore_masks.json` carries the full tables for feeding the
   generator's placement rules.
+- Campaign CONQUER.MIX crack (2026-10-27): the repacked name hash is the
+  **zero-padded Westwood CRC** — the same rol1+add CRC over the uppercased
+  name padded to a 4-byte multiple. `MixArchive` now tries both variants
+  (`tiletools/tiletools/mix.py`); this also recovered 54 temperate TEMPERAT
+  tile sets the raw lookup missed (30 → 84 templates decoded, including the
+  whole `S01..S38` slope family). The remaining 78 unresolved names are
+  winter-only/unused per CDATA theater masks.
+- Corpus stats via the Rust decoder (`RUST/cnc-tiberian-dawn/examples/
+  {scan_maps,neighbour_stats}.rs`, 18 maps incl. repacked campaign maps,
+  27k cells): shore cells (≥2 land sides) are also **plain `W1`/`W2`** —
+  no arcs on water cells anywhere; arc/turn art lives only where land
+  adjoins water (`SH17/SH18` all-water 2×2 pieces drawn ON land cells,
+  keyed by which side the water is on; the tables live in
+  `RUST/target/scratch-tiletools/shipped_rules.json`). The generator
+  adopts this: `_place_land_shelf` extends the coast band onto deep-water
+  bordering land cells; ponds keep the SH32-35 pockets.
 
 ## Architecture
 

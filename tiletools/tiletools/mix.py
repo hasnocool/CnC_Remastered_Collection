@@ -64,6 +64,15 @@ class MixArchive:
         self.payload_start = payload_start
         self.payload_size = payload_size
 
+    @staticmethod
+    def _crc_name(name: str) -> int:
+        """Name CRC: the folded-remainder variant the DOS tools hash, then the
+        zero-padded variant the remaster's repacked mixes use for most tile
+        entries."""
+        raw = name.upper().encode("ascii")
+        padded = raw + b"\x00" * ((-len(raw)) % 4)
+        return westwood_crc(padded)
+
     def register(self, name: str) -> None:
         """Bind a plaintext filename to its CRC entry (lookup by name)."""
         crc = westwood_crc(name.upper().encode("ascii"))
@@ -76,6 +85,8 @@ class MixArchive:
         entry = self.entries.get(name)
         if entry is None:
             entry = self._by_crc.get(westwood_crc(name.upper().encode("ascii")))
+        if entry is None:
+            entry = self._by_crc.get(self._crc_name(name))
         if entry is None:
             raise KeyError(name)
         raw = self.data[

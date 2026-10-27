@@ -376,7 +376,75 @@ def place_coast_patches(
                     fixed[(x, y)] = (template, icon)
     place_turn_pieces(field, rng, fixed)
     place_water_patches(field, rng, fixed)
+    _place_land_shelf(field, seed, fixed)
     return fixed
+
+
+# Shipped maps draw the coast 2 cells deep: land cells with water on one
+# cardinal side carry more water art (SH17/SH18), keyed by which side the
+# water is on (learned side tables).
+SHELF_BY_WATER_SIDE: dict[int, list[tuple[str, int]]] = {
+    0x01: [("SH18", 2), ("SH18", 3), ("SH17", 3)],   # water N
+    0x02: [("SH18", 2), ("SH18", 0)],                # water E
+    0x04: [("SH18", 0), ("SH18", 1), ("SH14", 0)],   # water S
+    0x08: [("SH18", 3), ("SH18", 1), ("SH17", 3)],   # water W
+}
+
+
+def _place_land_shelf(
+    field: TerrainField,
+    seed: int,
+    fixed: dict[tuple[int, int], tuple[str, int]],
+) -> None:
+    """Extend the water band onto bordering land cells (shipped convention).
+
+    SH18 is a 2x2 all-water patch, so drawing it on a land cell matches
+    every edge (all four sides water in the index classes) — the seam
+    checker reads the art, not the field label.
+    """
+    size = field.size
+    rng = np.random.default_rng(seed ^ 0x517F)
+    for y in range(size):
+        for x in range(size):
+            if fixed.get((x, y)) is not None:
+                continue
+            if field.materials[y, x] is not Material.LAND:
+                continue
+            water_mask = 0
+            for bit, (dx, dy) in zip(
+                (0x01, 0x02, 0x04, 0x08), ((0, -1), (1, 0), (0, 1), (-1, 0))
+            ):
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < size and 0 <= ny < size:
+                    m = field.materials[ny, nx]
+                    if m in (Material.WATER, Material.SHORE):
+                        water_mask |= bit
+            # Only straight coasts (exactly one water side) of OCEAN water
+            # — ponds keep their pocket pieces.
+            if water_mask not in (0x01, 0x02, 0x04, 0x08):
+                continue
+            bit_for_side = {0x01: (0, -1), 0x02: (1, 0), 0x04: (0, 1), 0x08: (-1, 0)}
+            wx, wy = x + bit_for_side[water_mask][0], y + bit_for_side[water_mask][1]
+            if field.pool[wy, wx]:
+                continue
+            # Deep water only: the art band needs a water tile to sit on BEYOND
+            # the immediate shore row (thick lakes/ocean). A 1-cell sliver
+            # gets no shelf or it floods.
+            deep = True
+            for step in (2,):
+                dx, dy = bit_for_side[water_mask]
+                tx, ty = x + step * dx, y + step * dy
+                if not (0 <= tx < size and 0 <= ty < size):
+                    continue  # past the map edge — still counts
+                m = field.materials[ty, tx]
+                if m not in (Material.WATER, Material.SHORE):
+                    deep = False
+                    break
+            if not deep:
+                continue
+            options = SHELF_BY_WATER_SIDE[water_mask]
+            template, icon = options[int(rng.integers(len(options)))]
+            fixed[(x, y)] = (template, icon)
 
 
 def mask_fitness(table: JoinTable) -> dict[int, float]:
@@ -570,22 +638,13 @@ def scanline_assign(
             allowed = allowed_for(material, x, y)
             candidates = table.bases(material)
             if (
-                allowed is not None
-                and material is Material.SHORE
+                material is Material.SHORE
             ):
-                # Coast cells are water-based: their correct art is the arc
-                # pieces of the coast templates, which CDATA types WATER
-                # (sand on the land-facing edge, water elsewhere). The
-                # SHORE bucket holds full-sand island pieces, which render
-                # as square sand blocks here.
-                want = {normalize_template(t).upper() for t in allowed}
-                candidates = [
-                    c
-                    for c in table.bases(Material.WATER)
-                    if normalize_template(c.template).upper() in want
-                ]
-                if not candidates:
-                    candidates = table.bases(Material.SHORE)
+                # Shipped-map convention (learned from 18 campaign maps):
+                # straight coast water cells = plain W1 water with W2 ripple
+                # variety (~30%); arcs/ponds live only on the special
+                # geometry handled by the patch and turn layers.
+                candidates = table.bases(Material.WATER)
             elif (
                 allowed is not None
                 and field.pool is not None
