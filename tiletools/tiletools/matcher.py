@@ -28,7 +28,7 @@ from .join import (
     edge_demand,
     normalize_template,
 )
-from .terrain import TerrainField, apply_shore, label_pools
+from .terrain import TerrainField, apply_shore, fill_specks, label_pools
 
 
 class Strategy(Enum):
@@ -109,6 +109,34 @@ WATER_PATCHES = (
     Patch("SH17", 2, 2, "water"),
     Patch("SH18", 2, 2, "water"),
 )
+
+
+def place_turn_pieces(
+    field: TerrainField,
+    rng: np.random.Generator,
+    fixed: dict[tuple[int, int], tuple[str, int]],
+) -> None:
+    """Coast turns get the pocket/arc piece their land mask demands.
+
+    A turn cell (land on two adjacent sides) is the inside corner of a
+    coast bend: the DOS set ships a pocket piece per two-side geometry —
+    SH32:0 (land E+S), SH33:2 (land W+S), SH35:6 (land N+E), SH34:2
+    (land N+W, the pure diagonal arc).
+    """
+    size = field.size
+    turn_piece = {
+        0b0110: ("SH32", 0),  # land E+S
+        0b1100: ("SH33", 2),  # land W+S
+        0b0011: ("SH35", 6),  # land N+E
+        0b1001: ("SH34", 2),  # land N+W
+    }
+    for y in range(size):
+        for x in range(size):
+            if field.materials[y, x] is not Material.SHORE or (x, y) in fixed:
+                continue
+            piece = turn_piece.get(land_mask(field, x, y))
+            if piece is not None:
+                fixed[(x, y)] = piece
 
 
 def place_water_patches(
@@ -346,6 +374,7 @@ def place_coast_patches(
                 x, y = px + cx, py + cy
                 if 0 <= x < size and 0 <= y < size:
                     fixed[(x, y)] = (template, icon)
+    place_turn_pieces(field, rng, fixed)
     place_water_patches(field, rng, fixed)
     return fixed
 
@@ -388,45 +417,59 @@ def repair_field(
 ) -> int:
     """Reshape coast geometry the shipped art cannot join.
 
-    A coast cell whose land mask has no fitting tile (fitness > threshold)
-    is flipped to the majority of its neighbours — 1-cell inlets become
-    land, spurious peninsulas become water — and the shore/pool labelling
-    reruns. Returns the number of repaired cells.
+    Wet specks fully enclosed by land and elongated gully slivers render as
+    detached sand wedges; close both and rerun the shore/pool labelling.
     """
-    fitness = mask_fitness(table)
-    repaired = 0
-    for _ in range(max_passes):
-        changed = 0
-        size = field.size
-        for y in range(size):
-            for x in range(size):
-                if field.materials[y, x] is not Material.SHORE:
-                    continue
-                land_count = sum(
-                    1
-                    for mat, side in field.neighbours(x, y)
-                    if side in ("N", "E", "S", "W") and mat is Material.LAND
-                )
-                # A water cell nearly enclosed by land has no fitting piece
-                # in the DOS set (the pond pockets cover two-side inlets
-                # only); it renders as a detached sand square. Close it.
-                if land_count >= 3:
+    return fill_specks(field) + close_sliver_regions(field)
+
+
+def close_sliver_regions(field: TerrainField, max_area: int = 7, min_fill: float = 0.6) -> int:
+    """Close elongated thin wet regions (width-1 gullies).
+
+    Compact ponds (bbox fill >= ``min_fill``) keep their pocket art; gully
+    chains render as square wedges because the DOS set ships no diagonal
+    channel pieces (rivers RV* are the future extension), so slivers close.
+    """
+    size = field.size
+    closed = 0
+    seen: set[tuple[int, int]] = set()
+    for sy in range(size):
+        for sx in range(size):
+            mat = field.materials[sy, sx]
+            if mat not in (Material.WATER, Material.SHORE) or (sx, sy) in seen:
+                continue
+            region = []
+            stack = [(sx, sy)]
+            seen.add((sx, sy))
+            touches_border = False
+            while stack:
+                x, y = stack.pop()
+                region.append((x, y))
+                if x in (0, size - 1) or y in (0, size - 1):
+                    touches_border = True
+                for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0)):
+                    nx, ny = x + dx, y + dy
+                    if (
+                        0 <= nx < size
+                        and 0 <= ny < size
+                        and field.materials[ny, nx] in (Material.WATER, Material.SHORE)
+                        and (nx, ny) not in seen
+                    ):
+                        seen.add((nx, ny))
+                        stack.append((nx, ny))
+            if len(region) > max_area:
+                continue  # big water (lakes, ocean) is never closed
+            xs = [p[0] for p in region]
+            ys = [p[1] for p in region]
+            fill = len(region) / max(1, (max(xs) - min(xs) + 1) * (max(ys) - min(ys) + 1))
+            if fill < min_fill:
+                for x, y in region:
                     field.materials[y, x] = Material.LAND
-                    changed += 1
-                    continue
-                mask = land_mask(field, x, y)
-                if fitness.get(mask, 0.0) <= threshold:
-                    continue
-                field.materials[y, x] = (
-                    Material.LAND if land_count >= 2 else Material.WATER
-                )
-                changed += 1
-        repaired += changed
-        if not changed:
-            break
+                closed += len(region)
+    if closed:
         apply_shore(field)
         label_pools(field)
-    return repaired
+    return closed
 
 
 def _profile_mismatch(a: np.ndarray | None, b: np.ndarray | None) -> float:

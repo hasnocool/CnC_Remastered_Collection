@@ -163,6 +163,63 @@ def label_pools(field: TerrainField, max_pool: int = 4) -> None:
                     field.pool[y, x] = True
 
 
+def fill_specks(field: TerrainField, passes: int = 3) -> int:
+    """Close 1-cell wet specks fully enclosed by solid land.
+
+    Scattered micro-inlets render as detached sand wedges (the DOS set has
+    no piece that reads as an isolated wet pixel inside grass); close them
+    and rerun the shore labelling.
+    """
+    closed = 0
+    for _ in range(passes):
+        wet = np.isin(field.materials, [Material.WATER, Material.SHORE])
+        solid_cardinals = _any_cardinal_count(~wet)
+        specks = wet & (solid_cardinals == 4)
+        if not specks.any():
+            break
+        field.materials[specks] = Material.LAND
+        closed += int(specks.sum())
+    if closed:
+        apply_shore(field)
+        label_pools(field)
+    return closed
+
+
+def _any_cardinal_count(mask: np.ndarray) -> np.ndarray:
+    out = np.zeros(mask.shape, dtype=int)
+    padded = np.pad(mask, 1, constant_values=True)
+    for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0)):
+        out += padded[1 + dy : 1 + dy + mask.shape[0], 1 + dx : 1 + dx + mask.shape[1]]
+    return out
+
+
+def sawtooth_sea_south(field: TerrainField) -> None:
+    """Convert straight E-W coasts with the sea to the south into diagonal
+    staircases.
+
+    The DOS coast art has no sea-south straight pieces (all shelf arcs face
+    north/west/east); the authentic DOS style draws such coasts as diagonal
+    steps. Push the boundary down one cell on even columns.
+    """
+    size = field.size
+    for y in range(1, size - 2):
+        for x in range(0, size, 2):
+            here = field.materials[y, x]
+            north = field.materials[y - 1, x]
+            south = field.materials[y + 1, x]
+            south2 = field.materials[y + 2, x]
+            if (
+                here is Material.SHORE
+                and north is Material.LAND
+                and south is Material.WATER
+                and south2 is Material.WATER
+            ):
+                # The land extends down; the coast cell moves one row south.
+                field.materials[y, x] = Material.LAND
+    apply_shore(field)
+    label_pools(field)
+
+
 def smooth(field: TerrainField, passes: int = 2) -> None:
     """Majority-filter the land/water mask so coasts run straight.
 

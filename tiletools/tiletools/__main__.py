@@ -33,7 +33,13 @@ from .matcher import Strategy, assign
 from .meg import steam_install_root
 from .render import Renderer, comparison_sheet, save, to_preview
 from .seam import dumps as seam_dumps, seam_score
-from .terrain import apply_shore, generate_field, label_pools, smooth
+from .terrain import (
+    apply_shore,
+    generate_field,
+    label_pools,
+    smooth,
+    sawtooth_sea_south,
+)
 
 THEATERS = {
     "td": ("temperate", "winter", "desert"),
@@ -97,7 +103,8 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         nargs=4,
         metavar=("X0", "Y0", "X1", "Y1"),
-        help="also render the cell-rect crop at high zoom for seam inspection",
+        action="append",
+        help="also render the cell-rect crop at high zoom for seam inspection (repeatable)",
     )
     parser.add_argument("--zoom-scale", type=float, default=8.0, help="crop zoom (DOS-pixel scale)")
     args = parser.parse_args(argv)
@@ -126,6 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     apply_shore(field)
     label_pools(field)
     smooth(field, passes=args.smooth)
+    sawtooth_sea_south(field)
     counts = {m.name: int((field.materials == m).sum()) for m in set(field.materials.flat)}
     print(f"field: {counts}")
 
@@ -164,13 +172,15 @@ def main(argv: list[str] | None = None) -> int:
     print(f"seams: holes {stats.holes}/{stats.checked_edges}, "
           f"transitions {stats.transitions} (coastline/arc), worst {stats.worst_edge:.2f}")
 
-    if args.zoom_crop:
-        x0, y0, x1, y1 = args.zoom_crop
+    for crop in args.zoom_crop or []:
+        x0, y0, x1, y1 = crop
         size_c = picks.shape[0]
         x0, y0 = max(0, x0), max(0, y0)
         x1, y1 = min(size_c, x1), min(size_c, y1)
-        crop = picks[y0:y1, x0:x1]
-        zoom = renderer.compose(crop, scale=args.zoom_scale)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        sub = picks[y0:y1, x0:x1]
+        zoom = renderer.compose(sub, scale=args.zoom_scale)
         save(zoom, out / f"zoom_{x0}_{y0}_{x1}_{y1}.png")
         print(f"zoom: {x1-x0}x{y1-y0} cells at {args.zoom_scale}x -> "
               f"zoom_{x0}_{y0}_{x1}_{y1}.png ({zoom.width}x{zoom.height})")

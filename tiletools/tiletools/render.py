@@ -44,12 +44,12 @@ class Renderer:
         return self._cell or 24
 
     def compose(self, picks: np.ndarray, scale: float = 1.0) -> Image.Image:
-        size = picks.shape[0]
+        height, width = picks.shape[:2]
         cell = self.cell()
-        canvas = Image.new("RGBA", (size * cell, size * cell))
+        canvas = Image.new("RGBA", (width * cell, height * cell))
         base = self.base_tile()
-        for y in range(size):
-            for x in range(size):
+        for y in range(height):
+            for x in range(width):
                 tile = _to_pil(self.art.icon_rgba(picks[y, x].template, picks[y, x].icon))
                 px = x * cell
                 py = y * cell
