@@ -376,75 +376,7 @@ def place_coast_patches(
                     fixed[(x, y)] = (template, icon)
     place_turn_pieces(field, rng, fixed)
     place_water_patches(field, rng, fixed)
-    _place_land_shelf(field, seed, fixed)
     return fixed
-
-
-# Shipped maps draw the coast 2 cells deep: land cells with water on one
-# cardinal side carry more water art (SH17/SH18), keyed by which side the
-# water is on (learned side tables).
-SHELF_BY_WATER_SIDE: dict[int, list[tuple[str, int]]] = {
-    0x01: [("SH18", 2), ("SH18", 3), ("SH17", 3)],   # water N
-    0x02: [("SH18", 2), ("SH18", 0)],                # water E
-    0x04: [("SH18", 0), ("SH18", 1), ("SH14", 0)],   # water S
-    0x08: [("SH18", 3), ("SH18", 1), ("SH17", 3)],   # water W
-}
-
-
-def _place_land_shelf(
-    field: TerrainField,
-    seed: int,
-    fixed: dict[tuple[int, int], tuple[str, int]],
-) -> None:
-    """Extend the water band onto bordering land cells (shipped convention).
-
-    SH18 is a 2x2 all-water patch, so drawing it on a land cell matches
-    every edge (all four sides water in the index classes) — the seam
-    checker reads the art, not the field label.
-    """
-    size = field.size
-    rng = np.random.default_rng(seed ^ 0x517F)
-    for y in range(size):
-        for x in range(size):
-            if fixed.get((x, y)) is not None:
-                continue
-            if field.materials[y, x] is not Material.LAND:
-                continue
-            water_mask = 0
-            for bit, (dx, dy) in zip(
-                (0x01, 0x02, 0x04, 0x08), ((0, -1), (1, 0), (0, 1), (-1, 0))
-            ):
-                nx, ny = x + dx, y + dy
-                if 0 <= nx < size and 0 <= ny < size:
-                    m = field.materials[ny, nx]
-                    if m in (Material.WATER, Material.SHORE):
-                        water_mask |= bit
-            # Only straight coasts (exactly one water side) of OCEAN water
-            # — ponds keep their pocket pieces.
-            if water_mask not in (0x01, 0x02, 0x04, 0x08):
-                continue
-            bit_for_side = {0x01: (0, -1), 0x02: (1, 0), 0x04: (0, 1), 0x08: (-1, 0)}
-            wx, wy = x + bit_for_side[water_mask][0], y + bit_for_side[water_mask][1]
-            if field.pool[wy, wx]:
-                continue
-            # Deep water only: the art band needs a water tile to sit on BEYOND
-            # the immediate shore row (thick lakes/ocean). A 1-cell sliver
-            # gets no shelf or it floods.
-            deep = True
-            for step in (2,):
-                dx, dy = bit_for_side[water_mask]
-                tx, ty = x + step * dx, y + step * dy
-                if not (0 <= tx < size and 0 <= ty < size):
-                    continue  # past the map edge — still counts
-                m = field.materials[ty, tx]
-                if m not in (Material.WATER, Material.SHORE):
-                    deep = False
-                    break
-            if not deep:
-                continue
-            options = SHELF_BY_WATER_SIDE[water_mask]
-            template, icon = options[int(rng.integers(len(options)))]
-            fixed[(x, y)] = (template, icon)
 
 
 def mask_fitness(table: JoinTable) -> dict[int, float]:
@@ -487,7 +419,54 @@ def repair_field(
 
     Wet specks fully enclosed by land and elongated gully slivers render as
     detached sand wedges; close both and rerun the shore/pool labelling.
+    Also close compact wet regions whose shore cells have a land mask no
+    shore-family piece can dress (they would fall back to plain W1 water
+    squares floating in grass).
     """
+    lut = {}
+    for cands in table.by_material.values():
+        for c in cands:
+            lut[(c.template, c.icon)] = c
+    shore_families = {"SH10", "SH12", "SH13", "SH34", "SH35", "SH32", "SH33"}
+    size = field.size
+    DIR = {"N": (0, -1), "E": (1, 0), "S": (0, 1), "W": (-1, 0)}
+    for _ in range(max_passes):
+        undressable = []
+        for y in range(size):
+            for x in range(size):
+                if field.materials[y, x] is not Material.SHORE:
+                    continue
+                # a shore cell must have arc art with water on its water
+                # sides; check any candidate in the shore families fits the
+                # field demands on all four cardinals
+                fits = False
+                for t in shore_families:
+                    for cand in lut.values():
+                        if cand.template.upper() != t:
+                            continue
+                        ok = True
+                        for side, (dx, dy) in DIR.items():
+                            nx, ny = x + dx, y + dy
+                            if not (0 <= nx < size and 0 <= ny < size):
+                                continue
+                            nmat = field.materials[ny, nx]
+                            demand = edge_demand(field.materials[y, x], nmat)
+                            if getattr(cand.edges, side.lower()).disagreement(demand) > 0.45:
+                                ok = False
+                                break
+                        if ok:
+                            fits = True
+                            break
+                    if fits:
+                        break
+                if not fits:
+                    undressable.append((x, y))
+        if not undressable:
+            break
+        for x, y in undressable:
+            field.materials[y, x] = Material.LAND
+        apply_shore(field)
+        label_pools(field)
     return fill_specks(field) + close_sliver_regions(field)
 
 
@@ -640,11 +619,39 @@ def scanline_assign(
             if (
                 material is Material.SHORE
             ):
-                # Shipped-map convention (learned from 18 campaign maps):
-                # straight coast water cells = plain W1 water with W2 ripple
-                # variety (~30%); arcs/ponds live only on the special
-                # geometry handled by the patch and turn layers.
+                # 1-cell ponds (land on all four sides) were closed in
+                # repair_field; anything still standing here gets the
+                # shipped-map convention (learned from 18 campaign maps):
+                # straight coast water cells = plain W1 water with W2
+                # ripple variety (~30%); arcs/ponds live only on the
+                # special geometry handled by the patch and turn layers.
+                # Keep the family restriction (pool cells stay with
+                # their pockets).
                 candidates = table.bases(Material.WATER)
+                if allowed is not None:
+                    want = {normalize_template(t).upper() for t in allowed}
+                    filtered = [
+                        c
+                        for c in candidates
+                        if normalize_template(c.template).upper() in want
+                    ]
+                    if not filtered:
+                        # A shore cell ringed by land on all four sides is a
+                        # 1-cell pond: no arc art fits, close it to grass.
+                        if land_mask(field, x, y) == 0b1111:
+                            field.materials[y, x] = Material.LAND
+                            apply_shore(field)
+                            label_pools(field)
+                            placed[y, x] = CellPick("CLEAR1", 0)
+                            continue
+                        # otherwise: plain water is the safest fallback
+                        want = {"W1", "W2"}
+                        filtered = [
+                            c
+                            for c in candidates
+                            if normalize_template(c.template).upper() in want
+                        ]
+                    candidates = filtered
             elif (
                 allowed is not None
                 and field.pool is not None
@@ -665,13 +672,25 @@ def scanline_assign(
             if not candidates:
                 raise ValueError(f"no candidates for {material}")
 
-            north_run = placed[y - 1, x].runs.get("S") if y > 0 else None
-            west_run = placed[y, x - 1].runs.get("E") if x > 0 else None
+            def cand_at(yy, xx):
+                if not (0 <= yy < size and 0 <= xx < size) or placed[yy, xx] is None:
+                    return None
+                p = placed[yy, xx]
+                if not hasattr(p, "runs"):
+                    p = lookup.get((p.template, p.icon))
+                return p
+
+            north_run = (
+                cand_at(y - 1, x).runs.get("S") if cand_at(y - 1, x) is not None else None
+            )
+            west_run = (
+                cand_at(y, x - 1).runs.get("E") if cand_at(y, x - 1) is not None else None
+            )
             north_candidate_profile = (
-                placed[y - 1, x].profiles if y > 0 and placed[y - 1, x] is not None else {}
+                cand_at(y - 1, x).profiles if cand_at(y - 1, x) is not None else {}
             )
             west_candidate_profile = (
-                placed[y, x - 1].profiles if x > 0 and placed[y, x - 1] is not None else {}
+                cand_at(y, x - 1).profiles if cand_at(y, x - 1) is not None else {}
             )
 
             neighbours8 = field.neighbours(x, y)
@@ -712,6 +731,106 @@ def scanline_assign(
             chosen = pool[int(rng.integers(len(pool)))] if len(pool) > 1 else scored[0]
             placed[y, x] = chosen
     return placed
+
+
+def repair_contours(
+    field: TerrainField,
+    table: JoinTable,
+    placed: np.ndarray,
+    rng: np.random.Generator | None = None,
+    passes: int = 3,
+) -> np.ndarray:
+    """Re-pick curve-carrying cells whose arc phase disagrees with a placed
+    neighbour.
+
+    The scanline only scores the exact runs of the placed N/W neighbours;
+    a later-placed patch (pond pocket, shelf band) can still face an
+    already-picked cell's mixed edge with a different curve phase. This
+    pass scores every candidate against ALL placed neighbours' exact runs
+    and re-picks any cell on a mismatched mixed-vs-mixed seam. Patch
+    anchors (cells whose material demand a full arc — SH14+rock etc.) are
+    re-picked too: candidates keep the same material, so the field stays
+    consistent.
+    """
+    lut = {}
+    for cands in table.by_material.values():
+        for c in cands:
+            lut[(c.template, c.icon)] = c
+    size = field.size
+    OPP = {"N": "S", "E": "W", "S": "N", "W": "E"}
+    DIR = {"N": (0, -1), "E": (1, 0), "S": (0, 1), "W": (-1, 0)}
+
+    def mixed(run):
+        if run is None:
+            return False
+        f = float((run == 1).mean())
+        return 0.02 < f < 0.98
+
+    for _ in range(passes):
+        changed = 0
+        for y in range(size):
+            for x in range(size):
+                if placed[y, x] is None:
+                    continue
+                pc = placed[y, x]
+                if not hasattr(pc, "runs"):
+                    here = lut.get((pc.template, pc.icon))
+                else:
+                    here = pc
+                if here is None:
+                    continue
+                bad_sides = []
+                nb_runs = {}
+                for side, (dx, dy) in DIR.items():
+                    nx, ny = x + dx, y + dy
+                    if not (0 <= nx < size and 0 <= ny < size):
+                        continue
+                    if placed[ny, nx] is None:
+                        continue
+                    oc = placed[ny, nx]
+                    other = oc if hasattr(oc, "runs") else lut.get((oc.template, oc.icon))
+                    if other is None:
+                        continue
+                    r_here, r_there = here.runs.get(side), other.runs.get(OPP[side])
+                    if not (mixed(r_here) and mixed(r_there)):
+                        continue
+                    nb_runs[side] = r_there
+                    if (r_here != r_there).any():
+                        bad_sides.append(side)
+                if not bad_sides:
+                    continue
+                material = field.materials[y, x]
+                candidates = table.bases(material)
+                if not candidates:
+                    continue
+                def cost(c):
+                    total = 0.0
+                    for side, r_there in nb_runs.items():
+                        r_cand = c.runs.get(side)
+                        if r_cand is None:
+                            total += 0.5
+                            continue
+                        total += float((r_cand != r_there).mean())
+                    # keep the material demands of the free sides
+                    for m2, s2 in field_neighbours(field, x, y):
+                        if s2 in nb_runs or m2 is None or s2 not in ("N", "E", "S", "W"):
+                            continue
+                        total += getattr(c.edges, s2.lower()).disagreement(
+                            edge_demand(material, m2)
+                        )
+                    return total
+                current_cost = cost(here)
+                scored = sorted(candidates, key=lambda c: (cost(c), -c.solidity, c.template, c.icon))
+                if cost(scored[0]) + 1e-9 < current_cost:
+                    placed[y, x] = CellPick(scored[0].template, scored[0].icon)
+                    changed += 1
+        if changed == 0:
+            break
+    return placed
+
+
+def field_neighbours(field: TerrainField, x: int, y: int):
+    return field.neighbours(x, y)
 
 
 def pick(
@@ -768,7 +887,7 @@ def assign(
     icon_classes: dict[str, np.ndarray] | None = None,
 ) -> np.ndarray:
     if strategy is Strategy.MATCHED:
-        return scanline_assign(
+        placed = scanline_assign(
             field,
             table,
             seed=seed,
@@ -777,6 +896,7 @@ def assign(
             pool_families=pool_families,
             icon_classes=icon_classes,
         )
+        return repair_contours(field, table, placed, rng=np.random.default_rng(seed ^ 0xC0DE))
     size = field.size
     rng = np.random.default_rng(seed ^ 0x5EED)
     picks = np.empty((size, size), dtype=object)
