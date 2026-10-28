@@ -157,6 +157,46 @@ TD scenario files and learn the placement conventions empirically:
   adopts this: `_place_land_shelf` extends the coast band onto deep-water
   bordering land cells; ponds keep the SH32-35 pockets.
 
+## Tileset fit map (2026-10-28, atlas)
+
+`python3 -m tiletools --atlas` renders every decoded template/icon with a
+per-icon NESW fit legend (w = water edge, l = opaque, m = mixed arc, .
+= transparent) to `RUST/target/scratch-tiletools/tileset_atlas.png`
+(84 templates / 463 icons). Read it to see how the vocabulary joins:
+
+- `W1`/`W2`: all-water; every edge water. Universal fill.
+- `CLEAR1`: all-grass; every edge opaque. Universal fill.
+- `SH1`, `SH12`, `SH13`: whole-3x3 diagonal beach chunks sweeping
+  all-sand -> all-water; use as 3x3 islands, not per-edge.
+- `SH34`/`SH35`: the only N-S coast bands (land W / land E resp.);
+  chain along straight strips.
+- `SH10`/`SH11`: diagonal mixed singles; use at coast turns/ends.
+- `SH32`-`SH35` pool pieces: grass-side pockets for small ponds
+  (sized by WATER cells only, <= 4).
+- `SH17`/`SH18`: all-water 2x2 pieces drawn ON land cells where water
+  lies exactly one side away with deep water beyond (shipped-map
+  convention).
+- `S01`-`S38` slopes, `RV01`-`RV10` rivers, `D01`-`D17` roads, `FORD1/2`,
+  `FALLS`: decoded + measured; placement = future work.
+
+## Contour continuity pass (2026-10-28)
+
+Class scheme now 0=transparent, 1=water, 2=grass/rock, 3=sand (warm
+palette entries). Contour defects seen and fixed:
+
+1. Stale shore rings: closing wet specks/slivers to LAND left their
+   SHORE ring behind -> meandering grey sand chains across solid grass.
+   `relabel_stale_shore` reverts SHORE cells with no WATER in their
+   8-neighbourhood to LAND.
+2. Pools sized by water+shore cells: a 3-water pond weighed 11 and used
+   the ocean band instead of SH32-35 pocket art. `label_pools` now
+   counts WATER cells only.
+3. `_place_land_shelf` painted SH17/SH18 bands that rendered as square
+   water patches scattered over grass - removed; the scanline dresses
+   coasts instead.
+4. Seam comparison normalizes sand(3) -> opaque: sand-to-grass = the
+   intended beach look; only water-vs-land materiality = defect.
+
 ## Architecture
 
 ```

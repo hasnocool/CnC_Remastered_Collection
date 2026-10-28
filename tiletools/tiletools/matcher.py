@@ -128,6 +128,12 @@ def place_turn_pieces(
     coast bend: the DOS set ships a pocket piece per two-side geometry —
     SH32:0 (land E+S), SH33:2 (land W+S), SH35:6 (land N+E), SH34:2
     (land N+W, the pure diagonal arc).
+
+    The SH32/SH33 pocket pieces are pond art (their outer edge reads as
+    grass). On sea coasts — a cell whose mask puts open WATER on the
+    diagonal-facing side, not a labelled pool — the pocket art renders as
+    a square notch in the sea; the mirrored water-side shelf piece is the
+    correct dress for those masks.
     """
     size = field.size
     turn_piece = {
@@ -136,11 +142,24 @@ def place_turn_pieces(
         0b0011: ("SH35", 6),  # land N+E
         0b1001: ("SH34", 2),  # land N+W
     }
+    # Sea-coast dressings: masks whose open side faces open water take the
+    # water-side shelf/arc piece instead of the pond pocket.
+    sea_turn_piece = {
+        0b0110: ("SH35", 3),  # land E+S, water at N/W -> water-side arc
+        0b1100: ("SH34", 5),  # land W+S, water at N/E -> water-side arc
+        0b0011: ("SH35", 6),  # land N+E (pure diagonal arc)
+        0b1001: ("SH34", 2),  # land N+W (pure diagonal arc)
+    }
     for y in range(size):
         for x in range(size):
             if field.materials[y, x] is not Material.SHORE or (x, y) in fixed:
                 continue
-            piece = turn_piece.get(land_mask(field, x, y))
+            mask = land_mask(field, x, y)
+            # Pools keep the pond pocket art; open sea gets the shelf arc.
+            if field.pool is not None and field.pool[y, x]:
+                piece = turn_piece.get(mask)
+            else:
+                piece = sea_turn_piece.get(mask)
             if piece is not None:
                 fixed[(x, y)] = piece
 
@@ -165,6 +184,130 @@ def place_water_patches(
             for cx, cy, icon in patch.cells():
                 fixed[(bx + cx, by + cy)] = (patch.template, icon)
 
+def place_diagonal_patches(
+    field: TerrainField,
+    classes: dict[str, np.ndarray],
+    rng: np.random.Generator,
+    fixed: dict[tuple[int, int], tuple[str, int]],
+) -> None:
+    """Place SH10 2x2 diagonal arc patches along diagonal coasts.
+
+    A diagonal coast has land on a diagonal (NE, SE, SW, NW) but NOT on the
+    two adjacent orthogonal sides. The SH10 patch is a 2x2 piece that smoothly
+    rounds the outside corner of a land mass.
+
+    Also handles diagonal coastlines created by sawtooth_sea_south: E-W coasts
+    with sea to the south are converted to diagonal staircases where land and
+    water meet diagonally. These need SH10 patches along the diagonal.
+    """
+    size = field.size
+
+    def validate_diag(template: str, patch: Patch, px: int, py: int) -> bool:
+        for cx, cy, icon in patch.cells():
+            x, y = px + cx, py + cy
+            if not (0 <= x < size and 0 <= y < size):
+                continue  # clipped off-map
+            if (x, y) in fixed:
+                return False
+            cls = classes[template][icon]
+            f_land, f_water = float((cls == 2).mean()), float((cls == 1).mean())
+            material = field.materials[y, x]
+            if f_land > 0.9:
+                if material is not Material.LAND:
+                    return False
+            elif f_water > 0.9:
+                if material not in (Material.WATER, Material.SHORE):
+                    return False
+            # Outer edges must agree with field
+            outer = []
+            if cy == 0:
+                outer.append("N")
+            if cy == patch.h - 1:
+                outer.append("S")
+            if cx == 0:
+                outer.append("W")
+            if cx == patch.w - 1:
+                outer.append("E")
+            for side in outer:
+                run = {
+                    "N": cls[0], "S": cls[-1], "W": cls[:, 0], "E": cls[:, -1],
+                }[side]
+                water, land = float((run == 1).mean()), float((run == 2).mean())
+                dx, dy = {"N": (0, -1), "E": (1, 0), "S": (0, 1), "W": (-1, 0)}[side]
+                nx, ny = x + dx, y + dy
+                if not (0 <= nx < size and 0 <= ny < size):
+                    continue
+                nmat = field.materials[ny, nx]
+                if water > 0.75 and nmat not in (Material.WATER, Material.SHORE):
+                    return False
+                if land > 0.75 and nmat is not Material.LAND:
+                    return False
+        return True
+
+    # Find diagonal coast cells - SHORE cells with land on exactly one diagonal
+    # but not on the two adjacent orthogonals (outside corners of land masses)
+    diag_patch = next(p for p in COAST_PATCHES if p.template == "SH10")
+
+    for y in range(size):
+        for x in range(size):
+            if field.materials[y, x] is not Material.SHORE:
+                continue
+            if (x, y) in fixed:
+                continue
+
+            # Check four diagonal directions for outside corners
+            # NE outside corner: land at NE, but NOT at N and NOT at E
+            land_n = y - 1 >= 0 and field.materials[y - 1, x] in (Material.LAND, Material.SHORE)
+            land_e = x + 1 < size and field.materials[y, x + 1] in (Material.LAND, Material.SHORE)
+            land_s = y + 1 < size and field.materials[y + 1, x] in (Material.LAND, Material.SHORE)
+            land_w = x - 1 >= 0 and field.materials[y, x - 1] in (Material.LAND, Material.SHORE)
+            land_ne = x + 1 < size and y - 1 >= 0 and field.materials[y - 1, x + 1] in (Material.LAND, Material.SHORE)
+            land_se = x + 1 < size and y + 1 < size and field.materials[y + 1, x + 1] in (Material.LAND, Material.SHORE)
+            land_sw = x - 1 >= 0 and y + 1 < size and field.materials[y + 1, x - 1] in (Material.LAND, Material.SHORE)
+            land_nw = x - 1 >= 0 and y - 1 >= 0 and field.materials[y - 1, x - 1] in (Material.LAND, Material.SHORE)
+
+            # Outside corner NE: land NE, water N and E -> place SH10 with its water corner at this cell
+            # SH10 icon 0: N=water/sand, E=sand, S=water, W=water -> water at NW corner of patch
+            # For NE outside corner, we want the patch's SW cell (water) at (x,y)
+            if land_ne and not land_n and not land_e:
+                # SH10 is 2x2, place so this cell is the SW corner of the patch
+                px, py = x, y - 1
+                if validate_diag("SH10", diag_patch, px, py):
+                    for cx, cy, icon in diag_patch.cells():
+                        fx, fy = px + cx, py + cy
+                        if 0 <= fx < size and 0 <= fy < size:
+                            fixed[(fx, fy)] = ("SH10", icon)
+                    continue
+
+            # Outside corner SE: land SE, water S and E -> this cell is NW corner of patch
+            if land_se and not land_s and not land_e:
+                px, py = x - 1, y - 1
+                if validate_diag("SH10", diag_patch, px, py):
+                    for cx, cy, icon in diag_patch.cells():
+                        fx, fy = px + cx, py + cy
+                        if 0 <= fx < size and 0 <= fy < size:
+                            fixed[(fx, fy)] = ("SH10", icon)
+                    continue
+
+            # Outside corner SW: land SW, water S and W -> this cell is NE corner of patch
+            if land_sw and not land_s and not land_w:
+                px, py = x - 1, y
+                if validate_diag("SH10", diag_patch, px, py):
+                    for cx, cy, icon in diag_patch.cells():
+                        fx, fy = px + cx, py + cy
+                        if 0 <= fx < size and 0 <= fy < size:
+                            fixed[(fx, fy)] = ("SH10", icon)
+                    continue
+
+            # Outside corner NW: land NW, water N and W -> this cell is SE corner of patch
+            if land_nw and not land_n and not land_w:
+                px, py = x, y
+                if validate_diag("SH10", diag_patch, px, py):
+                    for cx, cy, icon in diag_patch.cells():
+                        fx, fy = px + cx, py + cy
+                        if 0 <= fx < size and 0 <= fy < size:
+                            fixed[(fx, fy)] = ("SH10", icon)
+                    continue
 
 def find_coast_strips(field: TerrainField) -> list[tuple[str, str, int, int, int]]:
     """Straight coast strips: (orientation, land_side, fixed_coord, start, end).
@@ -382,6 +525,8 @@ def place_coast_patches(
                     fixed[(x, y)] = (template, icon)
     place_turn_pieces(field, rng, fixed)
     place_water_patches(field, rng, fixed)
+    # Place diagonal SH10 patches along diagonal coasts
+    place_diagonal_patches(field, classes, rng, fixed)
     return fixed
 
 
@@ -585,12 +730,15 @@ def scanline_assign(
     diagonal_weight: float = 0.5,
     pool_families: list[str] | None = None,
     icon_classes: dict[str, np.ndarray] | None = None,
-) -> np.ndarray:
+) -> tuple[np.ndarray, set[tuple[int, int]]]:
     """Greedy scanline placement with exact N/W run alignment.
 
     Whole coast patches (`place_coast_patches`) are placed first and act as
     fixed anchors; the per-cell matcher fills the rest around them with
     exact run alignment against every already-placed neighbour.
+
+    Returns (placed, fixed_cells) where fixed_cells is the set of coordinates
+    that were fixed by coast/diagonal patches and should not be re-picked.
     """
     size = field.size
     rng = np.random.default_rng(seed ^ 0x5EED)
@@ -600,12 +748,14 @@ def scanline_assign(
     for cands in table.by_material.values():
         for c in cands:
             lookup[(c.template, c.icon)] = c
-    repair_field(field, table)
     fixed = (
         place_coast_patches(field, icon_classes, seed=seed)
         if icon_classes is not None
         else {}
     )
+    # Place diagonal patches too
+    place_diagonal_patches(field, classes=icon_classes, rng=rng, fixed=fixed)
+    fixed_coords = set(fixed.keys())
     for (x, y), key in fixed.items():
         placed[y, x] = lookup.get(key)
 
@@ -671,7 +821,8 @@ def scanline_assign(
             ):
                 # Pond cells whose land is only diagonal (not SHORE by the
                 # 4-neighbour rule) still get the pond pocket pieces.
-                want = {normalize_template(t).upper() for t in pool_families or []}
+                # Use water templates (W1, W2, SH17, SH18) for water pools.
+                want = {"W1", "W2", "SH17", "SH18"}
                 candidates = [
                     c
                     for c in table.bases(Material.WATER)
@@ -741,7 +892,7 @@ def scanline_assign(
             pool = [c for c in scored if abs(cost(c) - best) < 1e-6]
             chosen = pool[int(rng.integers(len(pool)))] if len(pool) > 1 else scored[0]
             placed[y, x] = chosen
-    return placed
+    return placed, fixed_coords
 
 
 def repair_contours(
@@ -750,6 +901,7 @@ def repair_contours(
     placed: np.ndarray,
     rng: np.random.Generator | None = None,
     passes: int = 3,
+    fixed_coords: set[tuple[int, int]] | None = None,
 ) -> np.ndarray:
     """Re-pick curve-carrying cells whose arc phase disagrees with a placed
     neighbour.
@@ -759,10 +911,19 @@ def repair_contours(
     already-picked cell's mixed edge with a different curve phase. This
     pass scores every candidate against ALL placed neighbours' exact runs
     and re-picks any cell on a mismatched mixed-vs-mixed seam. Patch
-    anchors (cells whose material demand a full arc — SH14+rock etc.) are
+    anchors (cells whose material demand a full arc -- SH14+rock etc.) are
     re-picked too: candidates keep the same material, so the field stays
     consistent.
+
+    Also handles:
+    - mixed-vs-pure mismatches where a mixed arc edge faces a pure water/land
+      edge but the materials disagree (e.g. sand terminating water).
+    - diagonal neighbour seams: compares the two corner-adjacent edges
+      (e.g. for NE diagonal, compare N+E edges of this cell against S+W
+      edges of the NE neighbour) at the shared corner pixel.
     """
+    if fixed_coords is None:
+        fixed_coords = set()
     lut = {}
     for cands in table.by_material.values():
         for c in cands:
@@ -770,6 +931,13 @@ def repair_contours(
     size = field.size
     OPP = {"N": "S", "E": "W", "S": "N", "W": "E"}
     DIR = {"N": (0, -1), "E": (1, 0), "S": (0, 1), "W": (-1, 0)}
+    # Diagonal directions and their two adjacent orthogonal edges
+    DIAG_DIR = {
+        "NE": ((0, -1), (1, 0), ("N", "E"), ("S", "W")),
+        "SE": ((1, 0), (0, 1), ("E", "S"), ("W", "N")),
+        "SW": ((0, 1), (-1, 0), ("S", "W"), ("N", "E")),
+        "NW": ((-1, 0), (0, -1), ("W", "N"), ("E", "S")),
+    }
 
     def mixed(run):
         if run is None:
@@ -777,10 +945,21 @@ def repair_contours(
         f = float((run == 1).mean())
         return 0.02 < f < 0.98
 
+    def material_disagree(r_here, r_there) -> bool:
+        """True if runs disagree materially (water vs sand/land) even if one is pure."""
+        if r_here is None or r_there is None:
+            return False
+        # Normalize: class 3 (sand) -> 2 (opaque land) for material comparison
+        a = np.where(r_here == 3, 2, r_here)
+        b = np.where(r_there == 3, 2, r_there)
+        return bool((a != b).any())
+
     for _ in range(passes):
         changed = 0
         for y in range(size):
             for x in range(size):
+                if (x, y) in fixed_coords:
+                    continue  # Don't re-pick fixed patch cells
                 if placed[y, x] is None:
                     continue
                 pc = placed[y, x]
@@ -792,6 +971,7 @@ def repair_contours(
                     continue
                 bad_sides = []
                 nb_runs = {}
+                # Orthogonal neighbours
                 for side, (dx, dy) in DIR.items():
                     nx, ny = x + dx, y + dy
                     if not (0 <= nx < size and 0 <= ny < size):
@@ -803,17 +983,69 @@ def repair_contours(
                     if other is None:
                         continue
                     r_here, r_there = here.runs.get(side), other.runs.get(OPP[side])
-                    if not (mixed(r_here) and mixed(r_there)):
+                    if r_here is None or r_there is None:
                         continue
-                    nb_runs[side] = r_there
-                    if (r_here != r_there).any():
+                    # Material-opposed seams: water pixels facing sand/land
+                    # pixels. Covers mixed-vs-mixed phase breaks, mixed-vs-pure
+                    # (sand terminating water) AND pure-vs-pure (an all-land
+                    # edge meeting an all-water edge inside the SHORE band).
+                    if material_disagree(r_here, r_there):
                         bad_sides.append(side)
+                        nb_runs[side] = r_there
+                # Diagonal neighbours
+                for dname, (d1, d2, edges_here, edges_there) in DIAG_DIR.items():
+                    if dname == "NE":
+                        nx, ny = x + 1, y - 1
+                    elif dname == "SE":
+                        nx, ny = x + 1, y + 1
+                    elif dname == "SW":
+                        nx, ny = x - 1, y + 1
+                    else:  # NW
+                        nx, ny = x - 1, y - 1
+                    if not (0 <= nx < size and 0 <= ny < size):
+                        continue
+                    if placed[ny, nx] is None:
+                        continue
+                    oc = placed[ny, nx]
+                    other = oc if hasattr(oc, "runs") else lut.get((oc.template, oc.icon))
+                    if other is None:
+                        continue
+                    # Compare the two corner-adjacent edges at the shared corner pixel
+                    side1_here, side2_here = edges_here
+                    side1_there, side2_there = edges_there
+                    r1_here = here.runs.get(side1_here)
+                    r2_here = here.runs.get(side2_here)
+                    r1_there = other.runs.get(side1_there)
+                    r2_there = other.runs.get(side2_there)
+                    if r1_here is None or r2_here is None or r1_there is None or r2_there is None:
+                        continue
+                    # Check corner pixels (last of first edge, first of second edge, depending on orientation)
+                    # For N edge: pixels go left-to-right, corner at index -1 (rightmost)
+                    # For E edge: pixels go top-to-bottom, corner at index 0 (topmost)
+                    # For S edge: pixels go left-to-right, corner at index -1 (rightmost)
+                    # For W edge: pixels go top-to-bottom, corner at index 0 (topmost)
+                    corner_idx = {"N": -1, "E": 0, "S": -1, "W": 0}
+                    c1_here = r1_here[corner_idx[side1_here]]
+                    c2_here = r2_here[corner_idx[side2_here]]
+                    c1_there = r1_there[corner_idx[side1_there]]
+                    c2_there = r2_there[corner_idx[side2_there]]
+                    # Normalize sand (3) -> opaque (2)
+                    c1_here = 2 if c1_here == 3 else c1_here
+                    c2_here = 2 if c2_here == 3 else c2_here
+                    c1_there = 2 if c1_there == 3 else c1_there
+                    c2_there = 2 if c2_there == 3 else c2_there
+                    if c1_here != c1_there or c2_here != c2_there:
+                        bad_sides.append(dname)
+                        # Store a synthetic "run" for cost computation - use the two corner values
+                        nb_runs[dname] = np.array([c1_there, c2_there], dtype=np.uint8)
+
                 if not bad_sides:
                     continue
                 material = field.materials[y, x]
                 candidates = table.bases(material)
                 if not candidates:
                     continue
+
                 def cost(c):
                     total = 0.0
                     for side, r_there in nb_runs.items():
@@ -821,7 +1053,20 @@ def repair_contours(
                         if r_cand is None:
                             total += 0.5
                             continue
-                        total += float((r_cand != r_there).mean())
+                        if side in DIR:
+                            total += float((r_cand != r_there).mean())
+                        else:
+                            # Diagonal: compare corner pixels
+                            c1_cand = r_cand[0] if len(r_cand) > 0 else 2
+                            c2_cand = r_cand[1] if len(r_cand) > 1 else 2
+                            c1_cand = 2 if c1_cand == 3 else c1_cand
+                            c2_cand = 2 if c2_cand == 3 else c2_cand
+                            c1_there_norm = 2 if r_there[0] == 3 else r_there[0]
+                            c2_there_norm = 2 if r_there[1] == 3 else r_there[1]
+                            if c1_cand != c1_there_norm:
+                                total += 1.0
+                            if c2_cand != c2_there_norm:
+                                total += 1.0
                     # keep the material demands of the free sides
                     for m2, s2 in field_neighbours(field, x, y):
                         if s2 in nb_runs or m2 is None or s2 not in ("N", "E", "S", "W"):
@@ -837,7 +1082,81 @@ def repair_contours(
                     changed += 1
         if changed == 0:
             break
+    repair_diagonal_steps(field, table, placed, lut)
     return placed
+
+
+DIAGONAL_ARC_TEMPLATES = {"SH10", "SH11"}
+
+
+def repair_diagonal_steps(
+    field: TerrainField,
+    table: JoinTable,
+    placed: np.ndarray,
+    lut: dict,
+) -> None:
+    """Re-pick staircase shore cells to the SH10 diagonal arc.
+
+    A coast whose material band runs straight but whose shore picks step
+    down a column or two per row renders as a staircase of straight
+    SH12/SH13 pieces. The smooth look is the shipped SH10 2x2 diagonal
+    arc, so the two cells at the leading corner of each step get re-picked
+    to SH10 when that arc joins both placed neighbours.
+    """
+    size = field.size
+
+    def cand_at(yy, xx):
+        if not (0 <= yy < size and 0 <= xx < size):
+            return None
+        p = placed[yy, xx]
+        if p is None:
+            return None
+        return p if hasattr(p, "runs") else lut.get((p.template, p.icon))
+
+    diag_cands = [
+        c for c in table.bases(Material.SHORE)
+        if normalize_template(c.template).upper() in DIAGONAL_ARC_TEMPLATES
+    ]
+    if not diag_cands:
+        return
+
+    for y in range(size):
+        for x in range(size):
+            here = cand_at(y, x)
+            if here is None or here.material is not Material.SHORE:
+                continue
+            # A staircase corner: shore here, land to the E (or S) and the
+            # shore row above (or column left) ends one cell further out --
+            # i.e. this cell is the leading edge of a diagonal step.
+            e = cand_at(y, x + 1)
+            s = cand_at(y + 1, x)
+            n = cand_at(y - 1, x)
+            if e is None or s is None or n is None:
+                continue
+            if e.material is not Material.LAND or s.material is not Material.SHORE:
+                continue
+            # Land continues east (this cell closes the diagonal to the east)
+            # while the shore row below extends west: the step direction.
+            if s.material is not Material.SHORE or n.material is not Material.SHORE:
+                continue
+            # Pick the diagonal arc that best matches the two shore runs.
+            n_run = n.runs.get("S") if n is not None else None
+            w_run = cand_at(y, x - 1).runs.get("E") if cand_at(y, x - 1) is not None else None
+            best = None
+            best_cost = float("inf")
+            for c in diag_cands:
+                cost = 0.0
+                if n_run is not None:
+                    cn = c.runs.get("N")
+                    cost += 0.0 if cn is None else float((cn % 3 != n_run % 3).mean())
+                if w_run is not None:
+                    cw = c.runs.get("W")
+                    cost += 0.0 if cw is None else float((cw % 3 != w_run % 3).mean())
+                if cost < best_cost:
+                    best_cost = cost
+                    best = c
+            if best is not None and (best.template, best.icon) != (here.template, here.icon):
+                placed[y, x] = CellPick(best.template, best.icon)
 
 
 def field_neighbours(field: TerrainField, x: int, y: int):
@@ -898,7 +1217,7 @@ def assign(
     icon_classes: dict[str, np.ndarray] | None = None,
 ) -> np.ndarray:
     if strategy is Strategy.MATCHED:
-        placed = scanline_assign(
+        placed, fixed_coords = scanline_assign(
             field,
             table,
             seed=seed,
@@ -907,7 +1226,7 @@ def assign(
             pool_families=pool_families,
             icon_classes=icon_classes,
         )
-        return repair_contours(field, table, placed, rng=np.random.default_rng(seed ^ 0xC0DE))
+        return repair_contours(field, table, placed, rng=np.random.default_rng(seed ^ 0xC0DE), fixed_coords=fixed_coords)
     size = field.size
     rng = np.random.default_rng(seed ^ 0x5EED)
     picks = np.empty((size, size), dtype=object)

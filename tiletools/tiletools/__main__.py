@@ -30,7 +30,7 @@ from .join import (
     build_table_from_icons,
     measure_icon_classes,
 )
-from .matcher import Strategy, assign
+from .matcher import Strategy, assign, repair_field
 from .atlas import render_atlas
 from .render import Renderer, comparison_sheet, save, to_preview
 from .seam import dumps as seam_dumps, seam_score
@@ -139,6 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     apply_shore(field)
     label_pools(field)
     smooth(field, passes=args.smooth)
+    repair_field(field, table)
     sawtooth_sea_south(field)
     counts = {m.name: int((field.materials == m).sum()) for m in set(field.materials.flat)}
     print(f"field: {counts}")

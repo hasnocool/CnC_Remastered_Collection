@@ -194,14 +194,15 @@ def render_atlas(
     # Vertical lines (at left edge of each cell + rightmost edge)
     for col in range(n_cols + 1):
         x = gap + col * cell_w_gap
-        for y in range(canvas_h):
-            canvas.putpixel((x, y), (255, 255, 255, 255))
+        if x < canvas_w:
+            for y in range(canvas_h):
+                canvas.putpixel((x, y), (255, 255, 255, 255))
     # Horizontal lines (at top edge of each row + bottommost edge)
     for row in range(n_rows + 1):
         y = gap + row * cell_h_total
-        for x in range(canvas_w):
-            canvas.putpixel((x, y), (255, 255, 255, 255))
-
+        if y < canvas_h:
+            for x in range(canvas_w):
+                canvas.putpixel((x, y), (255, 255, 255, 255))
     # Save
 
     # Save
