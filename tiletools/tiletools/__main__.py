@@ -99,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--compare", action="store_true", help="naive vs matched sheet")
     parser.add_argument("--scale", type=float, default=4.0, help="screenshot scale (DOS pixels)")
     parser.add_argument("--atlas", action="store_true", help="render tileset atlas and exit")
+    parser.add_argument("--joins", action="store_true", help="render SH-family join-compatibility matrices and exit")
     parser.add_argument("--full", action="store_true", help="use every joinable family, not just the v1 vocabulary")
     parser.add_argument(
         "--zoom-crop",
@@ -132,6 +133,21 @@ def main(argv: list[str] | None = None) -> int:
 
     started = time.time()
     table, measured = build_dos_join_table(theater, templates)
+
+    if args.joins:
+        from .joins import render_join_matrix
+
+        info = render_join_matrix(table, out / "join_matrix.png")
+        n = len(info["icons"])
+        exact = sum(
+            1
+            for v, h in info["exact"].values()
+            if (v == 1.0 or h == 1.0)
+        )
+        print(f"join matrix: {n} icons, {exact} exact continuations "
+              f"-> {out / 'join_matrix.png'}")
+        return 0
+
     print(f"join table: {len(table)} candidates from {len(measured)} icons "
           f"in {time.time() - started:.1f}s")
 
