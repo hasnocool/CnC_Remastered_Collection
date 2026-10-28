@@ -60,6 +60,20 @@ SHORE_BY_MASK: tuple[tuple[str, int], ...] = (
 
 _LAND_MASK_SIDES = ((0, -1, 1), (1, 0, 2), (0, 1, 4), (-1, 0, 8))
 
+# Straight-coast geometry -> the DOS families that carry art for it.
+# A shore cell with land on exactly one orthogonal side is a straight coast;
+# filling it with a diagonal sweep icon (e.g. SH13.8) repeats a corner piece
+# down the whole run, rendering as sand notches and undressed water.
+# Land-N straight coasts do not exist in the DOS set (see
+# sawtooth_sea_south); they read as diagonal staircase, so only the
+# diagonal/turn pieces fit.
+STRAIGHT_GEOMETRY_FAMILIES: dict[int, set[str]] = {
+    0b0010: {"SH35"},           # land E
+    0b1000: {"SH34"},           # land W
+    0b0100: {"SH12", "SH13"},   # land S
+    0b0001: {"SH10", "SH11"},   # land N (staircase geometry)
+}
+
 
 class Patch:
     """One whole coast template (the DOS art's rounded-edge unit).
@@ -796,6 +810,19 @@ def scanline_assign(
                         for c in candidates
                         if normalize_template(c.template).upper() in want
                     ]
+                    # Straight-coast geometry: a shore cell with land on
+                    # exactly one orthogonal side must use the family drawn
+                    # for that side, not a diagonal sweep corner repeated
+                    # down the run (sand notches + undressed water).
+                    geom = STRAIGHT_GEOMETRY_FAMILIES.get(land_mask(field, x, y))
+                    if geom is not None and filtered:
+                        geom_filtered = [
+                            c
+                            for c in filtered
+                            if normalize_template(c.template).upper() in geom
+                        ]
+                        if geom_filtered:
+                            filtered = geom_filtered
                     if not filtered:
                         # A shore cell ringed by land on all four sides is a
                         # 1-cell pond: no arc art fits, close it to grass.
