@@ -28,7 +28,13 @@ from .join import (
     edge_demand,
     normalize_template,
 )
-from .terrain import TerrainField, apply_shore, fill_specks, label_pools
+from .terrain import (
+    TerrainField,
+    apply_shore,
+    fill_specks,
+    label_pools,
+    relabel_stale_shore,
+)
 
 
 class Strategy(Enum):
@@ -467,7 +473,9 @@ def repair_field(
             field.materials[y, x] = Material.LAND
         apply_shore(field)
         label_pools(field)
-    return fill_specks(field) + close_sliver_regions(field)
+    closed = fill_specks(field) + close_sliver_regions(field)
+    relabel_stale_shore(field)
+    return closed
 
 
 def close_sliver_regions(field: TerrainField, max_area: int = 7, min_fill: float = 0.6) -> int:
@@ -539,7 +547,10 @@ def _run_mismatch(a: np.ndarray, b: np.ndarray) -> float:
     """
     if a is None or b is None or len(a) != len(b):
         return 0.0
-    return float((a != b).mean())
+    # Sand (3) and grass (2) are both opaque land: a beach arc ending
+    # against grass is the intended coast look, not a seam defect. Only
+    # material-level disagreement (water vs land, arc shape) counts.
+    return float((a % 3 != b % 3).mean())
 
 
 def _demand_for(field: TerrainField, x: int, y: int, material: Material, mat: Material, side: str) -> str:

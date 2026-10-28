@@ -111,12 +111,18 @@ class DosTheater:
     # -- material classification by palette index --------------------------
 
     def index_classes(self) -> dict[str, np.ndarray]:
-        """Per template: [fc, h, w] uint8 classes 0=transparent, 1=water, 2=land.
+        """Per template: [fc, h, w] uint8 classes 0=transparent, 1=water,
+        2=grass/rock, 3=sand.
 
         The DOS palette reuses dark indices between grass and water art, so
         the water index set is learned PER TEMPLATE: indices appearing in the
         template's own pure-water icons (land type WATER, not in alt_icons)
         are water; index 0 is transparent; every other index is land.
+
+        Sand (the beach arcs of the SH* sets) is warm palette entries
+        (r > b+4 and r >= g): grass and rock art never uses warm indices, so
+        contour matching can demand sand-to-sand continuity across seams
+        instead of lumping beach and grass into one opaque class.
         """
         if self._classes is not None:
             return self._classes
@@ -129,12 +135,21 @@ class DosTheater:
             if ref in self.frames:
                 water_idx |= {int(i) for i in np.unique(self.frames[ref])}
         water_idx.discard(0)
+        sand_idx = {
+            i
+            for i in range(1, 256)
+            if i not in water_idx
+            and self.palette[i][0] > self.palette[i][2] + 4
+            and self.palette[i][0] >= self.palette[i][1]
+        }
         classes: dict[str, np.ndarray] = {}
         for tpl, frames in self.frames.items():
             cls = np.full(frames.shape, 2, dtype=np.uint8)
             cls[frames == 0] = 0
             if water_idx:
                 cls[np.isin(frames, list(water_idx))] = 1
+            if sand_idx:
+                cls[np.isin(frames, list(sand_idx))] = 3
             classes[tpl] = cls
         self._classes = classes
         return classes

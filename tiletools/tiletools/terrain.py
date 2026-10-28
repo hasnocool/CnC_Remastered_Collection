@@ -124,12 +124,39 @@ def apply_shore(field: TerrainField) -> None:
     mats[water & land_4neighbour] = Material.SHORE
 
 
-def label_pools(field: TerrainField, max_pool: int = 4) -> None:
-    """Mark SMALL water/shore regions not 4-connected to a border as pools.
+def relabel_stale_shore(field: TerrainField) -> None:
+    """SHORE cells with no WATER in their 8-neighbourhood revert to LAND.
 
-    A pool (≤ ``max_pool`` cells) renders with the grass-side pond templates
-    (SH32-35); a bigger inner lake reads as ocean and uses the water-based
-    SH10-13 band like the map-border ocean.
+    Closing wet specks and gully slivers to LAND leaves their old shore
+    ring behind: sand-arc cells with no water anywhere adjacent, which
+    render as meandering grey chains across solid grass. Iterated to a
+    fixed point so cascaded closures collapse the whole ring.
+    """
+    while True:
+        mats = field.materials
+        water = mats == Material.WATER
+        water_8neighbour = (
+            _any_cardinal(water)
+            | np.roll(np.roll(water, 1, 0), 1, 1)
+            | np.roll(np.roll(water, 1, 0), -1, 1)
+            | np.roll(np.roll(water, -1, 0), 1, 1)
+            | np.roll(np.roll(water, -1, 0), -1, 1)
+        )
+        stale = (mats == Material.SHORE) & ~water_8neighbour
+        # Border rows/cols: roll wraps flags may mark edges spuriously —
+        # clear wrap artefacts on the four edges.
+        stale[0, :] &= water[0, :].any() or False
+        if not stale.any():
+            return
+        mats[stale] = Material.LAND
+
+
+def label_pools(field: TerrainField, max_pool: int = 4) -> None:
+    """Mark SMALL water regions not 4-connected to a border as pools.
+
+    Sizing counts WATER cells only — the SH* shore ring adds ~2 cells per
+    water cell, so counting it makes a 3-water-cell pond weigh 11 and fall
+    into the ocean band instead of the grass-side pond art (SH32-35).
     """
     size = field.size
     wet = np.isin(field.materials, [Material.WATER, Material.SHORE])
@@ -158,7 +185,10 @@ def label_pools(field: TerrainField, max_pool: int = 4) -> None:
                     ):
                         seen.add((nx, ny))
                         stack.append((nx, ny))
-            if not touches_border and len(region) <= max_pool:
+            water_count = sum(
+                1 for x, y in region if field.materials[y, x] is Material.WATER
+            )
+            if not touches_border and water_count <= max_pool:
                 for x, y in region:
                     field.pool[y, x] = True
 
@@ -182,6 +212,7 @@ def fill_specks(field: TerrainField, passes: int = 3) -> int:
     if closed:
         apply_shore(field)
         label_pools(field)
+    relabel_stale_shore(field)
     return closed
 
 

@@ -23,6 +23,7 @@ from PIL import Image
 
 from .cdata import td_templates, ra_templates
 from .dos import DosTheater
+from .meg import steam_install_root
 from .join import (
     LAND_TYPE_MATERIAL,
     Material,
@@ -30,7 +31,7 @@ from .join import (
     measure_icon_classes,
 )
 from .matcher import Strategy, assign
-from .meg import steam_install_root
+from .atlas import render_atlas
 from .render import Renderer, comparison_sheet, save, to_preview
 from .seam import dumps as seam_dumps, seam_score
 from .terrain import (
@@ -86,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--size", type=int, default=48)
     parser.add_argument("--sea", type=float, default=0.40)
+    parser.add_argument("--gamma", type=float, default=2.2, help="palette gamma (1 = DOS look)")
     parser.add_argument("--smooth", type=int, default=2, help="coastline smoothing passes")
     parser.add_argument(
         "--out",
@@ -96,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--install-root", type=Path, default=None)
     parser.add_argument("--compare", action="store_true", help="naive vs matched sheet")
     parser.add_argument("--scale", type=float, default=4.0, help="screenshot scale (DOS pixels)")
-    parser.add_argument("--gamma", type=float, default=2.2, help="palette gamma (1 = DOS look)")
+    parser.add_argument("--atlas", action="store_true", help="render tileset atlas and exit")
     parser.add_argument("--full", action="store_true", help="use every joinable family, not just the v1 vocabulary")
     parser.add_argument(
         "--zoom-crop",
@@ -123,6 +125,10 @@ def main(argv: list[str] | None = None) -> int:
     theater = DosTheater.open(root, args.game, theater_name, gamma=args.gamma)
     print(f"theater: {theater.theater}, {len(theater.frames)} icon sets, "
           f"palette {theater.palette.shape}")
+
+    if args.atlas:
+        render_atlas(theater, set(templates), out / "tileset_atlas.png", scale=int(args.scale))
+        return 0
 
     started = time.time()
     table, measured = build_dos_join_table(theater, templates)

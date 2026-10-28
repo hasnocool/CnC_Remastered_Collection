@@ -153,10 +153,11 @@ def measure_icon_classes(cls: np.ndarray) -> tuple[EdgeProfiles, dict[str, np.nd
 
     def profile(run: np.ndarray) -> EdgeProfile:
         total = max(1, len(run))
+        opaque = int(((run == 2) | (run == 3)).sum())
         return EdgeProfile(
             transparent=float((run == 0).sum()) / total,
             water=float((run == 1).sum()) / total,
-            opaque=float((run == 2).sum()) / total,
+            opaque=float(opaque) / total,
         )
 
     runs = {
