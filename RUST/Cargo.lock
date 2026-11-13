@@ -1186,7 +1186,7 @@ dependencies = [
 
 [[package]]
 name = "cnc-ai"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "cnc-asset"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "audio",
@@ -1220,7 +1220,7 @@ dependencies = [
 
 [[package]]
 name = "cnc-audio"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cnc-core",
@@ -1244,7 +1244,7 @@ dependencies = [
 
 [[package]]
 name = "cnc-classic"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "egui 0.29.1",
@@ -1259,7 +1259,7 @@ dependencies = [
 
 [[package]]
 name = "cnc-console"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1287,7 +1287,7 @@ dependencies = [
 
 [[package]]
 name = "cnc-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -1319,7 +1319,7 @@ dependencies = [
 
 [[package]]
 name = "cnc-events"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1340,7 +1340,7 @@ dependencies = [
 
 [[package]]
 name = "cnc-launcher"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1375,7 +1375,7 @@ dependencies = [
 
 [[package]]
 name = "cnc-logs"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1397,7 +1397,7 @@ dependencies = [
 
 [[package]]
 name = "cnc-map-editor"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cnc-ai",
@@ -1420,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "cnc-music"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cnc-procgen",
@@ -1430,7 +1430,7 @@ dependencies = [
 
 [[package]]
 name = "cnc-net-directory"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1453,7 +1453,7 @@ dependencies = [
 
 [[package]]
 name = "cnc-procgen"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "clap",
  "cnc-core",
@@ -1467,7 +1467,7 @@ dependencies = [
 
 [[package]]
 name = "cnc-red-alert"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1487,7 +1487,7 @@ dependencies = [
 
 [[package]]
 name = "cnc-renderer"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -1510,7 +1510,7 @@ dependencies = [
 
 [[package]]
 name = "cnc-replayer"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1524,7 +1524,7 @@ dependencies = [
 
 [[package]]
 name = "cnc-sfx"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "cnc-procgen",
  "hound",
@@ -1532,7 +1532,7 @@ dependencies = [
 
 [[package]]
 name = "cnc-tiberian-dawn"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bincode",

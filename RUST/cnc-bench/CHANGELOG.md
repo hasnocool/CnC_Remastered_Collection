@@ -2,7 +2,7 @@
 
 All notable changes to this crate will be documented here following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format and [SemVer](https://semver.org/) rules.
 
-### Unreleased
+### [0.2.0] - 2026-11-13
 
 #### Added
 - Real Criterion 0.5 benchmark suite (`criterion = { workspace = true }`, workspace pin 0.5.1, already in `Cargo.lock`) with two `[[bench]]` targets (`harness = false`), replacing the `fn main() {}` stubs (2026-10-19):
