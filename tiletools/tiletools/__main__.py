@@ -87,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--size", type=int, default=48)
     parser.add_argument("--sea", type=float, default=0.40)
-    parser.add_argument("--gamma", type=float, default=2.2, help="palette gamma (1 = DOS look)")
+    parser.add_argument("--gamma", type=float, default=3.0, help="palette gamma (1 = DOS look)")
     parser.add_argument("--smooth", type=int, default=2, help="coastline smoothing passes")
     parser.add_argument(
         "--out",

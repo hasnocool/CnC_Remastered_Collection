@@ -54,9 +54,15 @@ fn main() {
                     continue;
                 }
                 total_cells += 1;
-                *icons.entry(c.template).or_default().entry(c.icon).or_insert(0) += 1;
+                *icons
+                    .entry(c.template)
+                    .or_default()
+                    .entry(c.icon)
+                    .or_insert(0) += 1;
                 let e = stats.entry(c.template).or_insert((0, 0, 0));
-                for (side_idx, (dx, dy)) in [(0, (0i32, -1i32)), (1, (1, 0)), (2, (0, 1)), (3, (-1, 0))] {
+                for (side_idx, (dx, dy)) in
+                    [(0, (0i32, -1i32)), (1, (1, 0)), (2, (0, 1)), (3, (-1, 0))]
+                {
                     let nx = x as i32 + dx;
                     let ny = y as i32 + dy;
                     let n_tpl = if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
@@ -90,7 +96,11 @@ fn main() {
                 let mut land_count = 0u8;
                 let mut side_bits = [0u8; 4];
                 if c.template != 255 {
-                    for (side_idx, (dx, dy)) in [(0, (0i32, -1i32)), (1, (1, 0)), (2, (0, 1)), (3, (-1, 0))].iter().enumerate() {
+                    for (side_idx, (dx, dy)) in
+                        [(0, (0i32, -1i32)), (1, (1, 0)), (2, (0, 1)), (3, (-1, 0))]
+                            .iter()
+                            .enumerate()
+                    {
                         let (dx, dy): (i32, i32) = *dy;
                         let nx = x as i32 + dx;
                         let ny = y as i32 + dy;
@@ -119,10 +129,18 @@ fn main() {
                 // Shore pieces (water cells with >=2 land neighbours) and
                 // where the arc templates land.
                 if is_water(c.template) && land_count >= 2 {
-                    *shore.entry(land_mask_val).or_default().entry((c.template, c.icon)).or_insert(0) += 1;
+                    *shore
+                        .entry(land_mask_val)
+                        .or_default()
+                        .entry((c.template, c.icon))
+                        .or_insert(0) += 1;
                 }
                 if c.template >= 3 && c.template <= 15 {
-                    *shore_arcs.entry(land_mask_val).or_default().entry((c.template, c.icon)).or_insert(0) += 1;
+                    *shore_arcs
+                        .entry(land_mask_val)
+                        .or_default()
+                        .entry((c.template, c.icon))
+                        .or_insert(0) += 1;
                 }
             }
         }
@@ -146,30 +164,48 @@ fn main() {
         let mut top: Vec<_> = coast_side[idx].iter().collect();
         top.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
         let total: u32 = coast_side[idx].values().sum();
-        let tops: Vec<_> = top.iter().take(5).map(|((t, i), n)| format!("{t}:{i}={n}")).collect();
+        let tops: Vec<_> = top
+            .iter()
+            .take(5)
+            .map(|((t, i), n)| format!("{t}:{i}={n}"))
+            .collect();
         all.push(format!("  {side} ({total}): {}", tops.join(", ")));
     }
     println!("\n1-land-side coast cells (water cell on the straight coast):");
-    for line in all { println!("{line}"); }
+    for line in all {
+        println!("{line}");
+    }
     println!("\nland-side shelf placements (land cell, water mask):");
     for (mask, entries) in &shelf {
         let mut top: Vec<_> = entries.iter().collect();
         top.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
-        let top: Vec<_> = top.iter().take(3).map(|((t, i), n)| format!("{t}:{i}={n}")).collect();
+        let top: Vec<_> = top
+            .iter()
+            .take(3)
+            .map(|((t, i), n)| format!("{t}:{i}={n}"))
+            .collect();
         println!("  {mask:02X}: {}", top.join(", "));
     }
     println!("\nshore pieces (water cell, land_mask_val with >=2 land sides):");
     for (mask, entries) in &shore {
         let mut top: Vec<_> = entries.iter().collect();
         top.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
-        let top: Vec<_> = top.iter().take(3).map(|((t, i), n)| format!("{t}:{i}={n}")).collect();
+        let top: Vec<_> = top
+            .iter()
+            .take(3)
+            .map(|((t, i), n)| format!("{t}:{i}={n}"))
+            .collect();
         println!("  {mask:02X}: {}", top.join(", "));
     }
     println!("\narc-template placements (templates 3..=15 by land mask):");
     for (mask, entries) in &shore_arcs {
         let mut top: Vec<_> = entries.iter().collect();
         top.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
-        let top: Vec<_> = top.iter().take(3).map(|((t, i), n)| format!("{t}:{i}={n}")).collect();
+        let top: Vec<_> = top
+            .iter()
+            .take(3)
+            .map(|((t, i), n)| format!("{t}:{i}={n}"))
+            .collect();
         println!("  {mask:02X}: {}", top.join(", "));
     }
     println!("\nicon histograms (top templates):");
@@ -177,7 +213,11 @@ fn main() {
         let total: u32 = hist.values().sum();
         let mut top: Vec<_> = hist.iter().collect();
         top.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
-        let tops: Vec<_> = top.iter().take(8).map(|(i, n)| format!("{i}={n}")).collect();
+        let tops: Vec<_> = top
+            .iter()
+            .take(8)
+            .map(|(i, n)| format!("{i}={n}"))
+            .collect();
         println!("  t{t} ({total}): {}", tops.join(", "));
     }
 }
@@ -187,5 +227,9 @@ fn shore_entry_by_land_mask(
     land_mask: u8,
     piece: (u8, u8),
 ) {
-    *table.entry(land_mask).or_default().entry(piece).or_insert(0) += 1;
+    *table
+        .entry(land_mask)
+        .or_default()
+        .entry(piece)
+        .or_insert(0) += 1;
 }
