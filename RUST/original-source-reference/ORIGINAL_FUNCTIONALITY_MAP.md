@@ -2,7 +2,7 @@
 
 **Method:** domain-level feature map checked against the pinned upstream Git tree and the original engine/source guides. The exact tracked-file and language counts are re-measured in §6.2. Tables below group source files by functional domain; they are not a claim that every symbol or every function body has been exhaustively audited. Items inferred from names or codemap summaries are explicitly marked `(inferred)` or `(partially inferred)`.
 
-**Pinned upstream commit:** `f1f0d42bc2dcd06d5d1df943c6150ab34bf307ae`. The tree contains 1,331 tracked files: `REDALERT/` 628 files (301 `.CPP`, 295 headers, 28 assembly), `TIBERIANDAWN/` 411 files (193 `.CPP`, 184 headers, 28 assembly), and `CnCTDRAMapEditor/` 286 files (257 `.cs`). See §6.2 for the count breakdown and corrections to stale prior figures.
+**Pinned upstream commit:** `f1f0d42bc2dcd06d5d1df943c6150ab34bf307ae`. The tree contains 1,331 tracked files: `REDALERT/` 628 files (301 `.CPP`, 295 `.H`, 14 `.ASM`, 14 `.INC`), `TIBERIANDAWN/` 411 files (193 `.CPP`, 184 `.H`, 13 `.ASM`, 15 `.INC`), and `CnCTDRAMapEditor/` 286 files (257 `.cs`). The `.ASM` + `.INC` totals are 28 assembly-source/include files per engine. See §6.2 for the count breakdown and corrections to stale prior figures.
 
 ---
 
@@ -209,7 +209,8 @@ Game data: scenario `.MAP`/`.INI`, campaign definitions, cursors/icons (RA `RESO
 ## 6. Rust port status and remaining implementation work
 
 **Status snapshot date:** 2026-11-14  
-**Audited Rust HEAD:** [`8853580f03fb66159143136165ef24077865d780`](https://github.com/hasnocool/CnC_Remastered_Collection/commit/8853580f03fb66159143136165ef24077865d780)  
+**Audited Rust source snapshot:** [`8853580f03fb66159143136165ef24077865d780`](https://github.com/hasnocool/CnC_Remastered_Collection/commit/8853580f03fb66159143136165ef24077865d780)  
+**Repository HEAD before this documentation refresh:** [`42867ba9ae2576df44c9e074085da8ca134ae3ed`](https://github.com/hasnocool/CnC_Remastered_Collection/commit/42867ba9ae2576df44c9e074085da8ca134ae3ed) (documentation-only; parent is the audited Rust source snapshot)  
 **Status details:** see [IMPLEMENTED_FUNCTIONALITY_MAP.md](IMPLEMENTED_FUNCTIONALITY_MAP.md).
 
 This map describes what the original games do. The presence of a capability below is not a claim that the Rust port has completed it. The status column is a source-level snapshot against the Rust commit above.
@@ -219,13 +220,13 @@ This map describes what the original games do. The presence of a capability belo
 | Shared object/type hierarchy, ownership, damage and deterministic simulation | `cnc-core/src/entity.rs`, `class_id.rs`, `fixed.rs`; engine `game.rs` modules | **Partial.** Working Rust model and game loops, but not a 1:1 C++ RTTI/inheritance/allocator reproduction. |
 | TD units, buildings, economy, combat and projectiles | `cnc-tiberian-dawn/src/{game,unit,building,weapon,td_rules}.rs` | **Partial.** Real game paths/tests; complete original roster and edge-case semantics remain open. |
 | RA ground/naval/air units, combat and projectiles | `cnc-red-alert/src/{game,pathfind,superweapon,tesla}.rs` and special-unit modules | **Partial.** Selected roster, armor, missiles, splash, aircraft rearming and naval/carrier behaviors are implemented; full roster parity remains open. |
-| Original TD scenario INI/BIN loading | `cnc-tiberian-dawn/src/scenario_loader.rs` | **Implemented for supported data.** Raw/LCW cell data, objects, houses, waypoints and supported trigger records are connected to runtime conversion. Unknown/unmapped records remain explicit gaps. |
+| Original TD scenario INI/BIN loading | Original: `TIBERIANDAWN/SCENARIO.CPP::Read_Scenario` / `Read_Scenario_Ini`, `TIBERIANDAWN/MAP.CPP::Read_Binary`; Rust: `cnc-tiberian-dawn/src/scenario_loader.rs::{load_scenario,scenario_to_game}` | **Implemented for supported data; not full scenario parity.** The launcher original-campaign discovery path calls the Rust loader and converts parsed records into a live game. The integration fixture checks map cells, units, structures, houses, waypoints, objectives and mapped/unmapped triggers. Unsupported event/action vocabulary is reported rather than guessed; tests were inspected, not executed in this audit. |
 | Original RA MPR MapPack/OverlayPack, Houses and Base | `cnc-red-alert/src/original_scenario.rs`, `scenario_mpr.rs` | **Implemented for supported records.** Parser and game-builder tests exist; all parsed fields are not yet proven to affect runtime. |
 | TeamTypes, TaskForces and waypoint behavior | `cnc-core/src/entity.rs`; TD `ai.rs`; RA `game.rs`; editor `map.rs` / `tools.rs` | **Partial-to-implemented for tested paths.** Model, parser, team manager and selected objectives exist; all original mission steps and editor dialog parity remain open. |
 | House expert AI (urgency, build, offense, defense, income and fire-sale) | `cnc-core/src/house_ai.rs`; TD `ai.rs`; RA `ai.rs` | **Partial; RA has confirmed stubs.** TD adapter has functional decision paths. RA structure queue, attack-wave and sell hooks currently do not perform the claimed action. |
 | Mission triggers, event/action tables and per-object attachments | `cnc-core/src/{trigger_apply,trigger_attach,trigger_records}.rs`; engine `mission.rs` / `game.rs` | **Partial.** Supported actions execute; other host actions reject/log. Full original TEVENT/TACTION runtime parity is not present. |
 | Rules.ini / type-data consumption | `cnc-core/src/rules.rs`; TD `td_rules.rs`; RA `game.rs` | **Partial.** Several values reach runtime; full original field-by-field consumption is not proven. |
-| Original map editor import/export and map model | `cnc-map-editor/src/{map,original}.rs`; `app.rs` | **Implemented for supported TD/RA formats.** UI import and fixture round trips exist. Complete C# dialogs, controls, Steamworks and validation parity remain open. |
+| Original map editor import/export and map model | Original: `CnCTDRAMapEditor/MainForm.cs::{LoadFile,SaveFile}`, `Model/Map.cs`; Rust: `cnc-map-editor/src/{app,map,original,plugin}.rs` | **Implemented for supported TD/RA formats, not full editor parity.** The Rust toolbar import opens the native file dialog, dispatches RA `.MPR`/INI, and pairs a TD `.INI` with its sibling `.BIN`; the plugin open/save path preserves the detected dialect. TD raw/LCW and RA fixtures round-trip through the editor tests. Legacy C# dialogs, controls, validation and Steam Workshop flows remain incomplete. |
 | Save/load, replay and pointer restoration | TD `savegame.rs` / `network.rs`; RA `game.rs` / `replay.rs`; core `pointers.rs` | **Partial.** Rust state round-trips and deterministic RA replay exist; original save-file byte compatibility is not claimed. |
 | Multiplayer command transport and lobby services | TD `network.rs`; `cnc-net-directory/src/`; launcher lobby | **Modern replacement / partial integration.** UDP lockstep/handshake and modern directory/LFG exist. Original IPX, modem, DDE, WOL and legacy manager protocols are not reproduced. |
 | DirectDraw, GlyphX and Win32 presentation/input | `cnc-renderer/src/`, `cnc-launcher/src/` | **Modern replacement.** wgpu/software renderer and winit frontend exist; no DirectDraw/GlyphX ABI compatibility claim. |
@@ -234,10 +235,10 @@ This map describes what the original games do. The presence of a capability belo
 
 ### 6.1 Confirmed implementation gaps
 
-These gaps are anchored in current source at `8853580f03fb66159143136165ef24077865d780`:
+These gaps are anchored in the audited Rust source snapshot `8853580f03fb66159143136165ef24077865d780` (the parent of the documentation-only pre-audit HEAD `42867ba9ae2576df44c9e074085da8ca134ae3ed`):
 
 1. **Red Alert House AI:** `cnc-red-alert/src/ai.rs` contains explicit placeholder behavior. `queue_structure` can return success without queuing/placing a structure; `launch_attack_wave` can return success without sending attack orders; `sell_structure` returns success without selling. The adapter recreates `HouseAIState` locally inside each update, so persistence of timers and one-time decisions is not established.
-2. **Trigger action families:** `cnc-core/src/trigger_apply.rs` supplies default reject paths. The 2026-10-24 parity-gap report recorded 12 RA action families as documented-only; re-count against the current tree and verify TD/RA separately before closing them.
+2. **Trigger action families:** `cnc-core/src/trigger_apply.rs` supplies default reject paths for host actions an engine does not implement. The 2026-10-24 parity-gap report recorded 12 RA action families as documented-only; that historical count has not been freshly reconciled here. Re-count current TD and RA host overrides separately before closing them.
 3. **CSF strings:** `cnc-asset/src/string_table.rs` currently returns an empty map from `CsfFile::load`.
 4. **Rules and scenarios:** parse coverage exceeds proven runtime consumption. Audit each field from parser through scenario/game construction to a tested gameplay effect.
 5. **Full roster and rare behavior:** complete unit/building/weapon/special behavior matrices remain to be compared against the pinned original source.
@@ -247,22 +248,30 @@ These gaps are anchored in current source at `8853580f03fb66159143136165ef240778
 
 ### 6.2 Source and inventory counts corrected against pinned upstream tree
 
-The pinned upstream Git tree contains **1,331 tracked files** (1,375 tree entries including directory objects), not just the engine-file subtotals. Verified subtree counts:
+The pinned upstream Git tree contains **1,331 tracked files** (1,375 tree entries including directory objects), not just the engine-file subtotals. Verified subtree counts from the tree at `f1f0d42bc2dcd06d5d1df943c6150ab34bf307ae`:
 
-| Upstream subtree | All files | `.CPP` | Headers | Assembly |
-|---|---:|---:|---:|---:|
-| `REDALERT/` | 628 | 301 | 295 | 28 |
-| `TIBERIANDAWN/` | 411 | 193 | 184 | 28 |
-| `CnCTDRAMapEditor/` | 286 | 0 | 0 | 0 |
+| Upstream subtree | All files | `.CPP` | `.H` | `.ASM` | `.INC` | `.CS` |
+|---|---:|---:|---:|---:|---:|---:|
+| `REDALERT/` | 628 | 301 | 295 | 14 | 14 | 0 |
+| `TIBERIANDAWN/` | 411 | 193 | 184 | 13 | 15 | 0 |
+| `CnCTDRAMapEditor/` | 286 | 0 | 0 | 0 | 0 | 257 |
 
-The editor subtree contains 257 `.cs` files. There are 6 other top-level files in the pinned tree. The prior figures “519 RA files,” “298 TD files,” and “953 headers” are stale and have been corrected. The 301 + 193 = **494** C++ translation units agrees with the separate 494-translation-unit inventory.
+`.ASM` plus `.INC` yields 28 assembly-source/include files for each engine; `.INC` files are includes, not standalone translation units.
+
+The editor subtree contains 257 `.cs` files. There are 6 other top-level files in the pinned tree. The prior figures “519 RA files,” “298 TD files,” and “953 headers” are stale and have been corrected. The 301 + 193 = **494** C++ translation units agrees with the separate 494-translation-unit inventory. The assembly count is broken out above to avoid presenting include files as `.ASM` source files.
 
 The domain tables in this document are a functional guide, not a line-by-line allocation of every C++ symbol. Use the complete file inventory for path coverage and the individual source guides for exact declarations and behavior.
 
-### 6.3 Evidence and confidence rule
+### 6.3 End-to-end evidence reviewed in this audit
+
+- **Original TD engine path:** the pinned upstream `TIBERIANDAWN/SCENARIO.CPP::Read_Scenario` invokes the scenario-read path, while `TIBERIANDAWN/MAP.CPP::Read_Binary` reads the sibling `.BIN` map image. The Rust `cnc-tiberian-dawn/src/scenario_loader.rs::{load_scenario,scenario_to_game}` performs the corresponding supported-record load/conversion; `cnc-launcher/src/lib.rs::original_campaign::load_campaign` calls it. The focused integration test is `cnc-tiberian-dawn/tests/original_scenario_game.rs::original_td_scenario_builds_game_with_terrain_overlay_units`.
+- **Original editor file path:** the pinned upstream `CnCTDRAMapEditor/MainForm.cs::LoadFile` / `SaveFile` dispatches INI/MPR/BIN file types. The Rust `cnc-map-editor/src/app.rs` import action/dialog/path reaches `plugin.rs::{load_scenario,save_scenario}` and the TD/RA readers in `map.rs`; tests in `cnc-map-editor/tests/original_formats.rs` and `app.rs` cover the supported formats and dialog path.
+- These are evidence of real runtime/editor integration for supported scenarios, not blanket 1:1 compatibility. Unsupported trigger vocabulary, unconsumed fields, and legacy UI/platform behavior remain separate gaps. The source/test checks in this pass were inspections only; no tests were run.
+
+### 6.4 Evidence and confidence rule
 
 - **Original functionality** answers “what does the pinned upstream source do?”
 - **Rust implementation status** answers “what does the current Rust HEAD actually do?”
 - **Source-documentation status** answers “how completely has the upstream file been explained?”
 
-Do not merge these three states. A fully documented C++ feature may still be absent from Rust; a Rust helper may exist without an integrated game behavior. A feature is complete only after tracing original symbols → Rust implementation → runtime call path → focused test/fixture. Record the command/date/commit for any test result. The November 14 audit inspected code and test definitions but did not run Cargo gates.
+Do not merge these three states. A fully documented C++ feature may still be absent from Rust; a Rust helper may exist without an integrated game behavior. A feature is complete only after tracing original symbols → Rust implementation → runtime call path → focused test/fixture. Record the command/date/commit for any test result. The November 14 audit inspected source and test definitions remotely but did not run Cargo gates: the requested `/home/hyperion/...` checkout was not mounted in the audit session. `cargo metadata --no-deps`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace --no-fail-fast` remain unverified.
