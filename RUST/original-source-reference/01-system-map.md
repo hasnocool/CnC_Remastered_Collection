@@ -30,15 +30,15 @@ The critical distinction is between **asset decoding**, **template interpretatio
 
 ## Important original terrain files
 
-- [Tiberian Dawn MAP.CPP](TIBERIANDAWN/MAP.CPP.md)
-- [Tiberian Dawn TEMPLATE.CPP](TIBERIANDAWN/TEMPLATE.CPP.md)
-- [Tiberian Dawn CDATA.CPP](TIBERIANDAWN/CDATA.CPP.md)
-- [Tiberian Dawn INI.CPP](TIBERIANDAWN/INI.CPP.md)
-- [Tiberian Dawn MIXFILE.CPP](TIBERIANDAWN/MIXFILE.CPP.md)
-- [Red Alert MAP.CPP](REDALERT/MAP.CPP.md)
-- [Red Alert CDATA.CPP](REDALERT/CDATA.CPP.md)
-- [Icon-set decoder](SHARED/ICONSET.CPP.md)
-- [Tile/icon-set definitions](SHARED/TILE.H.md)
+- [Tiberian Dawn MAP.CPP](TIBERIANDAWN/MAP.md)
+- [Tiberian Dawn TEMPLATE.CPP](TIBERIANDAWN/TEMPLATE.md)
+- [Tiberian Dawn CDATA.CPP](TIBERIANDAWN/CDATA.md)
+- [Tiberian Dawn INI.CPP](TIBERIANDAWN/INI.md)
+- [Tiberian Dawn MIXFILE.CPP](TIBERIANDAWN/MIXFILE.md)
+- [Red Alert MAP.CPP](REDALERT/MAP.md)
+- [Red Alert CDATA.CPP](REDALERT/CDATA.md)
+- [Icon-set decoder](SHARED/ICONSET.md)
+- [Tile/icon-set definitions](SHARED/TILE.md)
 
 ## Variant boundaries that matter
 

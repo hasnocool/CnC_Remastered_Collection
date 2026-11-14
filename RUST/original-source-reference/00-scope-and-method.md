@@ -19,7 +19,7 @@ Create a navigable plain-English explanation of the complete original source tre
 4. **Explain each function's responsibility.** Include meaningful inputs, outputs, state changes, callbacks, I/O, rendering, or network effects when established by the code.
 5. **Follow call relationships.** Link related files and describe the flow between them.
 6. **Compare the variants.** Never assume a Tiberian Dawn implementation is identical to Red Alert. Document differences explicitly.
-7. **Map to Rust.** Point to the current Rust module and describe missing or partial behavior; use [PORTING_STATUS.md](../../PORTING_STATUS.md) as the status source of truth.
+7. **Map to Rust.** Point to the current Rust module and describe missing or partial behavior; use the 17 Rust crates at HEAD as the status source of truth.
 8. **Separate fact from inference.** Label uncertain conclusions and open questions.
 9. **Do not reproduce large blocks of upstream code.** Summarize the behavior and link to the original file.
 10. **Do not include proprietary game assets.** This library documents source behavior and formats; integration tests can use legally obtained local game data.
@@ -29,7 +29,7 @@ Create a navigable plain-English explanation of the complete original source tre
 - **Reviewed:** source inspected; class/function inventory and behavior summarized.
 - **Partially reviewed:** important paths inspected, but not every symbol or branch.
 - **Inventory only:** source path is known, but behavior has not yet been audited.
-- **Not applicable:** non-executable resource, generated designer file, or build metadata. Its role still receives a short explanation.
+- **Generated/resource:** non-executable resource, generated designer file, or build metadata. Its role still receives a short explanation.
 
 ## Recommended page template
 
