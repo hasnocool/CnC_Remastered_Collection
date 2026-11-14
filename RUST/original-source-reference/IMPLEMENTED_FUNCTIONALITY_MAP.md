@@ -18,6 +18,10 @@ This file is the evidence-based list of functionality present in the Rust port. 
 
 A type, module, filename, TODO comment, parser, or historical parity percentage is not enough to claim a feature is implemented. Trace the code into the game/runtime and identify an executable test or fixture.
 
+## Function-level porting inventory
+
+The companion [Function and Porting Contract Catalog](FUNCTION_CATALOG/README.md) provides a complete pinned source-file manifest and a generator for per-file callable-symbol indexes. It is the function-level surface for a future-language/platform port; a signature extraction is not a behavioral contract or parity result. Use its contract template to document inputs, outputs, state effects, dependencies, edge cases and target-language mapping.
+
 ## 1. Audit baseline and repository shape
 
 | Item | Verified state |
