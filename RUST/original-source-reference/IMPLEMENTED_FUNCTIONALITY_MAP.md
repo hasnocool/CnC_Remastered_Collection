@@ -1,9 +1,10 @@
 # Implemented Functionality Map — Rust Port
 
 **Audit date:** 2026-11-14  
-**Audited Rust HEAD:** [`8853580f03fb66159143136165ef24077865d780`](https://github.com/hasnocool/CnC_Remastered_Collection/commit/8853580f03fb66159143136165ef24077865d780)  
+**Audited Rust source snapshot:** [`8853580f03fb66159143136165ef24077865d780`](https://github.com/hasnocool/CnC_Remastered_Collection/commit/8853580f03fb66159143136165ef24077865d780)  
+**Repository HEAD before this documentation refresh:** [`42867ba9ae2576df44c9e074085da8ca134ae3ed`](https://github.com/hasnocool/CnC_Remastered_Collection/commit/42867ba9ae2576df44c9e074085da8ca134ae3ed) (documentation-only commit; parent is the audited Rust source snapshot)  
 **Pinned original source:** [`f1f0d42bc2dcd06d5d1df943c6150ab34bf307ae`](https://github.com/electronicarts/CnC_Remastered_Collection/commit/f1f0d42bc2dcd06d5d1df943c6150ab34bf307ae)  
-**Scope:** source-level inspection of current Rust code, module declarations, runtime call paths and focused test definitions.
+**Scope:** targeted source-level audit of Rust implementation, live call paths and focused test definitions, compared with original engine/editor source at the pinned upstream commit.
 
 This file is the evidence-based list of functionality present in the Rust port. It is not a claim of complete 1:1 parity. The companion [ORIGINAL_FUNCTIONALITY_MAP.md](ORIGINAL_FUNCTIONALITY_MAP.md) describes the original systems and records the current gaps and compatibility boundaries.
 
@@ -21,13 +22,14 @@ A type, module, filename, TODO comment, parser, or historical parity percentage 
 
 | Item | Verified state |
 |---|---|
-| Rust repository HEAD | `8853580f03fb66159143136165ef24077865d780` |
+| Audited Rust source snapshot | `8853580f03fb66159143136165ef24077865d780` (the Rust source parent of the documentation-only pre-audit HEAD) |
+| Repository HEAD before this documentation refresh | `42867ba9ae2576df44c9e074085da8ca134ae3ed` (documentation-only; no Rust source changes relative to the audited snapshot) |
 | Rust source files | 267 `.rs` blobs under `RUST/` in the audited Git tree |
-| Cargo manifests | 19 `RUST/*/Cargo.toml` files |
-| Workspace manifest caveat | `RUST/Cargo.toml` has 19 member entries and also lists `cnc-console` under `exclude`; do not state the resolved package count without running `cargo metadata --no-deps` on the checked-out revision |
+| Cargo manifests | 19 crate-level `RUST/*/Cargo.toml` files plus `RUST/Cargo.toml` (20 manifests under `RUST/` total); this is not a resolved workspace-package count |
+| Workspace manifest caveat | `RUST/Cargo.toml` has 19 member entries and also lists `cnc-console` under `exclude`; actual package resolution must be obtained with `cargo metadata --no-deps` |
 | Original upstream source files | 1,331 blobs at pinned upstream commit `f1f0d42bc2dcd06d5d1df943c6150ab34bf307ae` |
-| Original RA / TD source | RA: 628 files (301 `.CPP`, 295 headers, 28 assembly); TD: 411 files (193 `.CPP`, 184 headers, 28 assembly) |
-| Build/test verification in this audit | Not run. Existing `RUST/BUILD_STATUS.md` and historical parity reports are context only; they are not a fresh test result for this HEAD. |
+| Original RA / TD source | RA: 628 files (301 `.CPP`, 295 `.H`, 14 `.ASM`, 14 `.INC`); TD: 411 files (193 `.CPP`, 184 `.H`, 13 `.ASM`, 15 `.INC`). `.ASM` + `.INC` totals 28 assembly-source/include files in each engine. |
+| Build/test verification in this audit | Source and test definitions were inspected remotely; Cargo commands were **not run** because the requested local checkout is not mounted in this session. `cargo metadata --no-deps`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace --no-fail-fast` therefore remain unverified for this pass. |
 
 ## 2. Shared core
 
@@ -53,8 +55,8 @@ A type, module, filename, TODO comment, parser, or historical parity percentage 
 | Weapon, warhead and projectile behavior | `weapon.rs`, `td_rules.rs`, `game.rs` | **Implemented — focused evidence.** Weapon stats, armor-adjusted damage, travelling projectiles and impact handling have focused tests. |
 | Defensive building fire | `game.rs` combat update | **Implemented — focused regression evidence.** A test verifies that a defensive structure fires a projectile rather than applying instant direct damage. |
 | Economy, tiberium, production and construction | `game.rs`, `house.rs`, `building.rs` | **Partial implementation.** Credit spending, queues, prerequisite checks, power, harvester collection/unloading, storage and construction placement are represented and tested. |
-| Original TD scenario INI/BIN loading | `scenario_loader.rs` | **Implemented for supported records.** Reads original INI scenario data and sibling BIN cell data; raw and LCW-decoded paths, object/house/waypoint/trigger conversion and unmapped-record warnings are present. It is not full scenario-field parity. |
-| Original TD cell triggers | `scenario_loader.rs`, `game.rs` | **Implemented — focused evidence.** Cell bindings are parsed and connected to runtime trigger evaluation. |
+| Original TD scenario INI/BIN loading | `cnc-tiberian-dawn/src/scenario_loader.rs::{load_scenario,parse_scenario,scenario_to_game}` | **Implemented for supported records; not full scenario parity.** Reads the INI and sibling BIN, handles raw/LCW cell data, builds live map/house/unit/structure/waypoint/mission state, and reports unsupported records. This is a live path: `cnc-launcher/src/lib.rs::original_campaign::load_campaign` calls `load_scenario` and `scenario_to_game`. `cnc-tiberian-dawn/tests/original_scenario_game.rs::original_td_scenario_builds_game_with_terrain_overlay_units` covers the production conversion path; it was inspected, not executed in this audit. |
+| Original TD cell-trigger bindings | `scenario_loader.rs`, `mission.rs`, `game.rs` | **Implemented for supported bindings; trigger vocabulary remains partial.** `[CellTriggers]` names are resolved to mission trigger IDs and installed in the live mission; unknown names are reported and skipped. The integration fixture also demonstrates an unsupported `Player Enters` event remains explicitly unmapped rather than being guessed. |
 | Mission, objectives and trigger execution | `mission.rs`, `scenario_loader.rs`, `events.rs` | **Partial implementation.** Rust mission dialect and supported original records execute; unknown/unmapped event and action names are reported rather than guessed. |
 | TeamTypes and TaskForce runtime | `ai.rs`, `cnc-core/src/entity.rs` | **Implemented — focused evidence.** TeamTypes are parsed, teams spawn when task-force requirements are met, members are assigned, objectives issue commands and completed teams retire. |
 | TD expert AI | `ai.rs`, `cnc-core/src/house_ai.rs` | **Partial implementation.** There is a working TD adapter and tests for power/income/harvester/attack decisions; full original urgency, base-layout and special-flag behavior is not established. |
@@ -93,9 +95,9 @@ A type, module, filename, TODO comment, parser, or historical parity percentage 
 | Terrain, overlay, object, erase, selection and waypoint tools | `tools.rs`, `app.rs` | **Implemented for current tool set.** Painting, drag, selection, occupancy and bounds behaviors have focused tests. |
 | Trigger inspector and authoring | `app.rs`, `map.rs`, `tools.rs` | **Implemented — partial parity.** Trigger data and inspector controls are editable; exact parity with every original dialog/control is not claimed. |
 | TeamType/TaskForce model operations and INI serialization | `map.rs`, `history.rs`, `tests/teamtypes.rs` | **Implemented at model/serialization level.** This does not establish a complete counterpart for the original TeamTypes dialog. |
-| Original RA MPR import/export | `map.rs`, `original.rs` | **Implemented for supported records with fixture round-trip tests.** |
-| Original TD INI/BIN import/export | `map.rs`, `original.rs` | **Implemented for supported records with raw and LCW fixture round-trip tests.** |
-| Original-format import through the editor UI | `app.rs` | **Implemented — focused evidence.** Import is wired through the UI/command path and malformed inputs leave the model unchanged. |
+| Original RA MPR/INI import/export | `cnc-map-editor/src/{map,original,plugin}.rs` | **Implemented for supported records with fixture round-trip tests.** The plugin dispatches `.mpr`/original RA INI to the RA reader; `tests/original_formats.rs::editor_roundtrips_original_ra_fixture` reopens and compares the model and preserved sections. |
+| Original TD INI/BIN import/export | `cnc-map-editor/src/{map,original,plugin}.rs` | **Implemented for supported records.** The editor reads the sibling `.BIN`, decodes raw or LCW-compressed cell data, and writes both `.INI` and `.BIN`; fixture tests cover round-trip and raw/LCW equivalence. |
+| Original-format import through the editor UI | `cnc-map-editor/src/app.rs::{import_original_with_dialog,handle_import_choice,import_original_path}` and `plugin.rs::{load_scenario,save_scenario}` | **Implemented — focused UI and file-flow evidence.** `Action::ImportOriginalMap` opens a native dialog; the app pairs a TD `.INI` with its sibling `.BIN`, dispatches RA `.MPR`/INI, and applies import as an undoable command. `app.rs::import_dialog_and_path_flow_reads_both_original_dialects`, `app.rs::import_button_is_on_the_toolbar_and_renders`, and `tests/original_formats.rs` cover the UI/file path, round-trip and error handling. These tests were inspected, not run. Full C# editor parity is not implied. |
 | Preserve unknown INI sections | `original.rs`, `tests/original_formats.rs` | **Implemented — focused evidence.** The editor preserves sections the model does not understand during round-trip. |
 | Agent Studio | `app.rs`, `cnc-ai/src/` | **Implemented as a Rust-specific feature, partial parity.** Script editing, checks, dry-run feedback and save/undo paths exist; it is not a port of an original C# dialog. |
 
@@ -159,14 +161,24 @@ These are intentionally listed here so this file cannot be mistaken for a blanke
 
 The following earlier claims are stale and must not be repeated:
 
-- Original TD INI/BIN scenario loading is implemented for supported records in `cnc-tiberian-dawn/src/scenario_loader.rs`; it is not wholly “not ported.”
-- Original TD and RA map import/export exists in `cnc-map-editor/src/map.rs` and `original.rs`, with fixtures and UI import tests.
+- Original TD scenario loading is implemented for supported records in `cnc-tiberian-dawn/src/scenario_loader.rs` and is called by the launcher's original-campaign discovery path; it is not wholly “not ported.”
+- Original TD and RA map import/export is connected to the editor's file/plugin path. `Action::ImportOriginalMap` reaches the native dialog and dialect-specific import; fixtures cover both formats, including TD raw/LCW BIN data and round-trip behavior.
+- Keep the two TD flows distinct: the engine `scenario_loader` constructs live game state, while the map-editor importer constructs an editable `MapModel`. Neither proves complete original scenario-field, trigger or full C# editor parity.
 - RA original scenario parsing/construction includes `[Houses]` and `[Base]` supported paths in `original_scenario.rs` and `scenario_mpr.rs`.
 - Font parsing is implemented in `cnc-asset/src/font.rs`; it is not merely planned.
 - Older Rust module paths such as `object.rs`, `cell.rs`, `classic_mix.rs`, `iff.rs`, `iconset.rs` and various standalone editor models do not describe the current module layout. Always point to current source paths.
 - The October 24, 2026 parity audit is historical evidence. Its claims must be checked against current HEAD before reuse.
 
-## 11. Verification required before changing a status
+## 11. Targeted end-to-end audit evidence (2026-11-14)
+
+| Original contract | Rust path and runtime caller | Focused evidence found | Audit conclusion |
+|---|---|---|---|
+| TD scenario lifecycle and cell image: `TIBERIANDAWN/SCENARIO.CPP::Read_Scenario` / `Read_Scenario_Ini`; `TIBERIANDAWN/MAP.CPP::Read_Binary` | `cnc-tiberian-dawn/src/scenario_loader.rs::{load_scenario,scenario_to_game}`; launcher `cnc-launcher/src/lib.rs::original_campaign::load_campaign` | `cnc-tiberian-dawn/tests/original_scenario_game.rs::original_td_scenario_builds_game_with_terrain_overlay_units` loads the fixture pair and checks terrain/icon data, houses, units, buildings, waypoints, objectives and mapped/unmapped triggers | **Real engine/launcher integration for supported records.** The unsupported `Player Enters` event remains a recorded gap; the test was inspected, not run. |
+| Original map editor open/save: `CnCTDRAMapEditor/MainForm.cs::LoadFile` / `SaveFile` and `Model/Map.cs` | `cnc-map-editor/src/app.rs` import actions/dialog/path; `plugin.rs::{load_scenario,save_scenario}`; `map.rs::{from_original_td,from_original_ra}` | `cnc-map-editor/tests/original_formats.rs::{editor_roundtrips_original_td_fixture,editor_roundtrips_original_ra_fixture}`; app tests for dialog/path, toolbar, missing BIN and undo | **Real editor UI/file flow for supported TD/RA formats.** This does not establish complete dialog/tool/Steam Workshop parity with the original C# editor. |
+
+The original sources were fetched from the pinned upstream commit, not inferred from filenames alone. In this session the local `/home/hyperion/...` checkout was unavailable, so this was a remote source audit; test definitions were inspected but none were executed.
+
+## 12. Verification required before changing a status
 
 For any feature promoted to “implemented”:
 
