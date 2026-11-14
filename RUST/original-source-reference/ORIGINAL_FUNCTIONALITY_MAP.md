@@ -268,6 +268,10 @@ The domain tables in this document are a functional guide, not a line-by-line al
 - **Original editor file path:** the pinned upstream `CnCTDRAMapEditor/MainForm.cs::LoadFile` / `SaveFile` dispatches INI/MPR/BIN file types. The Rust `cnc-map-editor/src/app.rs` import action/dialog/path reaches `plugin.rs::{load_scenario,save_scenario}` and the TD/RA readers in `map.rs`; tests in `cnc-map-editor/tests/original_formats.rs` and `app.rs` cover the supported formats and dialog path.
 - These are evidence of real runtime/editor integration for supported scenarios, not blanket 1:1 compatibility. Unsupported trigger vocabulary, unconsumed fields, and legacy UI/platform behavior remain separate gaps. The source/test checks in this pass were inspections only; no tests were run.
 
+### 6.4 Function-level porting catalog
+
+The [Function and Porting Contract Catalog](FUNCTION_CATALOG/README.md) is the companion function-level inventory. It pins all 1,331 source paths and can generate per-file symbol indexes for C++, C#, Python and assembly. A generated signature list is only a starting point: each function still needs a behavior contract and a target-port mapping before it can be counted as reproduced.
+
 ### 6.4 Evidence and confidence rule
 
 - **Original functionality** answers “what does the pinned upstream source do?”
