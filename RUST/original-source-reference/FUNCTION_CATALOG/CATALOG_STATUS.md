@@ -5,6 +5,7 @@
 - [x] Source groups classified (Red Alert, Tiberian Dawn, map editor, tools/build/resources).
 - [x] Function contract template defined.
 - [x] Run the extractor against a checkout containing the pinned source files. (Generated 2026-11-14: 15,219 symbols from 1,073 files)
+- [x] Integrate original-source-reference documentation into generated indexes.
 - [ ] Review every extracted declaration/definition pair and callable macro.
 - [ ] Document each function's responsibility, inputs, outputs, state effects, and call relationships.
 - [ ] Map original contracts to current Rust call paths and mark gaps.
