@@ -14,6 +14,8 @@ This directory explains the original Electronic Arts / Westwood Command & Conque
 7. [Map editor source guide](CnCTDRAMapEditor/README.md)
 8. [Shared graphics and asset formats](SHARED/README.md)
 9. [Cross-reference: original files to Rust port](03-rust-port-cross-reference.md)
+10. [Implemented Rust functionality and evidence](IMPLEMENTED_FUNCTIONALITY_MAP.md)
+11. [Original functionality and current port gaps](ORIGINAL_FUNCTIONALITY_MAP.md)
 
 ## What each file guide contains
 
@@ -35,3 +37,8 @@ This directory explains the original Electronic Arts / Westwood Command & Conque
 ## Important
 
 This is a living reverse-engineering reference, not a claim that every original file has already been exhaustively explained. The inventory records every upstream path. Detailed pages are added only after inspecting the corresponding source, so unknown functions are not guessed. Tiberian Dawn and Red Alert are documented independently where their behavior differs.
+
+
+## Port-status workflow
+
+Use the original functionality map as the upstream feature specification and the implemented functionality map as the current Rust evidence ledger. A module or parser alone does not establish feature completion: trace the original source symbol to Rust code, follow the runtime call path, and identify focused tests/fixtures. Keep “source reviewed,” “Rust implemented,” and “test executed” as separate states.

@@ -3,7 +3,7 @@
 **Generated:** 2026-10-09 · **Commit:** f1f0d42 · **Branch:** ?
 
 ## OVERVIEW
-Red Alert game engine (C++): 519 files, flat directory with ALL-CAPS filenames. Core game logic for Command & Conquer: Red Alert. Implements unit/building AI, combat simulation, pathfinding, audio, animation, networking, resource management, and Win32 platform abstraction.
+Red Alert game engine (C++): 628 tracked files (301 .CPP, 295 headers, 28 assembly), flat directory with ALL-CAPS filenames. Core game logic for Command & Conquer: Red Alert. Implements unit/building AI, combat simulation, pathfinding, audio, animation, networking, resource management, and Win32 platform abstraction.
 
 ## STRUCTURE
 
@@ -27,4 +27,9 @@ Red Alert game engine (C++): 519 files, flat directory with ALL-CAPS filenames. 
 ## COMMANDS
 
 ## NOTES
-- hig file concentration: REDALERT/ (519) — rely on per-dir codemaps rather than browsing.
+- hig file concentration: REDALERT/ (628; 301 .CPP files) — rely on per-dir codemaps rather than browsing.
+
+
+## Rust parity workflow
+
+When auditing a Red Alert feature against the port, use `RUST/original-source-reference/ORIGINAL_FUNCTIONALITY_MAP.md` for the original behavior and `RUST/original-source-reference/IMPLEMENTED_FUNCTIONALITY_MAP.md` for current Rust evidence. Trace original symbols → Rust implementation → actual `Game::update`/scenario/command call path → focused test. Do not count parser/model presence as completed gameplay. Audit RA separately from TD; the current RA House AI adapter contains known success-only stubs, and unsupported trigger actions must remain classified as gaps until they have real effects and tests. Record exact commit and test execution status.

@@ -3,7 +3,7 @@
 **Generated:** 2026-10-09 · **Commit:** f1f0d42 · **Branch:** ?
 
 ## OVERVIEW
-C# Windows Forms map editor for Tiberian Dawn and Red Alert. 257 files across 14 subdirs. Model layer defines map format, terrain, triggers, and object placement. Game-specific namespaces mirror engine types. Steamworks.NET for Workshop publishing.
+C# Windows Forms map editor for Tiberian Dawn and Red Alert. 286 tracked files across the editor tree, including 257 C# source files. Model layer defines map format, terrain, triggers, and object placement. Game-specific namespaces mirror engine types. Steamworks.NET for Workshop publishing.
 
 ## STRUCTURE
 
@@ -28,4 +28,9 @@ C# Windows Forms map editor for Tiberian Dawn and Red Alert. 257 files across 14
 ## COMMANDS
 
 ## NOTES
-- hig file concentration: CnCTDRAMapEditor/ (257) — rely on per-dir codemaps rather than browsing.
+- hig file concentration: CnCTDRAMapEditor/ (286 total; 257 .cs files) — rely on per-dir codemaps rather than browsing.
+
+
+## Rust parity workflow
+
+When auditing the editor against the Rust port, use `RUST/original-source-reference/ORIGINAL_FUNCTIONALITY_MAP.md` and `RUST/original-source-reference/IMPLEMENTED_FUNCTIONALITY_MAP.md`. The Rust editor already imports/exports supported original TD INI/BIN and RA MPR data with fixture tests and has an original-map UI import path; do not classify all original map I/O as missing. Distinguish format/model coverage from complete C# UI, dialogs, validation, Steamworks and workflow parity. All Rust editor model mutations must continue through undoable commands. Record exact commit and executed test results.
