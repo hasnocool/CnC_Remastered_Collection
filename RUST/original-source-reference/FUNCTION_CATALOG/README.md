@@ -37,7 +37,7 @@ Run from the repository root after checking out the exact source tree under orig
 python3 RUST/original-source-reference/FUNCTION_CATALOG/scripts/generate_function_catalog.py
 \`\`\`
 
-The generator uses Universal Ctags to enumerate C++, C#, Python, and assembly symbols. It reads only source paths in the pinned manifest, checks for missing inputs, and writes generated indexes without overwriting this README, the manifest, or manually maintained contract documents.
+The generator uses Universal Ctags to enumerate C++, C#, Python, and assembly symbols (including assembly include files). Its JSON output support requires a Universal Ctags build compiled with libjansson. It reads only source paths in the pinned manifest, checks for missing inputs, and writes generated indexes without overwriting this README, the manifest, or manually maintained contract documents.
 
 Install Universal Ctags:
 
