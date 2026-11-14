@@ -109,6 +109,8 @@ def is_callable_tag(tag: dict[str, Any]) -> tuple[bool, str]:
     kind = str(tag.get("kind", "")).strip().lower()
     name = str(tag.get("name", ""))
 
+    if language == "Python" and kind == "member" and tag.get("signature"):
+        return True, "callable"
     if kind in FUNCTION_KINDS.get(language, set()):
         return True, "callable"
     if kind in MACRO_KINDS and tag.get("signature"):
