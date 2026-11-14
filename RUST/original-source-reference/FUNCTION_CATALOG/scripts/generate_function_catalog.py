@@ -11,7 +11,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
+import io
 import json
+import os
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -24,6 +26,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_SOURCE_ROOT = REPOSITORY_ROOT / "original"
 DEFAULT_MANIFEST = CATALOG_ROOT / "SOURCE_FILE_MANIFEST.csv"
 DEFAULT_OUTPUT = CATALOG_ROOT
+DEFAULT_DOCS_ROOT = REPOSITORY_ROOT / "RUST" / "original-source-reference"
 
 GROUPS = ("REDALERT", "TIBERIANDAWN", "MAP_EDITOR", "SCRIPTS_AND_TOOLS")
 FUNCTION_KINDS = {
@@ -49,6 +52,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--ctags", default="ctags", help="Universal Ctags executable.")
+    parser.add_argument(
+        "--docs-root",
+        type=Path,
+        default=DEFAULT_DOCS_ROOT,
+        help="Directory containing the original-source-reference documentation "
+        "(file-by-file guides such as REDALERT/OBJECT.md).",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -135,6 +145,50 @@ def is_callable_tag(tag: dict[str, Any]) -> tuple[bool, str]:
     return False, ""
 
 
+def load_documentation(docs_root: Path) -> dict[str, str]:
+    """Build a map from normalized documentation path -> doc path string.
+
+    Docs mirror the source path structure under docs_root:
+    REDALERT/OBJECT.CPP -> docs_root/REDALERT/OBJECT.md
+    CnCTDRAMapEditor/Controls/BasicSettings.cs ->
+        docs_root/CnCTDRAMapEditor/Controls/BasicSettings.md
+
+    Returns a dict mapping the normalized doc path (relative to REPOSITORY_ROOT)
+    to itself, so we can look up whether a source file has documentation.
+    """
+    docs_by_path: dict[str, str] = {}
+    if not docs_root.is_dir():
+        return docs_by_path
+
+    for doc_path in docs_root.rglob("*.md"):
+        if doc_path.name == "README.md":
+            continue
+        rel = doc_path.relative_to(REPOSITORY_ROOT)
+        docs_by_path[str(rel)] = str(rel)
+    return docs_by_path
+
+
+def doc_path_for(
+    docs_by_path: dict[str, str],
+    row: dict[str, str],
+    docs_root: Path,
+) -> str | None:
+    """Return documentation markdown path for a manifest row, or None."""
+    source_path = normalize_path(row["source_path"])
+    path = Path(source_path)
+    stem = path.stem
+    # Build candidate doc path: docs_root/<source_dir>/<stem>.md
+    doc_candidate = docs_root / path.with_suffix(".md")
+    try:
+        doc_rel = doc_candidate.relative_to(REPOSITORY_ROOT)
+    except ValueError:
+        return None
+    doc_key = str(doc_rel)
+    if doc_key in docs_by_path:
+        return doc_key
+    return None
+
+
 async def run_process(*command: str, cwd: Path) -> tuple[int, bytes, bytes]:
     process = await asyncio.create_subprocess_exec(
         *command,
@@ -214,6 +268,8 @@ def build_outputs(
     tags: list[dict[str, Any]],
     ctags_version: str,
     missing: list[str],
+    docs_root: Path,
+    docs_by_path: dict[str, str],
 ) -> dict[str, int]:
     manifest_by_path = {normalize_path(row["source_path"]): row for row in rows}
     callable_by_path: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -232,6 +288,9 @@ def build_outputs(
         if not accepted:
             continue
 
+        group = group_for(row)
+        doc_rel = doc_path_for(docs_by_path, row, docs_root)
+
         record = {
             "source_path": raw_path,
             "subsystem": row["subsystem"],
@@ -246,6 +305,7 @@ def build_outputs(
             "access": tag.get("access", ""),
             "typeref": tag.get("typeref", ""),
             "review_state": "SIGNATURE_CATALOGUED",
+            "documentation": doc_rel,
         }
         callable_by_path[raw_path].append(record)
         if category == "function-like macro":
@@ -279,6 +339,8 @@ def build_outputs(
         path = normalize_path(row["source_path"])
         count = len(callable_by_path.get(path, []))
         exists = (source_root / Path(path)).is_file()
+        group = group_for(row)
+        doc_rel = doc_path_for(docs_by_path, row, docs_root)
         if path in missing_set or not exists:
             status = "MISSING_PINNED_SOURCE"
         elif row["inventory_role"] != "callable-source-or-assembly":
@@ -297,6 +359,7 @@ def build_outputs(
                 "callable_symbols": count,
                 "function_like_macros": macro_by_path[path],
                 "assembly_label_candidates": asm_by_path[path],
+                "documentation": doc_rel if doc_rel else "",
                 "catalog_status": status,
             }
         )
@@ -315,19 +378,21 @@ def build_outputs(
             f"**Pinned source:** {PINNED_SOURCE_COMMIT}  ",
             "**Interpretation:** extracted signatures only; behavior contracts remain to be reviewed.",
             "",
-            "| Source file | Line | Kind | Symbol | Scope | Signature | Review state |",
-            "|---|---:|---|---|---|---|---|",
+            "| Source file | Line | Kind | Symbol | Scope | Signature | Documentation | Review state |",
+            "|---|---:|---|---|---|---|---|---|",
         ]
         for item in entries:
+            doc = item.get("documentation") or ""
+            doc_cell = markdown_cell(doc)
             lines.append(
                 f"| {markdown_cell(item['source_path'])} | {item['line']} | "
                 f"{markdown_cell(item['kind'])} ({markdown_cell(item['category'])}) | "
                 f"{markdown_cell(item['name'])} | {markdown_cell(item['scope'])} | "
-                f"{markdown_cell(item['signature'])} | SIGNATURE_CATALOGUED |"
+                f"{markdown_cell(item['signature'])} | {doc_cell} | SIGNATURE_CATALOGUED |"
             )
         if not entries:
             lines.append(
-                "| — | — | — | No callable symbol tags extracted | — | — | Manual inspection required |"
+                "| — | — | — | No callable symbol tags extracted | — | — | — | Manual inspection required |"
             )
         lines.extend(
             [
@@ -357,10 +422,9 @@ def build_outputs(
         "callable_symbols",
         "function_like_macros",
         "assembly_label_candidates",
+        "documentation",
         "catalog_status",
     ]
-    import io
-
     buffer = io.StringIO(newline="")
     writer = csv.DictWriter(
         buffer, fieldnames=coverage_header, lineterminator="\n"
@@ -378,6 +442,7 @@ def build_outputs(
         f"- Pinned source revision: {PINNED_SOURCE_COMMIT}",
         f"- Source root: {source_root}",
         f"- Ctags: {ctags_version.splitlines()[0] if ctags_version else 'unknown'}",
+        f"- Docs root: {docs_root}",
         f"- Manifest files: {len(rows)}",
         f"- Callable/candidate symbols: {len(symbols)}",
         f"- Source files missing from checkout: {len(missing)}",
@@ -411,6 +476,31 @@ def build_outputs(
     )
     for status, count in sorted(status_counts.items()):
         summary.append(f"| {status} | {count} |")
+    summary.extend(
+        [
+            "",
+            "## Documentation coverage",
+            "",
+            "| Group | Files with docs | Files without docs |",
+            "|---|---:|---:|",
+        ]
+    )
+    for group in GROUPS:
+        group_rows = [
+            row for row in coverage_rows
+            if group_for(manifest_by_path[row["source_path"]]) == group
+        ]
+        docs_present = sum(
+            1
+            for row in group_rows
+            if row["inventory_role"] == "callable-source-or-assembly" and row["documentation"]
+        )
+        docs_total = sum(
+            1
+            for row in group_rows
+            if row["inventory_role"] == "callable-source-or-assembly"
+        )
+        summary.append(f"| {group} | {docs_present} | {docs_total - docs_present} |")
     summary.extend(
         [
             "",
@@ -453,6 +543,7 @@ async def async_main() -> int:
     rows = load_manifest(args.manifest)
     source_root = args.source_root.expanduser().resolve()
     output_dir = args.output_dir.expanduser().resolve()
+    docs_root = args.docs_root.expanduser().resolve()
     if not source_root.is_dir():
         raise NotADirectoryError(f"Source root not found: {source_root}")
 
@@ -472,6 +563,10 @@ async def async_main() -> int:
     for path in missing[:40]:
         print(f"  MISSING: {path}")
 
+    docs_by_path = load_documentation(docs_root)
+    doc_count = len(docs_by_path)
+    print(f"Documentation files indexed: {doc_count}")
+
     if missing and not args.allow_missing:
         print(
             "Refusing to generate an incomplete catalog; use "
@@ -484,7 +579,9 @@ async def async_main() -> int:
         return 0
 
     tags, version = await extract_tags(args.ctags, source_root, candidates)
-    result = build_outputs(rows, source_root, output_dir, tags, version, missing)
+    result = build_outputs(
+        rows, source_root, output_dir, tags, version, missing, docs_root, docs_by_path
+    )
     print(json.dumps(result, indent=2))
     print(f"Generated indexes under: {output_dir}")
     return 0
