@@ -19,17 +19,22 @@ front-ends, the launcher, the map editor, and the viewer.
   textures, and placeholder sprites; campaign maps are authored in-repo under
   `maps/`.
 - Original game data is optional and enters only through the `cnc-asset`
-  conversion CLI, which converts `.mix`/`.shp`/`.voc`/`.aud`/`.pal` ahead of
-  time (`mix`, `shp`, `voc`, `pal`, `batch` subcommands).
+  conversion CLI, which converts `.mix`/`.shp`/`.voc`/`.aud`/`.pal` ahead
+  of time (`mix`, `shp`, `voc`, `pal`, `batch` subcommands).
 - `ASSETS/OpenRA/` is a separate, optional download. Per its README:
   OpenRA-original artwork is CC-BY-SA (3.0/4.0) with share-alike and
   attribution requirements; art derived from the original EA Command &
   Conquer titles is not covered by OpenRA's licenses.
 
 ## Documentation
+
+- [Project-wide implementation roadmap](ROADMAP.md) — current state, known gaps, priorities, and next work.
 - Per-crate docs: every crate carries README.md, CHANGELOG.md, codemap.md.
 - Rendering and tileset pack details: docs/TILESET.md.
+- Original source behavior and Rust implementation evidence:
+  `original-source-reference/README.md`.
 
 ## CI / Git
+
 - Build/test enforced via Forgejo (local.lan) using ~/APIKEYS.md credentials.
 - All pushes must pass cargo fmt, clippy, test, SemVer check.
