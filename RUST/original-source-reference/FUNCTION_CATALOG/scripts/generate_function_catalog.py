@@ -29,7 +29,7 @@ GROUPS = ("REDALERT", "TIBERIANDAWN", "MAP_EDITOR", "SCRIPTS_AND_TOOLS")
 FUNCTION_KINDS = {
     "C++": {"function", "prototype", "f", "p"},
     "C#": {"method", "property", "event", "delegate", "m", "p", "e"},
-    "Python": {"function", "method", "member", "f", "m"},
+    "Python": {"function", "method", "f", "m"},
     "Asm": {"function", "procedure", "proc", "entry", "f"},
 }
 MACRO_KINDS = {"macro", "d"}
