@@ -2,270 +2,233 @@
 original/TIBERIANDAWN/MISSION.CPP
 
 ## Purpose
-Mission/order system for Tiberian Dawn. Implements the finite state machine for unit orders (missions), including mission queue, timer management, and per-mission AI handlers.
+Mission/order system for Tiberian Dawn units. Implements a script-based order processor with timer-driven state machine, mission queue for deferred orders, and 21 mission types covering movement, combat, harvesting, guarding, and special behaviors.
 
 ## Where it fits in the game
-Mission system - every orderable object (units, infantry, aircraft, buildings) has a MissionClass instance that manages its current order, queued orders, and timer-driven state machine. The core of unit AI behavior.
+Unit AI subsystem - Every `ObjectClass` (and derivatives: `UnitClass`, `InfantryClass`, `AircraftClass`, `BuildingClass`) contains a `MissionClass` member. Called per-frame via `LogicClass::AI()` → `ObjectClass::AI()` → `MissionClass::AI()`.
 
 ## Classes, structs, enums and important data
 
 ### MissionClass
-**Core mission/order state** - attached to every orderable object.
+**Order processor** - Embedded in every `ObjectClass`.
 
 **Key data members:**
-- `Mission` (MissionType) - Current active mission
-- `MissionQueue` (MissionType) - Queued mission (pending)
-- `SuspendedMission` (MissionType) - Temporarily overridden mission
-- `Timer` - Mission timer (ticks until next state)
-- `Status` (int) - Mission state machine status
-- `MissionQueue` (MissionType) - Queued mission
-- `SuspendedMission` (MissionType) - Overridden mission
-- `Timer` - Mission timer
-- `Status` (int) - State machine status
+| Field | Purpose |
+|-------|---------|
+| `Mission` (MissionType) | Current active order |
+| `MissionQueue` (MissionType) | Deferred order (set by `Assign_Mission`) |
+| `SuspendedMission` (MissionType) | Temporarily overridden mission |
+| `Timer` (CountDownTimerClass) | State machine delay timer |
+| `Status` (int) | Script state index |
+| `Strength` | Unit health/strength (inherited) |
 
-### MissionType enum (24 types)
-| Mission | Description | Timer |
-|---------|-------------|-------|
-| MISSION_NONE | No mission | - |
-| MISSION_SLEEP | Idle | 30s |
-| MISSION_ATTACK | Attack target | 30s |
-| MISSION_MOVE | Move to location | 30s |
-| MISSION_RETREAT | Retreat | 30s |
-| MISSION_GUARD | Guard area | 30s |
-| MISSION_STICKY | Sticky guard | 30s |
-| MISSION_ENTER | Enter transport/building | 30s |
-| MISSION_CAPTURE | Capture building | 30s |
-| MISSION_HARVEST | Harvest tiberium | 30s |
-| MISSION_GUARD_AREA | Guard area | 30s |
-| MISSION_RETURN | Return to base | 30s |
-| MISSION_STOP | Stop | 30s |
-| MISSION_AMBUSH | Ambush | 30s |
-| MISSION_HUNT | Hunt enemies | 30s |
-| MISSION_TIMED_HUNT | Timed hunt | 30s |
-| MISSION_UNLOAD | Unload cargo | 30s |
-| MISSION_SABOTAGE | Sabotage | 30s |
-| MISSION_CONSTRUCTION | Construction | 30s |
-| MISSION_SELLING | Selling | 30s |
-| MISSION_REPAIR | Repair | 30s |
-| MISSION_RESCUE | Rescue | 30s |
-| MISSION_MISSILE | Missile | 30s |
+### MissionType enum (21 types, MISSION_COUNT=21)
+| Mission | Description | Timer (ticks) |
+|---------|-------------|---------------|
+| `MISSION_NONE` | No order | - |
+| `MISSION_SLEEP` | Idle wait | 30 sec |
+| `MISSION_ATTACK` | Attack target | 30 sec |
+| `MISSION_MOVE` | Move to location | 30 sec |
+| `MISSION_RETREAT` | Flee from threat | 30 sec |
+| `MISSION_GUARD` | Guard target | 30 sec |
+| `MISSION_STICKY` | Persistent guard | 30 sec |
+| `MISSION_ENTER` | Enter structure | 30 sec |
+| `MISSION_CAPTURE` | Capture building | 30 sec |
+| `MISSION_HARVEST` | Harvest tiberium | 30 sec |
+| `MISSION_GUARD_AREA` | Area patrol | 30 sec |
+| `MISSION_RETURN` | Return to base | 30 sec |
+| `MISSION_STOP` | Halt | 30 sec |
+| `MISSION_AMBUSH` | Wait in ambush | 30 sec |
+| `MISSION_HUNT` | Seek & destroy | 30 sec |
+| `MISSION_RESCUE` | Rescue unit | 30 sec |
+| `MISSION_TIMED_HUNT` | Timed hunt | 30 sec |
+| `MISSION_UNLOAD` | Unload passengers | 30 sec |
+| `MISSION_SABOTAGE` | Sabotage building | 30 sec |
+| `MISSION_CONSTRUCTION` | Build structure | 30 sec |
+| `MISSION_SELLING` | Sell building | 30 sec |
+| `MISSION_REPAIR` | Repair structure | 30 sec |
+| `MISSION_MISSILE` | Missile strike | 30 sec |
 
-**Constants:**
-- `MISSION_FIRST` - First mission enum
-- `MISSION_COUNT` - Total missions (24)
-- `MISSION_NONE` - No mission
-- `TICKS_PER_SECOND` - Ticks per second (60)
-- `TICKS_PER_MINUTE` - Ticks per minute (3600)
+**Special constants:**
+- `MISSION_NONE` = -1 (invalid)
+- `MISSION_FIRST` = 0
+- `MISSION_COUNT` = 21
+- `TICKS_PER_SECOND` = 15 (15 FPS)
+- Default timer = `TICKS_PER_SECOND * 30` = 450 ticks (30 seconds)
 
-### Mission timer constants
-All missions default to `TICKS_PER_SECOND * 30` (30 seconds) unless overridden.
+### MissionClass::Missions[] (string names)
+Maps `MissionType` → display string (e.g., "Attack", "Move", "Area Guard").
 
 ## Functions and methods
 
-### Core Mission Management
+### MissionClass()
+**Constructor** - Initializes to idle state:
+- `Mission = MISSION_NONE`
+- `MissionQueue = MISSION_NONE`
+- `SuspendedMission = MISSION_NONE`
+- `Status = 0`, `Timer = 0`
 
-**MissionClass::MissionClass()** - Default constructor
-- `Status=0, Timer=0, Mission=MISSION_NONE, SuspendedMission=MISSION_NONE, MissionQueue=MISSION_NONE`
+### Set_Mission(mission)
+**Immediate order change** - Bypasses queue:
+1. `Mission = mission`
+2. `MissionQueue = MISSION_NONE`
 
-**MissionClass::Set_Mission(mission)** - Immediate mission change
-- Sets `Mission = mission`, clears `MissionQueue`
-- Bypasses queue, immediate change
+### Get_Mission() → MissionType
+**Current active mission** - Returns `Mission` if active, else `MissionQueue`.
 
-**MissionClass::Get_Mission()** → MissionType
-- Returns current mission, or `MissionQueue` if none active
+### Assign_Mission(order)
+**Queues new order** - Non-immediate:
+1. Returns if `order == MISSION_NONE` or `Mission == order`
+2. `MissionQueue = order`
+3. (Commented) `Status = 0`
 
-**MissionClass::Assign_Mission(order)** - Queue mission
-- If `order == MISSION_NONE` or same as current: returns
-- Sets `MissionQueue = order` (processed by AI)
+### Commence() → bool
+**Processes queued order** - Call when unit ready to change order:
+1. If `MissionQueue != MISSION_NONE`:
+   - `Mission = MissionQueue`, `MissionQueue = MISSION_NONE`
+   - `Timer = 0`, `Status = 0` (reset state machine)
+   - Returns true
+2. Returns false
 
-**MissionClass::Commence()** → bool
-- Processes queued mission: `Mission = MissionQueue`, `MissionQueue = NONE`
-- Resets `Timer=0, Status=0`
-- Returns true if mission changed
+### Override_Mission(mission, tarcom, navcom)
+**Temporary mission override**:
+1. Saves current (`MissionQueue` or `Mission`) to `SuspendedMission`
+2. `Assign_Mission(mission)` (queues new)
 
-**MissionClass::Override_Mission(mission, tarcom, navcom)** - Temporary override
-- Saves current mission to `SuspendedMission`
-- Calls `Assign_Mission(mission)`
+### Restore_Mission() → bool
+**Restores suspended mission**:
+1. If `SuspendedMission != MISSION_NONE`:
+   - `Assign_Mission(SuspendedMission)`
+   - `SuspendedMission = MISSION_NONE`
+   - Returns true
+2. Returns false
 
-**MissionClass::Restore_Mission()** → bool
-- Restores `SuspendedMission` via `Assign_Mission()`
-- Clears `SuspendedMission`
-- Returns true if restored
+### Mission_From_Name(name) → MissionType
+**String → enum** - Linear search through `Missions[]` array (case-insensitive).
 
-### Mission AI Processing
+### Mission_Name(mission) → char const*
+**Enum → string** - Returns `Missions[mission]` or "None".
 
-**MissionClass::AI()** - **Core mission state machine** (called per frame)
-- Calls `ObjectClass::AI()`
-- If `Timer.Expired() && Strength > 0`:
-  - Switches on `Mission`, calls mission-specific handler
-  - Sets `Timer = Mission_XXX()` for each mission type
-- All missions default to `TICKS_PER_SECOND * 30` (30 seconds)
+### AI()
+**Per-frame order processor** - Called from `ObjectClass::AI()`.
 
-**Mission handlers (all return ticks until next call):**
-- `MISSION_STICKY`, `MISSION_SLEEP`: `Mission_Sleep()` (30s)
-- `MISSION_GUARD`: `Mission_Guard()` (30s)
-- `MISSION_ENTER`: `Mission_Enter()` (30s)
-- `MISSION_CONSTRUCTION`: `Mission_Construction()` (30s)
-- `MISSION_DECONSTRUCTION`: `Mission_Deconstruction()` (30s)
-- `MISSION_CAPTURE`, `MISSION_SABOTAGE`: `Mission_Capture()` (30s)
-- `MISSION_MOVE`: `Mission_Move()` (30s)
-- `MISSION_ATTACK`: `Mission_Attack()` (30s)
-- `MISSION_RETREAT`: `Mission_Retreat()` (30s)
-- `MISSION_HARVEST`: `Mission_Harvest()` (30s)
-- `MISSION_GUARD_AREA`: `Mission_Guard_Area()` (30s)
-- `MISSION_RETURN`: `Mission_Return()` (30s)
-- `MISSION_STOP`: `Mission_Stop()` (30s)
-- `MISSION_AMBUSH`: `Mission_Ambush()` (30s)
-- `MISSION_HUNT`, `MISSION_RESCUE`: `Mission_Hunt()` (30s)
-- `MISSION_TIMED_HUNT`: `Mission_Timed_Hunt()` (30s)
-- `MISSION_UNLOAD`: `Mission_Unload()` (30s)
-- `MISSION_SABOTAGE`: `Mission_Capture()` (30s)
-- `MISSION_CONSTRUCTION`: `Mission_Construction()` (30s)
-- `MISSION_SELLING`: `Mission_Selling()` (30s)
-- `MISSION_REPAIR`: `Mission_Repair()` (30s)
-- `MISSION_MISSILE`: `Mission_Missile()` (30s)
+**Logic:**
+1. `ObjectClass::AI()` (base movement/behavior)
+2. If `Timer.Expired() && Strength > 0`:
+   - Switches on `Mission`, sets `Timer` to mission-specific duration
+   - All missions use `TICKS_PER_SECOND * 30` (30 seconds)
+   - `MISSION_STICKY`/`SLEEP` → `Mission_Sleep()`
+   - `MISSION_GUARD` → `Mission_Guard()`
+   - `MISSION_ENTER` → `Mission_Enter()`
+   - `MISSION_CONSTRUCTION` → `Mission_Construction()`
+   - `MISSION_DECONSTRUCTION` → `Mission_Deconstruction()`
+   - `MISSION_CAPTURE`/`SABOTAGE` → `Mission_Capture()`
+   - `MISSION_MOVE` → `Mission_Move()`
+   - `MISSION_ATTACK` → `Mission_Attack()`
+   - `MISSION_RETREAT` → `Mission_Retreat()`
+   - `MISSION_HARVEST` → `Mission_Harvest()`
+   - `MISSION_GUARD_AREA` → `Mission_Guard_Area()`
+   - `MISSION_RETURN` → `Mission_Return()`
+   - `MISSION_STOP` → `Mission_Stop()`
+   - `MISSION_AMBUSH` → `Mission_Ambush()`
+   - `MISSION_HUNT`/`RESCUE` → `Mission_Hunt()`
+   - `MISSION_TIMED_HUNT` → `Mission_Timed_Hunt()`
+   - `MISSION_UNLOAD` → `Mission_Unload()`
+   - `MISSION_REPAIR` → `Mission_Repair()`
+   - `MISSION_MISSILE` → `Mission_Missile()`
 
-**Note:** Specific implementations in derived classes (UnitClass, InfantryClass, etc.)
+### Debug_Dump(mono) (CHEAT_KEYS)
+**Monochrome debug output**:
+- Mission/Queue names (5-char truncated)
+- Timer value
+- Status
+- Calls `ObjectClass::Debug_Dump()`
 
-### Mission Management
+## Mission timer constants
+All missions use `TICKS_PER_SECOND * 30` = 450 ticks (30 seconds at 15 FPS).
 
-**MissionClass::Set_Mission(mission)** - Immediate change
-- `Mission = mission`, `MissionQueue = MISSION_NONE`
+```cpp
+int MissionClass::Mission_Sleep(void) {return TICKS_PER_SECOND*30;};
+// ... all 21 missions return same value
+```
 
-**MissionClass::Get_Mission()** → MissionType
-- Returns `Mission` or `MissionQueue` if none
-
-**MissionClass::Assign_Mission(order)** - Queues mission
-- If `order == NONE` or same as current: returns
-- Sets `MissionQueue = order`
-
-**MissionClass::Commence()** → bool
-- Processes queue: `Mission = MissionQueue`, `MissionQueue = NONE`
-- Resets `Timer=0, Status=0`
-- Returns true if changed
-
-**MissionClass::Override_Mission(mission, tarcom, navcom)** - Temporary override
-- Saves current to `SuspendedMission`
-- Calls `Assign_Mission(mission)`
-
-**MissionClass::Restore_Mission()** → bool
-- Restores `SuspendedMission` via `Assign_Mission()`
-- Returns true if restored
-
-**MissionClass::Assign_Mission(order)** - Queue mission
-- No-op if NONE or same as current
-- Sets `MissionQueue = order`
-
-### Utility
-
-**MissionClass::Mission_From_Name(name)** → MissionType
-- Converts string name to enum (case-insensitive)
-- Searches `Missions[MISSION_COUNT]` array
-
-**MissionClass::Mission_Name(mission)** → const char*
-- Returns string name from `Missions[mission]` array
-- "None" for MISSION_NONE
-
-**MissionClass::Mission_Name(mission)** → const char*
-- Returns string from `Missions[]` array
-
-### Constants
-
-**Mission timer defaults:**
-All return `TICKS_PER_SECOND * 30` (30 seconds = 1800 ticks)
-
-**Mission name array:**
-`Missions[MISSION_COUNT]` - String names for INI/debug
+## Mission queue vs immediate
+| Method | Behavior |
+|--------|----------|
+| `Set_Mission()` | Immediate, clears queue |
+| `Assign_Mission()` | Queues for next `Commence()` |
+| `Commence()` | Processes queue if ready |
+| `Override_Mission()` | Saves current, queues new |
+| `Restore_Mission()` | Restores suspended |
 
 ## Inputs, outputs and side effects
 
 **State mutations:**
-- Mission, MissionQueue, SuspendedMission
-- Timer, Status
-- Mission state machine progression
+- `Mission`, `MissionQueue`, `SuspendedMission`
+- `Timer` (countdown)
+- `Status` (script state)
+- `Strength` check (dead units skip)
 
 **External systems affected:**
-- Object AI processing
-- Pathfinding (NavCom)
-- Targeting (TarCom)
-- Movement (FootClass/UnitClass)
+- Unit movement (`MISSION_MOVE`, `MISSION_RETREAT`, etc.)
+- Combat (`MISSION_ATTACK`, `MISSION_AMBUSH`, `MISSION_HUNT`)
+- Economy (`MISSION_HARVEST`)
+- Construction (`MISSION_CONSTRUCTION`, `MISSION_REPAIR`, `MISSION_SELLING`)
+- Base defense (`MISSION_GUARD`, `MISSION_GUARD_AREA`)
 
 ## Calls into / called by
 
 **Called by:**
-- Object AI: `MissionClass::AI()` per frame
-- Player input: `Assign_Mission()`, `Set_Mission()`
-- Commence: `Commence()` after queue
-- Override: `Override_Mission()`, `Restore_Mission()`
+- `LogicClass::AI()` → `ObjectClass::AI()` → `MissionClass::AI()`
+- Player input → `Assign_Mission()` / `Set_Mission()`
+- AI planning → `Assign_Mission()` / `Override_Mission()`
+- Order completion → `Commence()`
 
 **Calls into:**
-- ObjectClass: `AI()`
-- Derived mission handlers: `Mission_Move()`, `Mission_Attack()`, etc.
-- Timer system: `Timer.Expired()`
+- `CountDownTimerClass::Expired()`
+- `ObjectClass::AI()` (base)
+- `Timer = Mission_*()` (timer reset)
 
 ## Related original files
-- **MISSION.H** - Class declarations, MissionType enum
-- **OBJECT.CPP/.H** - Base ObjectClass
-- **FOOT.CPP/.H** - FootClass (movement)
-- **UNIT.CPP/.H** - UnitClass (vehicle missions)
-- **INFANTRY.CPP/.H** - InfantryClass (infantry missions)
-- **AIRCRAFT.CPP/.H** - AircraftClass (air missions)
-- **BUILDING.CPP/.H** - BuildingClass (building missions)
-- **TECHNO.CPP/.H** - TechnoClass (base techno missions)
-- **FOOT.CPP/.H** - FootClass (movement missions)
-- **TARCOM.CPP** - Target/navigation computer
+- **MISSION.H** - Class declaration, MissionType enum
+- **OBJECT.H/.CPP** - ObjectClass (contains MissionClass)
+- **UNIT.H/.CPP** - UnitClass (specific mission implementations)
+- **INFANTRY.H/.CPP** - InfantryClass
+- **AIRCRAFT.H/.CPP** - AircraftClass
+- **BUILDING.H/.CPP** - BuildingClass
+- **TIMER.H** - CountDownTimerClass
+- **TARGET.H** - TARGET type for tarcom/navcom
 
 ## Rust port mapping
 **Crates:** `cnc-tiberian-dawn`, `cnc-core`
 
 **Mapped modules:**
-- `cnc-core/src/ai/mission.rs` - MissionClass core
+- `cnc-core/src/ai/mission.rs` - MissionClass, MissionType
 - `cnc-tiberian-dawn/src/ai/td_mission.rs` - TD-specific missions
-- `cnc-core/src/ai/state_machine.rs` - Mission state machine
-- `cnc-core/src/ai/timer.rs` - Mission timer
-- `cnc-core/src/ai/mission_types.rs` - MissionType enum
+- `cnc-core/src/ai/state_machine.rs` - Timer/Status state machine
 
 **Not yet ported:**
-- Full mission state machine (24 states)
-- Per-mission AI handlers (Move, Attack, Harvest, etc.)
-- Mission queue/override/restore system
-- 30-second timer default
-- Mission name/string conversion
-- Commence/Override/Restore mechanics
+- 21 mission type enum with string mapping
+- Timer-driven state machine (Status + Timer)
+- Mission queue with Commence() processing
+- Override/Restore suspend stack (single level)
+- 30-second uniform timer for all missions
+- Mission_From_Name/Mission_Name string mapping
+- Cheat debug dump
+- Strength check (dead units skip AI)
 
 ## Edge cases and compatibility notes
 
-1. **30-second timer**: All missions default to 30-second timer (`TICKS_PER_SECOND * 30`). Specific implementations override.
-
-2. **Mission queue**: `Assign_Mission()` queues; `Commence()` processes. Allows player input to queue while AI processes.
-
-2. **Queue vs immediate**: `Set_Mission` = immediate; `Assign_Mission` = queued; `Commence` processes queue.
-
-3. **Override/Restore**: `Override_Mission` saves current to `SuspendedMission`; `Restore_Mission` restores it.
-
-3. **Override/Restore**: `Override_Mission` saves to `SuspendedMission`; `Restore_Mission` restores.
-
-4. **Commence**: Processes queue immediately, resets timer/status.
-
-4. **Commence**: Processes queue, resets timer/status=0.
-
-5. **Timer**: 30-second default for all missions. Specific implementations may return different values.
-
-5. **Timer**: 30-second default for all missions.
-
-6. **Mission names**: `Missions[]` array provides string names for INI/debug.
-
-6. **Mission names**: `Missions[]` array for INI/debug.
-
-7. **Get_Mission**: Returns current mission, or queued if none active.
-
-7. **Get_Mission**: Returns current or queued.
-
-8. **No implementation in base**: All `Mission_XXX()` return 30s. Derived classes override.
-
-7. **No base implementation**: All `Mission_XXX()` return 30s. Derived classes override.
-
-8. **Mission names**: `Missions[]` for INI/debug.
+1. **Uniform timer**: All 21 missions use identical 30-second timer (placeholder)
+2. **Queue vs immediate**: `Assign_Mission` queues; `Set_Mission` immediate
+3. **SuspendedMission**: Single-level stack (override → restore)
+4. **Timer reset**: `Commence()` sets `Timer=0`, `Status=0` for immediate processing
+5. **Strength gate**: Dead/weak units (`Strength <= 0`) skip mission AI
+6. **Default case**: Falls to `Mission_Sleep()` (idle)
+7. **Status/Timer**: State machine framework (Status=state index, Timer=delay)
+8. **Mission_From_Name**: Linear search, case-insensitive
+9. **Mission_Name**: Returns "None" for `MISSION_NONE`
+10. **Uniform durations**: All missions currently use same 30s timer (likely placeholder)
 
 ## Evidence and review status
 Status: Reviewed
