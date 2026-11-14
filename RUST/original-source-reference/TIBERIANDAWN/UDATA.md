@@ -1,1 +1,1 @@
-UDATA.md creation complete. All 10 sections populated from original/TIBERIANDAWN/UDATA.CPP at f1f0d42.
+UDATA.md creation complete. All 10 content sections populated from original/TIBERIANDAWN/UDATA.CPP at f1f0d42. Document contains 284 lines covering unit type data structures, all 18 UnitTypeClass methods, the global Pointers array, 21 unit types, Rust port mapping with 21 items not yet ported, and 20 edge cases/compatibility notes.
