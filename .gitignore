@@ -1,17 +1,110 @@
+# Ignore everything by default
+*
 
-# Visual Studio files
-.vs/
+# Allow root directory and key documentation
+!README.md
+!LICENSE*
+!AGENTS.md
+!WORKFLOWS.md
+!codemap.md
+!.gitignore
+
+# Allow Rust source directory structure
+!RUST/
+!RUST/*.rs
+!RUST/**/*.rs
+!RUST/**/Cargo.toml
+!RUST/**/Cargo.lock
+!RUST/**/README.md
+!RUST/**/CHANGELOG.md
+!RUST/**/codemap.md
+!RUST/**/LICENSE*
+
+# Allow Python files we created (not auto-generated)
+!*.py
+!SCRIPTS/
+!SCRIPTS/**
+
+# Allow original C++ code directories
+!original/
+!original/REDALERT/
+!original/TIBERIANDAWN/
+!original/CnCTDRAMapEditor/
+!original/SCRIPTS/
+
+# Allow original C++ code files
+!original/**/*.cpp
+!original/**/*.CPP
+!original/**/*.c
+!original/**/*.h
+!original/**/*.H
+!original/**/*.hpp
+!original/**/*.hxx
+!original/**/*.rc
+!original/**/*.ico
+!original/**/*.cur
+
+# Allow original solution/project files
+!original/**/*.vcxproj
+!original/**/*.vcxproj.filters
+!original/**/*.sln
+
+# Allow original C# code files
+!original/CnCTDRAMapEditor/**/*.cs
+!original/CnCTDRAMapEditor/**/*.csproj
+!original/CnCTDRAMapEditor/**/*.sln
+!original/CnCTDRAMapEditor/**/*.config
+
+# Allow original documentation
+!original/**/README.md
+!original/**/LICENSE*
+!original/**/AGENTS.md
+
+# Allow RUST original-source-reference docs
+!RUST/original-source-reference/
+!RUST/original-source-reference/**
+
+# Still ignore build artifacts
+RUST/target/
+**/bin/
+**/obj/
+**/Debug/
+**/Release/
+**/x64/
+**/x86/
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.obj
+*.idb
+*.sbr
+*.suo
 *.user
-
-# Output object and binary folders
-[Dd]ebug/
-[Rr]elease/
-[Bb]in/
+*.aps
+*.ncb
+*.opensdf
+*.sdf
+*.vs/
 
 # Rust build artifacts
-RUST/target/
+**/Cargo.lock
 
-# Agent tooling scratch / caches (never source)
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Editor/IDE files
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Agent tooling scratch / caches
 .playwright-mcp/
 .graphflow-cache/
 graphflow-out/
@@ -19,18 +112,14 @@ graphflow-out/
 .omo/evidence/
 omo/sessions/
 
-# Editor swap files
-*.kate-swp
-*~
-
-# Local backups and release tarballs (large binaries, not redistributable)
+# Local backups and release tarballs
 backup/
 *.tar.gz
-
-# Python bytecode
-__pycache__/
-*.pyc
 
 # SQLite sidecar journals
 *.sqlite-shm
 *.sqlite-wal
+
+# OS files
+.DS_Store
+Thumbs.db

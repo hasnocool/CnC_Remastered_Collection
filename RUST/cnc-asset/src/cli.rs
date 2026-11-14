@@ -11,7 +11,8 @@ use cnc_asset::convert::{
 };
 use cnc_asset::{AtlasStyle, MixArchive, PalFile, SpriteAtlas};
 use std::fs;
-use std::path::PathBuf;
+#[allow(unused_imports)]
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "cnc-asset-cli")]
@@ -101,18 +102,45 @@ enum Commands {
         #[arg(long, default_value = "wav")]
         audio_format: String,
         /// Vorbis quality in [-0.2, 1.0] when --audio-format ogg is used.
-        #[arg(long, default_value_t = DEFAULT_OGG_QUALITY)]
         audio_quality: f32,
     },
-    /// Generate the built-in placeholder sprite atlas.
     GenerateAtlas {
         #[arg(short, long)]
         out: PathBuf,
         #[arg(short, long, default_value = "neon")]
         style: String,
     },
+    /// Fetch original C&C Remastered assets from Steam install to local store.
+    OriginalFetch {
+        /// Destination directory for the asset store (default: RUST/assets/original).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Game to fetch: td / tiberian-dawn / ra / red-alert (default: both).
+        #[arg(short, long)]
+        game: Option<String>,
+        /// Override Steam install path (default: auto-detect).
+        #[arg(long)]
+        steam_root: Option<PathBuf>,
+    },
+    /// Catalog original assets: list templates, icons, and generate previews.
+    OriginalCatalog {
+        /// Asset store root (default: CNC_ORIGINAL_ASSETS_DIR or RUST/assets/original).
+        #[arg(short, long)]
+        store: Option<PathBuf>,
+        /// Output directory for previews and catalog (default: store/previews).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Game to catalog: td / tiberian-dawn / ra / red-alert (default: both).
+        #[arg(short, long)]
+        game: Option<String>,
+        /// Theater to catalog (default: all for game).
+        #[arg(long)]
+        theater: Option<String>,
+        /// Only list templates; do not render previews.
+        #[arg(long)]
+        list_only: bool,
+    },
 }
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -161,6 +189,18 @@ fn main() -> Result<()> {
             audio_quality,
         ),
         Commands::GenerateAtlas { out, style } => cmd_generate_atlas(out, style),
+        Commands::OriginalFetch {
+            output,
+            game,
+            steam_root,
+        } => cmd_original_fetch(output, game, steam_root),
+        Commands::OriginalCatalog {
+            store,
+            output,
+            game,
+            theater,
+            list_only,
+        } => cmd_original_catalog(store, output, game, theater, list_only),
     }
 }
 
@@ -183,6 +223,170 @@ fn cmd_generate_atlas(out: PathBuf, style: String) -> Result<()> {
         atlas.frames.len(),
         out.display()
     );
+    Ok(())
+}
+fn cmd_original_fetch(
+    output: Option<PathBuf>,
+    game: Option<String>,
+    steam_root: Option<PathBuf>,
+) -> Result<()> {
+    use cnc_asset::{steam_install_root, Game};
+    use std::fs;
+
+    // Determine output directory
+    let out_dir = output
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/original"));
+
+    // Determine which games to fetch
+    let games: Vec<Game> = match game.as_deref() {
+        Some(g) => match g.to_lowercase().as_str() {
+            "td" | "tiberian-dawn" | "tiberian_dawn" => vec![Game::TiberianDawn],
+            "ra" | "red-alert" | "red_alert" => vec![Game::RedAlert],
+            _ => bail!(
+                "unknown game '{}' (expected td, tiberian-dawn, ra, red-alert)",
+                g
+            ),
+        },
+        None => vec![Game::TiberianDawn, Game::RedAlert],
+    };
+
+    // Determine Steam root
+    let steam_path = steam_root.or_else(steam_install_root).ok_or_else(|| {
+        anyhow::anyhow!("could not locate Steam install; use --steam-root to specify")
+    })?;
+
+    println!(
+        "Fetching original assets from {} to {}",
+        steam_path.display(),
+        out_dir.display()
+    );
+
+    for g in &games {
+        let meg_name = g.texture_meg();
+        let src = steam_path.join("Data").join(meg_name);
+        if !src.is_file() {
+            eprintln!("Warning: {} not found at {}", meg_name, src.display());
+            continue;
+        }
+
+        let dst = out_dir.join("Data").join(meg_name);
+        fs::create_dir_all(dst.parent().unwrap())?;
+        fs::copy(&src, &dst)
+            .with_context(|| format!("copying {} to {}", src.display(), dst.display()))?;
+        println!("  copied {} -> {}", meg_name, dst.display());
+    }
+
+    // Copy TD theater MIX files for MAP occupancy data
+    if games.contains(&Game::TiberianDawn) {
+        let td_cncddata = steam_path.join("Data/CNCDATA/TIBERIAN_DAWN");
+        for dir in ["CD1", "CD2", "CD3", "CONSOLE_1", "CONSOLE_2", "CUSTOMMAPS"] {
+            let src_dir = td_cncddata.join(dir);
+            if src_dir.is_dir() {
+                for entry in fs::read_dir(&src_dir)? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    let name = path.file_name().unwrap().to_string_lossy().to_string();
+                    if name.to_uppercase().ends_with(".MIX") {
+                        let dst = out_dir
+                            .join("Data/CNCDATA/TIBERIAN_DAWN")
+                            .join(dir)
+                            .join(&*entry.file_name().to_string_lossy());
+                        fs::create_dir_all(dst.parent().unwrap())?;
+                        fs::copy(&path, &dst).with_context(|| {
+                            format!("copying {} to {}", path.display(), dst.display())
+                        })?;
+                        println!("  copied {} -> {}", name, dst.display());
+                    }
+                }
+            }
+        }
+    }
+
+    // Write manifest.json
+    let manifest = serde_json::json!({
+        "source": "steam",
+        "steam_root": steam_path.to_string_lossy(),
+        "games": games.iter().map(|g| match g { Game::TiberianDawn => "tiberian_dawn", Game::RedAlert => "red_alert" }).collect::<Vec<_>>(),
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    });
+    let manifest_path = out_dir.join("manifest.json");
+    fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+    println!("wrote manifest to {}", manifest_path.display());
+
+    Ok(())
+}
+
+fn cmd_original_catalog(
+    store: Option<PathBuf>,
+    output: Option<PathBuf>,
+    game: Option<String>,
+    theater: Option<String>,
+    list_only: bool,
+) -> Result<()> {
+    use cnc_asset::{render_previews, Game, OriginalAssets, Theater};
+
+    // Determine store root
+    let store_root = store
+        .or_else(OriginalAssets::original_store_root)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "asset store not found; set CNC_ORIGINAL_ASSETS_DIR or run original-fetch first"
+            )
+        })?;
+
+    if !store_root.join("manifest.json").is_file() {
+        bail!(
+            "store root {} does not contain manifest.json",
+            store_root.display()
+        );
+    }
+
+    // Determine which games to catalog
+    let games: Vec<Game> = match game.as_deref() {
+        Some(g) => match g.to_lowercase().as_str() {
+            "td" | "tiberian-dawn" | "tiberian_dawn" => vec![Game::TiberianDawn],
+            "ra" | "red-alert" | "red_alert" => vec![Game::RedAlert],
+            _ => bail!(
+                "unknown game '{}' (expected td, tiberian-dawn, ra, red-alert)",
+                g
+            ),
+        },
+        None => vec![Game::TiberianDawn, Game::RedAlert],
+    };
+
+    // Determine theater filter
+    let _theater_filter: Option<Theater> = theater.as_deref().and_then(Theater::parse);
+
+    // If list_only, just print template info
+    if list_only {
+        for g in &games {
+            println!(
+                "=== {} ===",
+                match g {
+                    Game::TiberianDawn => "Tiberian Dawn",
+                    Game::RedAlert => "Red Alert",
+                }
+            );
+            let assets = OriginalAssets::open(&store_root, *g)?;
+            println!("  member count: {}", assets.member_count());
+            for name in assets.member_names() {
+                println!("    {}", name);
+            }
+        }
+        return Ok(());
+    }
+
+    // Render previews
+    let default_out_dir = store_root.join("previews");
+    let out_dir = output.as_deref().unwrap_or(&default_out_dir);
+    println!(
+        "Rendering previews from {} to {}",
+        store_root.display(),
+        out_dir.display()
+    );
+    render_previews(out_dir, &store_root)?;
+    println!("Done.");
+
     Ok(())
 }
 

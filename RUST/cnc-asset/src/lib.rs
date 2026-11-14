@@ -8,14 +8,17 @@ pub mod archive;
 pub mod atlas;
 pub mod audio;
 pub mod base64;
+pub mod classic_mix;
 pub mod classic_pack;
 pub mod convert;
 pub mod font;
 pub mod format80;
+pub mod iconset;
 pub mod megafile;
 pub mod original_assets;
 pub mod original_templates;
 pub mod palette;
+pub mod preview_rendering;
 pub mod ra_pack;
 pub mod registry;
 pub mod shape;
@@ -37,10 +40,17 @@ pub use archive::{MixArchive, MixEntry};
 pub use atlas::{AtlasStyle, SpriteAtlas, SpriteFrame};
 pub use audio::{AudFile, VocFile};
 pub use base64::{decode as base64_decode, encode as base64_encode};
+pub use classic_mix::{ClassicMixArchive, ClassicMixEntry};
 pub use convert::{BatchOptions, BatchReport, SpriteSheet};
 pub use font::{FontFile, FontGlyph, NO_DATA_OFFSET};
+pub use iconset::{load_td_theater, IconsetMap};
 pub use megafile::{Megafile, SubFileData};
+pub use original_assets::{
+    encode_dds_dxt5, index_shipped_archive, normalize_dds, steam_install_root,
+    write_shipped_archive, Game, OriginalAssets, Theater, MAX_MIP_LEVELS,
+};
 pub use palette::PalFile;
+pub use preview_rendering::render_previews;
 pub use registry::{AssetHandle, AssetRegistry, PreloadResult, PreloadTask, PreloadedAssets};
 pub use shape::{ShpFile, ShpFrame};
 pub use string_table::CsfFile;

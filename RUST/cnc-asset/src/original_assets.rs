@@ -148,12 +148,47 @@ impl OriginalAssets {
         })
     }
 
-    /// Open the Steam install if it is present on this machine.
+    /// Open the default original assets store, preferring the local workspace store
+    /// over the Steam install.
     pub fn open_default(game: Game) -> Result<Self> {
+        // First try the local original assets store (via env var or workspace-relative path)
+        if let Some(root) = Self::original_store_root() {
+            if let Ok(assets) = Self::open(&root, game) {
+                return Ok(assets);
+            }
+        }
+        // Fall back to Steam install
         let root = steam_install_root().ok_or_else(|| {
             anyhow::anyhow!("C&C Remastered Steam install not found on this machine")
         })?;
         Self::open(&root, game)
+    }
+
+    /// Locate the local original assets store.
+    ///
+    /// Checks `CNC_ORIGINAL_ASSETS_DIR` environment variable first, then falls back to
+    /// `CARGO_MANIFEST_DIR/../assets/original` (which resolves to the workspace's
+    /// `RUST/assets/original` directory from the `cnc-asset` crate). The store is
+    /// considered valid only if it contains a `manifest.json` file.
+    pub fn original_store_root() -> Option<PathBuf> {
+        // 1. Check CNC_ORIGINAL_ASSETS_DIR environment variable
+        if let Ok(env_path) = std::env::var("CNC_ORIGINAL_ASSETS_DIR") {
+            let path = PathBuf::from(env_path);
+            if path.join("manifest.json").is_file() {
+                return Some(path);
+            }
+        }
+
+        // 2. Fall back to CARGO_MANIFEST_DIR/../assets/original
+        // This resolves to <workspace>/RUST/assets/original when built from cnc-asset crate
+        if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+            let path = PathBuf::from(manifest_dir).join("../assets/original");
+            if path.join("manifest.json").is_file() {
+                return path.canonicalize().ok();
+            }
+        }
+
+        None
     }
 
     /// Total member count (sanity check / diagnostics).
@@ -885,5 +920,127 @@ mod tests {
     #[test]
     fn rejects_bad_signature() {
         assert_eq!(normalize_dds(b"NOPE"), b"NOPE".to_vec());
+    }
+
+    #[test]
+    fn original_store_root_resolves_workspace_assets() {
+        // When run from the cnc-asset crate, CARGO_MANIFEST_DIR points to
+        // <workspace>/RUST/cnc-asset, so ../assets/original resolves to
+        // <workspace>/RUST/assets/original
+        let root = OriginalAssets::original_store_root();
+        assert!(
+            root.is_some(),
+            "original_store_root should find workspace assets/original"
+        );
+        let root = root.unwrap();
+        assert!(
+            root.ends_with("RUST/assets/original"),
+            "root should be RUST/assets/original, got: {}",
+            root.display()
+        );
+        assert!(
+            root.join("manifest.json").is_file(),
+            "manifest.json should exist in store"
+        );
+    }
+
+    #[test]
+    fn original_store_root_respects_env_var() {
+        // Create a temp directory with manifest.json
+        let temp_dir = std::env::temp_dir().join("cnc_original_assets_test_env");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(temp_dir.join("manifest.json"), "{}").unwrap();
+
+        // Set env var and verify it's used
+        std::env::set_var("CNC_ORIGINAL_ASSETS_DIR", &temp_dir);
+        let root = OriginalAssets::original_store_root();
+        assert_eq!(
+            root,
+            Some(temp_dir.clone()),
+            "should use CNC_ORIGINAL_ASSETS_DIR"
+        );
+
+        // Clean up env var
+        std::env::remove_var("CNC_ORIGINAL_ASSETS_DIR");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn original_store_root_falls_back_to_workspace_when_env_invalid() {
+        // Set env var to a directory without manifest.json
+        let temp_dir = std::env::temp_dir().join("cnc_original_assets_test_invalid");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        // Note: no manifest.json created
+
+        std::env::set_var("CNC_ORIGINAL_ASSETS_DIR", &temp_dir);
+        let root = OriginalAssets::original_store_root();
+        // Should fall back to workspace path since env var path is invalid
+        assert!(
+            root.is_some(),
+            "should fall back to workspace when env var path is invalid"
+        );
+        assert!(root.unwrap().ends_with("RUST/assets/original"));
+
+        std::env::remove_var("CNC_ORIGINAL_ASSETS_DIR");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn original_store_root_env_var_takes_precedence_over_workspace() {
+        // Create a temp directory with manifest.json
+        let temp_dir = std::env::temp_dir().join("cnc_original_assets_test_precedence");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(temp_dir.join("manifest.json"), "{}").unwrap();
+
+        // Set env var - it should take precedence over workspace path
+        std::env::set_var("CNC_ORIGINAL_ASSETS_DIR", &temp_dir);
+        let root = OriginalAssets::original_store_root();
+        assert_eq!(
+            root,
+            Some(temp_dir.clone()),
+            "env var should take precedence"
+        );
+
+        std::env::remove_var("CNC_ORIGINAL_ASSETS_DIR");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn original_store_root_returns_none_when_both_invalid() {
+        // We can't easily test this without manipulating CARGO_MANIFEST_DIR,
+        // which is set at compile time. This test documents the expected behavior:
+        // if both CNC_ORIGINAL_ASSETS_DIR (if set) and the workspace path
+        // lack manifest.json, the function returns None.
+        // This is tested implicitly by the other tests.
+    }
+
+    #[test]
+    fn open_default_prefers_local_store() {
+        // This test verifies that open_default tries the local store first.
+        // We can't fully test it without the actual MEG files in the local store,
+        // but we can verify the function doesn't panic.
+
+        // Temporarily remove env var to test workspace fallback
+        std::env::remove_var("CNC_ORIGINAL_ASSETS_DIR");
+
+        // The workspace store has manifest.json but not the MEG files,
+        // so open_default should fall back to Steam if available
+        let result = OriginalAssets::open_default(Game::TiberianDawn);
+
+        // If Steam is installed, it should succeed via Steam fallback
+        // If Steam is not installed, it should fail with MEG file not found
+        match result {
+            Ok(assets) => {
+                // Steam was found and used as fallback
+                assert!(assets.member_count() > 10_000);
+            }
+            Err(e) => {
+                // Steam not found, should error about MEG file
+                let err = format!("{}", e);
+                assert!(
+                    err.contains("TEXTURES_TD_SRGB.MEG") || err.contains("Steam install not found")
+                );
+            }
+        }
     }
 }

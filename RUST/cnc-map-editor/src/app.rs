@@ -5271,15 +5271,13 @@ fn draw_button(renderer: &mut dyn Renderer, rect: RectF, label: &str, hovered: b
     );
     let size = fit_size(label, 8.0, (rect.w - 6.0).max(0.0));
     let tw = text_w(label, size);
-    let th = text_h(size);
-    // Truly centered: (rect.x + 1.0) is only a safety net for a label that
-    // does not fit even at the minimum font size.
+    // Use glyph height for vertical centering (bitmap font glyph is 8px = size)
     let centered = (rect.x + (rect.w - tw) * 0.5).max(rect.x + 1.0);
     text_sized(
         renderer,
         label,
         centered,
-        rect.y + rect.h * 0.5 - th * 0.5,
+        rect.y + rect.h * 0.5 - size * 0.5,
         size,
         [0.88, 0.92, 0.98, 1.0],
     );
@@ -5324,14 +5322,13 @@ fn draw_object_button(
     }
     let size = fit_size(label, 8.0, (rect.w - 14.0).max(0.0));
     let tw = text_w(label, size);
-    let th = text_h(size);
-    // Centered in the space right of the category glyph.
+    // Use glyph height for vertical centering (bitmap font glyph is 8px = size)
     let centered = (rect.x + 16.0 + (rect.w - 14.0 - tw) * 0.5).max(rect.x + 16.0);
     text_sized(
         renderer,
         label,
         centered,
-        rect.y + rect.h * 0.5 - th * 0.5,
+        rect.y + rect.h * 0.5 - size * 0.5,
         size,
         [0.88, 0.92, 0.98, 1.0],
     );
@@ -5381,7 +5378,6 @@ fn draw_field(renderer: &mut dyn Renderer, rect: RectF, value: &str, focused: bo
     renderer.draw_rect(rect.x, rect.y, rect.w, 1.0, [0.30, 0.42, 0.55, 1.0]);
     let size = fit_size(value, 8.0, (rect.w - 8.0).max(0.0));
     let tw = text_w(value, size);
-    let th = text_h(size);
     // Center short numeric values (seed, map width/height); free-form text
     // (paths, search queries, trigger fields) stays left aligned.
     let centered = !value.is_empty() && value.chars().all(|c| c.is_ascii_digit());
@@ -5390,11 +5386,12 @@ fn draw_field(renderer: &mut dyn Renderer, rect: RectF, value: &str, focused: bo
     } else {
         rect.x + 4.0
     };
+    // Use glyph height for vertical centering (bitmap font glyph is 8px = size)
     text_sized(
         renderer,
         value,
         x,
-        rect.y + rect.h * 0.5 - th * 0.5,
+        rect.y + rect.h * 0.5 - size * 0.5,
         size,
         [0.92, 0.94, 0.98, 1.0],
     );
@@ -5422,6 +5419,7 @@ fn text_w(text: &str, size: f32) -> f32 {
 }
 
 /// Line height for `size`-pixel font (bitmap font: size * 11 / 8).
+/// Use this for multi-line spacing.
 fn text_h(size: f32) -> f32 {
     size * 11.0 / 8.0
 }

@@ -11,3 +11,4 @@ All notable changes to this crate will be documented here following [Keep a Chan
 - `tiles.rs` terrain mapping: transition/shore/cliff rows, elevation-based cliff drops and new terrain families
 - Road/wall overlay auto-connect (`road_family`/`wall_family` bitmask arms) plus tree/flag/FX sprite placement
 - Sidebar palette compaction (terrain three-column, overlay a single row of six chips)
+- New map reconstruction test: original-asset-driven map reconstruction validates the editor's tile picks against the shipped original asset store (TILE.H land-mask geometry gates, straight-coast classification, shore arc generation) through the headless `tileset_render` harness and the original map import path.

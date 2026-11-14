@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "active_work_id": "parity-100-001",
+  "active_work_id": "original-asset-pipeline-001",
   "works": {
     "parity-100-001": {
       "work_id": "parity-100-001",
@@ -9,7 +9,7 @@
       "session_ids": [
         "codex:main"
       ],
-      "status": "active",
+      "status": "paused",
       "worktree_path": null
     },
     "cnc-rust-clone-001": {
@@ -20,6 +20,16 @@
         "codex:main"
       ],
       "status": "completed",
+      "worktree_path": null
+    },
+    "original-asset-pipeline-001": {
+      "work_id": "original-asset-pipeline-001",
+      "active_plan": ".omo/plans/original-asset-pipeline.md",
+      "plan_name": "original-asset-pipeline",
+      "session_ids": [
+        "codex:main"
+      ],
+      "status": "active",
       "worktree_path": null
     }
   }
