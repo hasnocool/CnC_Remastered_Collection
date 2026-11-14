@@ -16,6 +16,7 @@ This directory explains the original Electronic Arts / Westwood Command & Conque
 9. [Cross-reference: original files to Rust port](03-rust-port-cross-reference.md)
 10. [Implemented Rust functionality and evidence](IMPLEMENTED_FUNCTIONALITY_MAP.md)
 11. [Original functionality and current port gaps](ORIGINAL_FUNCTIONALITY_MAP.md)
+12. [Function catalog and language-neutral porting contracts](FUNCTION_CATALOG/README.md)
 
 ## What each file guide contains
 
