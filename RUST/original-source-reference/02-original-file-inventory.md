@@ -6,6 +6,8 @@ Total tracked files: **1331**
 
 This is the complete path inventory at the pinned commit. A path being listed does not mean its behavior has been fully documented. File-level pages are marked reviewed only after the source has been inspected. Generated/resource/project files are catalogued separately from executable source.
 
+For callable-symbol enumeration and the language-neutral behavior each function must preserve when ported, see the [Function and Porting Contract Catalog](FUNCTION_CATALOG/README.md). Its pinned manifest covers every tracked path; its Universal Ctags symbol indexes must be generated from the matching source checkout, and extracted signatures remain unreviewed until the behavior contract is completed.
+
 ## Documentation status key
 
 - `Reviewed`: source inspected and plain-English behavior documented.
