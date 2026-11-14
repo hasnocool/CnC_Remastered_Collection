@@ -29,7 +29,7 @@ GROUPS = ("REDALERT", "TIBERIANDAWN", "MAP_EDITOR", "SCRIPTS_AND_TOOLS")
 FUNCTION_KINDS = {
     "C++": {"function", "prototype", "f", "p"},
     "C#": {"method", "property", "event", "delegate", "m", "p", "e"},
-    "Python": {"function", "method", "f", "m"},
+    "Python": {"function", "method", "member", "f", "m"},
     "Asm": {"function", "procedure", "proc", "entry", "f"},
 }
 MACRO_KINDS = {"macro", "d"}
@@ -156,9 +156,9 @@ async def extract_tags(
         "--fields=+nKSa",
         "--fields=+s",
         "--fields=+l",
-        "--extras=+q",
         "--sort=no",
         "--languages=C++,C#,Asm,Python",
+        "--map-Asm=+.inc",
         "-f",
         "-",
         *source_paths,
@@ -227,6 +227,7 @@ def build_outputs(
             "kind": str(tag.get("kind", "unknown")),
             "category": category,
             "scope": tag.get("scope", ""),
+            "scope_kind": tag.get("scopeKind", ""),
             "signature": tag.get("signature", ""),
             "line": int(tag.get("line", 0) or 0),
             "access": tag.get("access", ""),
@@ -447,19 +448,20 @@ async def async_main() -> int:
         for row in rows
         if row["inventory_role"] == "callable-source-or-assembly"
     ]
+    manifest_paths = [normalize_path(row["source_path"]) for row in rows]
     missing = [
-        path for path in candidates
+        path for path in manifest_paths
         if not (source_root / Path(path)).is_file()
     ]
     print(f"Manifest files: {len(rows)}")
     print(f"Callable-source/assembly candidates: {len(candidates)}")
-    print(f"Missing callable-source files: {len(missing)}")
+    print(f"Missing pinned manifest files: {len(missing)}")
     for path in missing[:40]:
         print(f"  MISSING: {path}")
 
     if missing and not args.allow_missing:
         print(
-            "Refusing to generate an incomplete symbol catalog; use "
+            "Refusing to generate an incomplete catalog; use "
             "--allow-missing only for a deliberate partial run.",
             file=sys.stderr,
         )
