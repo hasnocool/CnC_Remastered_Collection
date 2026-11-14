@@ -99,6 +99,17 @@ def group_for(row: dict[str, str]) -> str:
     return group if group in GROUPS else "SCRIPTS_AND_TOOLS"
 
 
+def normalize_tag_path(value: str, source_root: Path) -> str:
+    raw = value.replace("\\", "/")
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        try:
+            return candidate.resolve().relative_to(source_root.resolve()).as_posix()
+        except ValueError:
+            return candidate.as_posix()
+    return normalize_path(raw)
+
+
 def markdown_cell(value: Any) -> str:
     text = "" if value is None else str(value)
     return text.replace("|", r"\|").replace("\r", " ").replace("\n", " ")
@@ -211,7 +222,7 @@ def build_outputs(
     symbols: list[dict[str, Any]] = []
 
     for tag in tags:
-        raw_path = normalize_path(str(tag.get("path", "")))
+        raw_path = normalize_tag_path(str(tag.get("path", "")), source_root)
         if raw_path not in manifest_by_path:
             continue
         row = manifest_by_path[raw_path]
